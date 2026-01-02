@@ -16,9 +16,9 @@ from src.core.geometry import GeometryProcessor
 from src.core.observability import tracer
 from src.core.schemas import (
     FileAnalysisFailedEvent,
-    FileAnalysisFailedPayload,
+    FileAnalysisFailedMessage,
     FileAnalyzedEvent,
-    FileAnalyzedPayload,
+    FileAnalyzedMessage,
     FileUploadedEvent,
 )
 from src.infrastructure.storage import IStorageService
@@ -50,7 +50,7 @@ class UploadConsumer:
         self.exchange = cast(
             aio_pika.abc.AbstractRobustExchange,
             await self.channel.declare_exchange(
-                "geometry-service-events", type="topic", durable=True
+                "maliev.events", type="topic", durable=True
             ),
         )
 
@@ -61,6 +61,8 @@ class UploadConsumer:
     ) -> None:
         if self.exchange is None:
             raise RuntimeError("Exchange not initialized")
+
+        # model_dump_json(by_alias=True) ensures camelCase for MassTransit
         message_body = event.model_dump_json(by_alias=True).encode()
         await self.exchange.publish(
             aio_pika.Message(
@@ -79,19 +81,23 @@ class UploadConsumer:
                 try:
                     body = json.loads(message.body.decode())
                     event = FileUploadedEvent.model_validate(body)
-                    payload = event.payload
+                    inner_msg = event.message
 
-                    span.set_attribute("file_id", str(payload.file_id))
-                    logger.info(f"Processing file {payload.file_id}")
+                    file_id = inner_msg.file_id or inner_msg.upload_id
+                    span.set_attribute("file_id", str(file_id))
+                    logger.info(f"Processing file {file_id}")
 
-                    # 1. Download file with retry logic (T3-003)
-                    file_stream = await self.download_with_retry(payload.download_url)
+                    # 1. Download file with retry logic
+                    if not inner_msg.download_url:
+                        raise ValueError("MISSING_DOWNLOAD_URL")
+
+                    file_stream = await self.download_with_retry(inner_msg.download_url)
 
                     if file_stream is None:
                         raise RuntimeError("Failed to download file")
 
                     try:
-                        # 2. Enforce file size limit (T3-008)
+                        # 2. Enforce file size limit
                         file_stream.seek(0, os.SEEK_END)
                         size_mb = file_stream.tell() / (1024 * 1024)
                         if size_mb > settings.MAX_FILE_SIZE_MB:
@@ -99,8 +105,8 @@ class UploadConsumer:
 
                         file_stream.seek(0)
 
-                        # 3. Analyze geometry (T3-007, T3-006)
-                        file_ext = Path(payload.storage_key).suffix.lower()
+                        # 3. Analyze geometry
+                        file_ext = Path(inner_msg.storage_path).suffix.lower()
                         metrics = await self.geometry_processor.analyze_async(
                             file_stream, file_ext
                         )
@@ -109,14 +115,20 @@ class UploadConsumer:
                         success_event = FileAnalyzedEvent(
                             messageId=uuid4(),
                             correlationId=event.correlation_id,
-                            payload=FileAnalyzedPayload(
-                                fileId=payload.file_id,
+                            messageType=[
+                                "urn:message:Maliev.GeometryService.Api.Events:FileAnalyzedEvent"
+                            ],
+                            message=FileAnalyzedMessage(
+                                fileId=file_id,
                                 metrics=metrics,
                                 processedAt=datetime.now(UTC),
                             ),
                         )
-                        await self.publish_event(success_event, "file.analyzed")
-                        logger.info(f"Successfully analyzed file {payload.file_id}")
+                        await self.publish_event(
+                            success_event,
+                            "maliev.geometryservice.v1.analysis.completed",
+                        )
+                        logger.info(f"Successfully analyzed file {file_id}")
 
                     finally:
                         file_stream.close()
@@ -132,18 +144,18 @@ class UploadConsumer:
                         error_code = "FILE_CORRUPT"
 
                     await self.publish_failure(
-                        event.correlation_id, payload.file_id, error_code, str(e)
+                        event.correlation_id, file_id, error_code, str(e)
                     )
                 except Exception as e:
-                    logger.error(f"Error processing {payload.file_id}: {e}")
+                    logger.error(f"Error processing {file_id}: {e}")
                     await self.publish_failure(
-                        event.correlation_id, payload.file_id, "SYSTEM_ERROR", str(e)
+                        event.correlation_id, file_id, "SYSTEM_ERROR", str(e)
                     )
 
     async def download_with_retry(
         self, url: str, attempts: int = 3
     ) -> io.BytesIO | None:
-        """Implements 3-attempt retry logic with exponential backoff (T3-003)."""
+        """Implements 3-attempt retry logic with exponential backoff."""
         for i in range(attempts):
             try:
                 return await self.storage_service.download_file(url)
@@ -159,20 +171,34 @@ class UploadConsumer:
         return None
 
     async def publish_failure(
-        self, correlation_id: UUID, file_id: UUID, error_code: str, details: str
+        self, correlation_id: UUID | None, file_id: str, error_code: str, details: str
     ) -> None:
         failure_event = FileAnalysisFailedEvent(
             messageId=uuid4(),
             correlationId=correlation_id,
-            payload=FileAnalysisFailedPayload(
+            messageType=[
+                "urn:message:Maliev.GeometryService.Api.Events:FileAnalysisFailedEvent"
+            ],
+            message=FileAnalysisFailedMessage(
                 fileId=file_id, errorCode=error_code, details=details
             ),
         )
-        await self.publish_event(failure_event, "file.analysis.failed")
+        await self.publish_event(
+            failure_event, "maliev.geometryservice.v1.analysis.failed"
+        )
 
     async def start(self) -> None:
         await self.connect()
         if self.queue is None:
             raise RuntimeError("Queue not initialized")
+
+        # Bind queue to the upload service event
+        if self.exchange is None:
+            raise RuntimeError("Exchange not initialized")
+
+        await self.queue.bind(
+            self.exchange, routing_key="maliev.uploadservice.v1.upload.completed"
+        )
+
         await self.queue.consume(self.process_message)
         logger.info("Consumer started and waiting for messages...")

@@ -7,7 +7,7 @@ import pytest
 
 from src.consumers.upload_consumer import UploadConsumer
 from src.core.geometry import BoundingBox, GeometryMetrics
-from src.core.schemas import FileUploadedEvent, FileUploadedPayload
+from src.core.schemas import FileUploadedEvent, UploadCompletedMessage
 
 
 @pytest.fixture
@@ -29,16 +29,28 @@ def consumer(mock_storage, mock_processor):
 async def test_process_message_success(consumer, mock_storage, mock_processor):
     # Setup
     correlation_id = uuid4()
-    file_id = uuid4()
-    payload = FileUploadedPayload(
+    file_id = str(uuid4())
+    upload_id = str(uuid4())
+
+    inner_msg = UploadCompletedMessage(
+        uploadId=upload_id,
         fileId=file_id,
-        storageBucket="test",
-        storageKey="test.stl",
+        serviceId="test-service",
+        fileName="test.stl",
+        storagePath="test/test.stl",
+        downloadUrl="http://signed-url",
         contentType="model/stl",
+        fileSize=1024,
         uploadedAt=datetime.now(UTC),
     )
+
     event = FileUploadedEvent(
-        messageId=uuid4(), correlationId=correlation_id, payload=payload
+        messageId=uuid4(),
+        correlationId=correlation_id,
+        message=inner_msg,
+        messageType=[
+            "urn:message:Maliev.UploadService.Api.Events:UploadCompletedEvent"
+        ],
     )
 
     message = MagicMock()
@@ -64,27 +76,32 @@ async def test_process_message_success(consumer, mock_storage, mock_processor):
     # Assert
     assert consumer.publish_event.called
     routing_key = consumer.publish_event.call_args[0][1]
-    assert routing_key == "file.analyzed"
+    assert routing_key == "maliev.geometryservice.v1.analysis.completed"
     success_event = consumer.publish_event.call_args[0][0]
     assert success_event.correlation_id == correlation_id
-    assert success_event.payload.metrics.volume_cm3 == 1.0
+    assert success_event.message.metrics.volume_cm3 == 1.0
 
 
 @pytest.mark.asyncio
 async def test_process_message_failure(consumer, mock_storage):
     # Setup
-    file_id = uuid4()
-    payload = FileUploadedPayload(
-        fileId=file_id,
-        storageBucket="test",
-        storageKey="test.stl",
+    inner_msg = UploadCompletedMessage(
+        uploadId=str(uuid4()),
+        serviceId="test-service",
+        fileName="test.stl",
+        storagePath="test/test.stl",
+        downloadUrl="http://signed-url",
         contentType="model/stl",
+        fileSize=1024,
         uploadedAt=datetime.now(UTC),
     )
-    event = FileUploadedEvent(messageId=uuid4(), correlationId=uuid4(), payload=payload)
+    event = FileUploadedEvent(
+        messageId=uuid4(), correlationId=uuid4(), message=inner_msg
+    )
 
     message = MagicMock()
     message.body = event.model_dump_json(by_alias=True).encode()
+    message.process.return_value.__aenter__ = AsyncMock()
 
     mock_storage.download_file.side_effect = Exception("Download failed")
     consumer.publish_event = AsyncMock()
@@ -95,4 +112,4 @@ async def test_process_message_failure(consumer, mock_storage):
     # Assert
     assert consumer.publish_event.called
     routing_key = consumer.publish_event.call_args[0][1]
-    assert routing_key == "file.analysis.failed"
+    assert routing_key == "maliev.geometryservice.v1.analysis.failed"
