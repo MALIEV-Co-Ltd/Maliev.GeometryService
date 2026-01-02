@@ -1,0 +1,23 @@
+# .dockerignore
+**/.git
+**/.gitignore
+**/.vscode
+**/.idea
+**/__pycache__
+**/*.pyc
+**/*.pyo
+**/*.pyd
+**/.pytest_cache
+**/.mypy_cache
+**/.ruff_cache
+**/.venv
+**/venv
+**/env
+**/dist
+**/build
+**/*.egg-info
+.env
+Dockerfile
+docker-compose.yml
+README.md
+specs/

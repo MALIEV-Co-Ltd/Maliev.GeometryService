@@ -1,0 +1,101 @@
+name: CI - Develop
+
+on:
+  push:
+    branches:
+      - develop
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Poetry
+        uses: snok/install-poetry@v1
+        with:
+          virtualenvs-create: true
+          virtualenvs-in-project: true
+
+      - name: Install dependencies
+        run: poetry install
+
+      - name: Run tests
+        run: poetry run pytest
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v3
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Set up Google Cloud SDK
+        uses: google-github-actions/setup-gcloud@v3
+        with:
+          project_id: maliev-website
+
+      - name: Build and push Docker image
+        run: |
+          gcloud auth configure-docker asia-southeast1-docker.pkg.dev
+          docker build \
+            -t asia-southeast1-docker.pkg.dev/maliev-website/maliev-website-artifact-dev/maliev-geometry-service:${{ github.sha }} -f Dockerfile .
+          docker push asia-southeast1-docker.pkg.dev/maliev-website/maliev-website-artifact-dev/maliev-geometry-service:${{ github.sha }}
+
+      - name: Checkout maliev-gitops repository
+        uses: actions/checkout@v5
+        with:
+          repository: MALIEV-Co-Ltd/maliev-gitops
+          token: ${{ secrets.GITOPS_PAT }}
+          path: maliev-gitops
+
+      - name: Install Kustomize
+        run: |
+          curl -s "https://raw.githubusercontent.com/kubernetes-sigs/kustomize/master/hack/install_kustomize.sh" | bash
+          sudo mv kustomize /usr/local/bin/
+
+      - name: Update image tag in maliev-gitops using Kustomize
+        run: |
+          cd maliev-gitops/3-apps/maliev-geometry-service/overlays/development
+          kustomize edit set image asia-southeast1-docker.pkg.dev/maliev-website/maliev-website-artifact/maliev-geometry-service=asia-southeast1-docker.pkg.dev/maliev-website/maliev-website-artifact-dev/maliev-geometry-service:${{ github.sha }}
+
+      - name: Create Pull Request
+        env:
+          GH_TOKEN: ${{ secrets.GITOPS_PAT }}
+          PR_BODY: |
+            Automated deployment of geometry-service to development environment.
+
+            Commit: ${{ github.sha }}
+            Triggered by: ${{ github.actor }}
+            Workflow: ${{ github.workflow }}
+        run: |
+          cd maliev-gitops
+          git config --global user.name 'github-actions[bot]'
+          git config --global user.email 'github-actions[bot]@users.noreply.github.com'
+
+          # Create a new branch for this update
+          BRANCH_NAME="geometry-service/dev-${{ github.sha }}"
+          git checkout -b $BRANCH_NAME
+
+          # Commit and push changes to the new branch
+          git add .
+          if git diff --staged --quiet; then
+            echo "No changes to commit"
+            exit 0
+          fi
+
+          git commit -m "Update geometry-service image to ${{ github.sha }}"
+          git push origin $BRANCH_NAME
+
+          # Create pull request using GitHub CLI
+          gh pr create \
+            --title "Deploy geometry-service ${{ github.sha }} to development" \
+            --body "$PR_BODY" \
+            --base main \
+            --head $BRANCH_NAME \
+            --repo MALIEV-Co-Ltd/maliev-gitops

@@ -1,0 +1,56 @@
+[tool.poetry]
+name = "geometry-service"
+version = "0.1.0"
+description = "Maliev Geometry Analysis Service"
+authors = ["Maliev Co Ltd"]
+readme = "README.md"
+packages = [{include = "src"}]
+
+[tool.poetry.dependencies]
+python = "^3.11"
+fastapi = "^0.115.14"
+uvicorn = {extras = ["standard"], version = "^0.34.3"}
+scalar-fastapi = "^1.5.0"
+trimesh = {extras = ["all"], version = "^4.10.1"}
+numpy = "^2.4.0"
+scipy = "^1.16.3"
+aio-pika = "^9.5.8"
+pydantic = "^2.12.5"
+pydantic-settings = "^2.12.0"
+opentelemetry-api = "^1.29.0"
+opentelemetry-sdk = "^1.29.0"
+opentelemetry-instrumentation-fastapi = "^0.50b0"
+meshio = "*"
+aiofiles = "^25.1.0"
+httpx = "^0.28.1"
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^8.4.2"
+pytest-asyncio = "^0.25.3"
+mypy = "^1.19.1"
+ruff = "^0.8.6"
+black = "^24.10.0"
+types-aiofiles = "^25.1.0.20251011"
+pre-commit = "^4.5.1"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.ruff]
+line-length = 88
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "UP", "B", "A", "C4", "SIM", "ARG", "PTH", "RET"]
+ignore = []
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+ignore_missing_imports = true
+exclude = ["tests"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]

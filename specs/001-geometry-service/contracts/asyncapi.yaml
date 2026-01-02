@@ -1,0 +1,115 @@
+asyncapi: '3.0.0'
+info:
+  title: Geometry Analysis Service Events
+  version: 1.0.0
+  description: Event-driven interface for 3D geometry analysis.
+
+channels:
+  upload.service.events:
+    address: upload-service-events
+    messages:
+      FileUploadedEvent:
+        $ref: '#/components/messages/FileUploadedEvent'
+
+  geometry.service.events:
+    address: geometry-service-events
+    messages:
+      FileAnalyzedEvent:
+        $ref: '#/components/messages/FileAnalyzedEvent'
+      FileAnalysisFailedEvent:
+        $ref: '#/components/messages/FileAnalysisFailedEvent'
+
+components:
+  messages:
+    FileUploadedEvent:
+      payload:
+        type: object
+        required: [messageId, correlationId, payload]
+        properties:
+          messageId:
+            type: string
+            format: uuid
+          correlationId:
+            type: string
+            format: uuid
+          payload:
+            type: object
+            required: [fileId, storageBucket, storageKey]
+            properties:
+              fileId:
+                type: string
+                format: uuid
+              storageBucket:
+                type: string
+              storageKey:
+                type: string
+              contentType:
+                type: string
+              uploadedAt:
+                type: string
+                format: date-time
+
+    FileAnalyzedEvent:
+      payload:
+        type: object
+        required: [messageId, correlationId, payload]
+        properties:
+          messageId:
+            type: string
+            format: uuid
+          correlationId:
+            type: string
+            format: uuid
+          payload:
+            type: object
+            required: [fileId, metrics]
+            properties:
+              fileId:
+                type: string
+                format: uuid
+              metrics:
+                type: object
+                properties:
+                  volumeCm3:
+                    type: number
+                  surfaceAreaCm2:
+                    type: number
+                  boundingBox:
+                    type: object
+                    properties:
+                      x: { type: number }
+                      y: { type: number }
+                      z: { type: number }
+                  isManifold:
+                    type: boolean
+                  eulerNumber:
+                    type: integer
+                  triangleCount:
+                    type: integer
+              processedAt:
+                type: string
+                format: date-time
+
+    FileAnalysisFailedEvent:
+      payload:
+        type: object
+        required: [messageId, correlationId, payload]
+        properties:
+          messageId:
+            type: string
+            format: uuid
+          correlationId:
+            type: string
+            format: uuid
+          payload:
+            type: object
+            required: [fileId, errorCode]
+            properties:
+              fileId:
+                type: string
+                format: uuid
+              errorCode:
+                type: string
+                enum: [GEOMETRY_NON_MANIFOLD, FILE_CORRUPT, SIZE_LIMIT_EXCEEDED, TIMEOUT, MULTI_BODY_ERROR]
+              details:
+                type: string
