@@ -37,15 +37,18 @@ class GeometryProcessor:
         try:
             # Reset stream position just in case
             file_stream.seek(0)
+            ext = file_extension.strip(".").lower()
 
-            mesh_data = trimesh.load(
-                file_stream, file_type=file_extension.strip("."), force="mesh"
-            )
+            # Load mesh using trimesh (uses available backends like gmsh,
+            # cascadeno, etc.)
+            mesh_data = trimesh.load(file_stream, file_type=ext, force="mesh")
 
             if isinstance(mesh_data, trimesh.Scene):
                 # Requirement FR-003.1: Reject files containing multiple disjoint bodies
                 if len(mesh_data.geometry) > 1:
                     raise ValueError("MULTI_BODY_ERROR")
+                if not mesh_data.geometry:
+                    raise ValueError("EMPTY_FILE_ERROR")
                 # Get the first (and only) geometry
                 mesh = list(mesh_data.geometry.values())[0]
             else:
@@ -72,12 +75,17 @@ class GeometryProcessor:
 
             euler_number = int(mesh.euler_number)
             extents = mesh.extents
-            bbox = BoundingBox(
-                x=float(extents[0]), y=float(extents[1]), z=float(extents[2])
-            )
+            if extents is None:
+                # Fallback if extents are not available (e.g. empty or corrupt mesh)
+                bbox = BoundingBox(x=0.0, y=0.0, z=0.0)
+                vol_bbox = 0.0
+            else:
+                bbox = BoundingBox(
+                    x=float(extents[0]), y=float(extents[1]), z=float(extents[2])
+                )
+                vol_bbox = float(extents[0]) * float(extents[1]) * float(extents[2])
 
             # Support Volume Estimation (Bounding box approximation Z-up)
-            vol_bbox = float(extents[0]) * float(extents[1]) * float(extents[2])
             support_mm3 = max(0.0, vol_bbox - volume_mm3)
 
             return GeometryMetrics(

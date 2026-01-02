@@ -34,7 +34,7 @@ Python: Follow PEP 8, strict typing (mypy), and ruff linting.
 
 ## Recent Changes
 
-- 001-geometry-service: Initial setup with Python 3.11, trimesh, and aio-pika.
+- 001-geometry-service: Initial setup with Python 3.11, trimesh, and aio-pika. Added support for 3MF, STEP (.step, .stp), and IGES (.igs, .iges) file formats.
 
 <!-- MANUAL ADDITIONS START -->
 <!-- MANUAL ADDITIONS END -->

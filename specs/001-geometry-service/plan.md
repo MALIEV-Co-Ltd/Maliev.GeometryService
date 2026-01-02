@@ -8,9 +8,9 @@
 - **Web Framework:** FastAPI (For Health Checks, Metrics, and Scalar Documentation)
 - **Documentation:** `scalar-fastapi` (Accessible at `/geometry/scalar`)
 - **Route Prefix:** All endpoints must be served under `/geometry` (e.g., `/geometry/liveness`).
-- **Geometry Kernel:** `trimesh` (with `numpy` and `scipy` accelerated backends).
-  - *Note:* For STEP support, include `gmsh` or `meshio` dependencies to facilitate BREP-to-Mesh tessellation.
-- **Messaging:** `aio-pika` (Async RabbitMQ client)
+    - `trimesh[all]` (Geometry Kernel)
+    - `meshio` (Fallback for IGES/3MF)
+    - `aio-pika` (RabbitMQ)
 - **Validation:** `Pydantic` v2
 - **Storage Client:** `minio` or `google-cloud-storage` (Abstracted via `IStorageService`)
 - **Testing:** `pytest` + `pytest-asyncio`
@@ -84,7 +84,10 @@ sequenceDiagram
 - `GeometryProcessor` class.
 - Method `analyze_stream(file_stream: BytesIO, file_extension: str) -> GeometryMetrics`.
 - Uses `trimesh.load()` with force='mesh'.
-- **STEP Support:** If extension is `.step` or `.stp`, perform tessellation (conversion to mesh) before analysis.
+    - **STEP Support:** If extension is `.step` or `.stp`, perform tessellation (conversion to mesh) before analysis.
+    - **3MF Support:** Native support via `trimesh` (requires `lxml`).
+    - **IGES Support:** Support `.igs` and `.iges` using `meshio` as a fallback backend.
+
 - **Critical:** Must run in a separate Thread or Process (via `run_in_executor`) to avoid blocking the Async Event Loop.
 
 #### `src/consumers/upload_consumer.py`
