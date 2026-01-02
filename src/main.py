@@ -43,7 +43,16 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
 
 
 app = FastAPI(
-    title="Geometry Analysis Service",
+    title="MALIEV Geometry Analysis Service API",
+    description=(
+        "Dedicated 3D geometry analysis service for the Maliev platform. "
+        "Provides automated processing of 3D mesh files (STL, OBJ, STEP) to "
+        "extract critical manufacturing metrics including Volume, Surface Area, "
+        "Axis-Aligned Bounding Box (AABB), and topological validity (Manifold "
+        "status). Operating as an asynchronous worker, it integrates with "
+        "the Upload Service and Quotation Service via RabbitMQ to provide "
+        "real-time validation and cost estimation data."
+    ),
     version="0.1.0",
     docs_url=None,
     redoc_url=None,
