@@ -3,7 +3,7 @@ import logging
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, responses
+from fastapi import APIRouter, FastAPI, responses
 from fastapi.responses import JSONResponse
 from scalar_fastapi import get_scalar_api_reference
 
@@ -45,32 +45,38 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
 app = FastAPI(
     title="Geometry Analysis Service",
     version="0.1.0",
-    root_path="/geometry",
-    docs_url="/openapi.json",
+    docs_url=None,
+    redoc_url=None,
+    openapi_url="/geometry/openapi/v1.json",
     lifespan=lifespan,
 )
 
 setup_observability(app)
 
+router = APIRouter(prefix="/geometry")
 
-@app.get("/scalar", include_in_schema=False)
+
+@router.get("/scalar", include_in_schema=False)
 async def scalar_html() -> responses.HTMLResponse:
     return get_scalar_api_reference(
-        openapi_url=app.root_path + "/openapi.json",
+        openapi_url=app.openapi_url,
         title=app.title,
     )
 
 
-@app.get("/liveness")
+@router.get("/liveness", tags=["Health"])
 async def liveness() -> JSONResponse:
     """Kubernetes liveness probe."""
     return JSONResponse(content={"status": "alive"})
 
 
-@app.get("/readiness")
+@router.get("/readiness", tags=["Health"])
 async def readiness() -> JSONResponse:
     """Kubernetes readiness probe."""
     return JSONResponse(content={"status": "ready"})
+
+
+app.include_router(router)
 
 
 if __name__ == "__main__":
