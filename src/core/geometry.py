@@ -39,6 +39,10 @@ class GeometryProcessor:
             file_stream.seek(0)
             ext = file_extension.strip(".").lower()
 
+            # Check if format is supported by trimesh backends
+            if ext not in trimesh.exchange.load.available_formats():
+                raise ValueError(f"BACKEND_MISSING: {ext}")
+
             # Load mesh using trimesh (uses available backends like gmsh,
             # cascadeno, etc.)
             mesh_data = trimesh.load(file_stream, file_type=ext, force="mesh")

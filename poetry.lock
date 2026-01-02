@@ -972,6 +972,19 @@ unicode = ["unicodedata2 (>=17.0.0)"]
 woff = ["brotli (>=1.0.1)", "brotlicffi (>=0.8.0)", "zopfli (>=0.1.4)"]
 
 [[package]]
+name = "gmsh"
+version = "4.15.0"
+description = "Gmsh is a three-dimensional finite element mesh generator with built-in pre- and post-processing facilities."
+optional = false
+python-versions = "*"
+files = [
+    {file = "gmsh-4.15.0-py2.py3-none-macosx_10_15_x86_64.whl", hash = "sha256:1a7951836982f97e21e8b2de106fe1e8455cde53719191a3950784b56e2606af"},
+    {file = "gmsh-4.15.0-py2.py3-none-macosx_12_0_arm64.whl", hash = "sha256:042f76562244dfbad46edfeacaa092c8c95a9df8fb4fd7611771477f0031be0d"},
+    {file = "gmsh-4.15.0-py2.py3-none-manylinux_2_24_x86_64.whl", hash = "sha256:998527cb172f2529c6beca7334a6ca788fa54fbb3d4f817deb0903005d49344d"},
+    {file = "gmsh-4.15.0-py2.py3-none-win_amd64.whl", hash = "sha256:a5b9867f88af59aff269a93abbd009551fbc263eb94a165a25a0c8072bae13db"},
+]
+
+[[package]]
 name = "h11"
 version = "0.16.0"
 description = "A pure-Python, bring-your-own-I/O implementation of HTTP/1.1"
@@ -3366,6 +3379,22 @@ files = [
 windows-terminal = ["colorama (>=0.4.6)"]
 
 [[package]]
+name = "pygmsh"
+version = "7.1.17"
+description = "Python frontend for Gmsh"
+optional = false
+python-versions = ">=3.7"
+files = [
+    {file = "pygmsh-7.1.17-py3-none-any.whl", hash = "sha256:3b3da976a4da5070eaf1b0d2c5eec3fc4902524580c6d256c32a390f720e86d4"},
+    {file = "pygmsh-7.1.17.tar.gz", hash = "sha256:563724abff4f8517598d3354b9c795feddbe0675786145bfeaf20cbee6691c1d"},
+]
+
+[package.dependencies]
+gmsh = "*"
+meshio = ">=4.3.2,<6"
+numpy = ">=1.20.0"
+
+[[package]]
 name = "pyinstrument"
 version = "5.1.1"
 description = "Call stack profiler for Python. Shows you why your code is slow!"
@@ -5372,4 +5401,4 @@ type = ["pytest-mypy"]
 [metadata]
 lock-version = "2.0"
 python-versions = "^3.11"
-content-hash = "e45c515eb80519116fb73fbcba9d55041a7ba4df29572aa043f9cdab98da5522"
+content-hash = "fa4a6050727be66e7be16822893746b7a312b535bf2588726bc0bf86b53d84e3"

@@ -23,6 +23,7 @@ opentelemetry-instrumentation-fastapi = "^0.50b0"
 meshio = "*"
 aiofiles = "^25.1.0"
 httpx = "^0.28.1"
+pygmsh = "^7.1.17"
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^8.4.2"
