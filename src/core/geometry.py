@@ -1,7 +1,12 @@
 import asyncio
 import io
+import tempfile
 from concurrent.futures import ProcessPoolExecutor
+from pathlib import Path
+from typing import cast
 
+import gmsh
+import numpy as np
 import trimesh
 from pydantic import BaseModel
 
@@ -39,26 +44,52 @@ class GeometryProcessor:
             file_stream.seek(0)
             ext = file_extension.strip(".").lower()
 
-            # Check if format is supported by trimesh backends
-            if ext not in trimesh.exchange.load.available_formats():
-                raise ValueError(f"BACKEND_MISSING: {ext}")
+            mesh = None
+            if ext in ["igs", "iges", "step", "stp"]:
+                # Use explicit GMSH tessellation for CAD formats
+                try:
+                    with tempfile.NamedTemporaryFile(
+                        suffix=f".{ext}", delete=False
+                    ) as tmp:
+                        tmp.write(file_stream.getvalue())
+                        tmp_path = tmp.name
 
-            # Load mesh using trimesh (uses available backends like gmsh,
-            # cascadeno, etc.)
-            mesh_data = trimesh.load(file_stream, file_type=ext, force="mesh")
+                    try:
+                        gmsh.initialize()
+                        gmsh.option.setNumber("General.Verbosity", 0)
+                        gmsh.open(tmp_path)
+                        gmsh.model.mesh.generate(2)
 
-            if isinstance(mesh_data, trimesh.Scene):
-                # Requirement FR-003.1: Reject files containing multiple disjoint bodies
-                if len(mesh_data.geometry) > 1:
-                    raise ValueError("MULTI_BODY_ERROR")
-                if not mesh_data.geometry:
-                    raise ValueError("EMPTY_FILE_ERROR")
-                # Get the first (and only) geometry
-                mesh = list(mesh_data.geometry.values())[0]
+                        _, coords, _ = gmsh.model.mesh.getNodes()
+                        v = coords.reshape((-1, 3))
+                        _, _, node_tags = gmsh.model.mesh.getElements(2)
+
+                        if len(node_tags) > 0:
+                            f = np.array(node_tags[0]) - 1
+                            mesh = trimesh.Trimesh(vertices=v, faces=f.reshape((-1, 3)))
+                        else:
+                            raise ValueError("GMSH_TESSELLATION_FAILED")
+                    finally:
+                        gmsh.finalize()
+                        p = Path(tmp_path)
+                        if p.exists():
+                            p.unlink()
+                except Exception as e:
+                    raise ValueError(f"CAD_LOAD_ERROR: {ext} ({str(e)})") from e
             else:
-                mesh = mesh_data
+                # Standard mesh formats (STL, OBJ, 3MF)
+                # Try to load using trimesh natively
+                mesh_data = trimesh.load(file_stream, file_type=ext, force="mesh")
+                if isinstance(mesh_data, trimesh.Scene):
+                    if len(mesh_data.geometry) > 1:
+                        raise ValueError("MULTI_BODY_ERROR")
+                    if not mesh_data.geometry:
+                        raise ValueError("EMPTY_FILE_ERROR")
+                    mesh = cast(trimesh.Trimesh, list(mesh_data.geometry.values())[0])
+                else:
+                    mesh = cast(trimesh.Trimesh, mesh_data)
 
-            if not isinstance(mesh, trimesh.Trimesh):
+            if mesh is None or not isinstance(mesh, trimesh.Trimesh):
                 raise ValueError("FILE_CORRUPT")
 
             is_manifold = bool(mesh.is_watertight)
