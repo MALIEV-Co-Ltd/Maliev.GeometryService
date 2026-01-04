@@ -34,11 +34,12 @@ jobs:
       - name: Install dependencies
         run: poetry install
 
-      - name: Lint with Ruff
+      - name: Lint
         run: poetry run ruff check .
 
-      - name: Type check with Mypy
+      - name: Type check
         run: poetry run mypy src
 
-      - name: Run tests
+      - name: Test
         run: poetry run pytest
+        working-directory: ${{ github.workspace }}
