@@ -4,7 +4,7 @@ Auto-generated from all feature plans. Last updated: 2025-01-02
 
 ## Active Technologies
 
-- Python 3.11+
+- Python 3.10+
 - FastAPI
 - trimesh (Geometry Kernel)
 - aio-pika (RabbitMQ)

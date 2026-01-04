@@ -3,7 +3,7 @@ import io
 import json
 import logging
 import os
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import cast
 from uuid import UUID, uuid4
@@ -121,7 +121,7 @@ class UploadConsumer:
                             message=FileAnalyzedMessage(
                                 fileId=file_id,
                                 metrics=metrics,
-                                processedAt=datetime.now(UTC),
+                                processedAt=datetime.now(timezone.utc),
                             ),
                         )
                         await self.publish_event(

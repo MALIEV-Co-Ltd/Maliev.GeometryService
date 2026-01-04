@@ -7,13 +7,13 @@ readme = "README.md"
 packages = [{include = "src"}]
 
 [tool.poetry.dependencies]
-python = "^3.11"
+python = "^3.10"
 fastapi = "^0.115.14"
 uvicorn = {extras = ["standard"], version = "^0.34.3"}
 scalar-fastapi = "^1.5.0"
 trimesh = {extras = ["all"], version = "^4.10.1"}
-numpy = "^2.4.0"
-scipy = "^1.16.3"
+numpy = "^2.2.0"
+scipy = "^1.15.0"
 aio-pika = "^9.5.8"
 pydantic = "^2.12.5"
 pydantic-settings = "^2.12.0"
@@ -26,6 +26,7 @@ httpx = "^0.28.1"
 pygmsh = "^7.1.17"
 networkx = "<3.6"
 lxml = "^6.0.2"
+pre-commit = "^4.5.1"
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^8.4.2"
@@ -42,14 +43,14 @@ build-backend = "poetry.core.masonry.api"
 
 [tool.ruff]
 line-length = 88
-target-version = "py311"
+target-version = "py310"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "N", "UP", "B", "A", "C4", "SIM", "ARG", "PTH", "RET"]
 ignore = []
 
 [tool.mypy]
-python_version = "3.11"
+python_version = "3.10"
 strict = true
 ignore_missing_imports = true
 exclude = ["tests"]

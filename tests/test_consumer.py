@@ -1,5 +1,5 @@
 import io
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
 
@@ -41,7 +41,7 @@ async def test_process_message_success(consumer, mock_storage, mock_processor):
         downloadUrl="http://signed-url",
         contentType="model/stl",
         fileSize=1024,
-        uploadedAt=datetime.now(UTC),
+        uploadedAt=datetime.now(timezone.utc),
     )
 
     event = FileUploadedEvent(
@@ -93,7 +93,7 @@ async def test_process_message_failure(consumer, mock_storage):
         downloadUrl="http://signed-url",
         contentType="model/stl",
         fileSize=1024,
-        uploadedAt=datetime.now(UTC),
+        uploadedAt=datetime.now(timezone.utc),
     )
     event = FileUploadedEvent(
         messageId=uuid4(), correlationId=uuid4(), message=inner_msg
