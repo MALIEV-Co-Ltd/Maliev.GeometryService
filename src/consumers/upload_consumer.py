@@ -78,10 +78,13 @@ class UploadConsumer:
     ) -> None:
         async with message.process():
             with tracer.start_as_current_span("process_file_upload") as span:
+                file_id = "unknown"
+                correlation_id = None
                 try:
                     body = json.loads(message.body.decode())
                     event = FileUploadedEvent.model_validate(body)
-                    inner_msg = event.message
+                    correlation_id = event.correlation_id
+                    inner_msg = event.message.payload
 
                     file_id = inner_msg.file_id or inner_msg.upload_id
                     span.set_attribute("file_id", str(file_id))
@@ -114,7 +117,7 @@ class UploadConsumer:
                         # 4. Publish Success
                         success_event = FileAnalyzedEvent(
                             messageId=uuid4(),
-                            correlationId=event.correlation_id,
+                            correlationId=correlation_id,
                             messageType=[
                                 "urn:message:Maliev.GeometryService.Api.Events:FileAnalyzedEvent"
                             ],
@@ -144,28 +147,33 @@ class UploadConsumer:
                         error_code = "FILE_CORRUPT"
 
                     await self.publish_failure(
-                        event.correlation_id, file_id, error_code, str(e)
+                        correlation_id, file_id, error_code, str(e)
                     )
                 except Exception as e:
                     logger.error(f"Error processing {file_id}: {e}")
                     await self.publish_failure(
-                        event.correlation_id, file_id, "SYSTEM_ERROR", str(e)
+                        correlation_id, file_id, "SYSTEM_ERROR", str(e)
                     )
 
     async def download_with_retry(
         self, url: str, attempts: int = 3
     ) -> io.BytesIO | None:
         """Implements 3-attempt retry logic with exponential backoff."""
+        from src.infrastructure.storage import PermanentDownloadError
+
         for i in range(attempts):
             try:
                 return await self.storage_service.download_file(url)
+            except PermanentDownloadError:
+                # Do not retry 404, 401, etc.
+                raise
             except Exception as e:
                 if i == attempts - 1:
                     raise e
                 wait_time = 2 ** (i + 1)
                 logger.warning(
                     f"Download failed, retrying in {wait_time}s... "
-                    f"(Attempt {i+1}/{attempts})"
+                    f"(Attempt {i + 1}/{attempts})"
                 )
                 await asyncio.sleep(wait_time)
         return None
