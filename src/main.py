@@ -31,7 +31,7 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
     # Start consumer task in background
     consumer_task = asyncio.create_task(consumer.start())
 
-    def on_task_done(t: asyncio.Task) -> None:
+    def on_task_done(t: asyncio.Task[None]) -> None:
         try:
             if not t.cancelled() and t.exception():
                 logger.critical(f"Consumer task died with error: {t.exception()}")
