@@ -71,7 +71,7 @@ jobs:
           cd maliev-gitops/3-apps/maliev-geometry-service/overlays/production
           kustomize edit set image \
             asia-southeast1-docker.pkg.dev/maliev-website/maliev-website-artifact/maliev-geometry-service=\
-          asia-southeast1-docker.pkg.dev/maliev-website/maliev-website-artifact-prod/maliev-geometry-service:${{ github.sha }}
+            asia-southeast1-docker.pkg.dev/maliev-website/maliev-website-artifact-prod/maliev-geometry-service:${{ github.sha }}
 
       - name: Create Pull Request
         env:

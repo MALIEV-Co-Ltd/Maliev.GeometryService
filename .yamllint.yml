@@ -1,6 +1,7 @@
 extends: default
 
 rules:
+  new-lines: disable
   indentation:
     indent-sequences: consistent
   line-length:

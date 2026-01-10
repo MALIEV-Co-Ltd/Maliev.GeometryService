@@ -4,6 +4,10 @@ from typing import Protocol
 import httpx
 
 
+class PermanentDownloadError(Exception):
+    """Exception raised for non-retryable download errors (e.g. 404, 401)."""
+
+
 class IStorageService(Protocol):
     async def download_file(self, url: str) -> io.BytesIO: ...
 
@@ -18,9 +22,16 @@ class HttpDownloadService:
         """
         Downloads a file from a URL.
         """
-        response = await self.client.get(url)
-        response.raise_for_status()
-        return io.BytesIO(response.content)
+        try:
+            response = await self.client.get(url)
+            response.raise_for_status()
+            return io.BytesIO(response.content)
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code in [401, 403, 404]:
+                raise PermanentDownloadError(
+                    f"Permanent failure downloading {url}: {e.response.status_code}"
+                ) from e
+            raise
 
     async def close(self) -> None:
         await self.client.aclose()

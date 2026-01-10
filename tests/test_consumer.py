@@ -7,7 +7,11 @@ import pytest
 
 from src.consumers.upload_consumer import UploadConsumer
 from src.core.geometry import BoundingBox, GeometryMetrics
-from src.core.schemas import FileUploadedEvent, UploadCompletedMessage
+from src.core.schemas import (
+    FileUploadedEvent,
+    FileUploadedMessage,
+    UploadCompletedMessage,
+)
 
 
 @pytest.fixture
@@ -47,8 +51,12 @@ async def test_process_message_success(consumer, mock_storage, mock_processor):
     event = FileUploadedEvent(
         messageId=uuid4(),
         correlationId=correlation_id,
-        message=inner_msg,
-        messageType=[
+        message=FileUploadedMessage(
+            messageId=uuid4(),
+            messageName="UploadCompleted",
+            payload=inner_msg,
+        ),
+        message_type=[
             "urn:message:Maliev.UploadService.Api.Events:UploadCompletedEvent"
         ],
     )
@@ -96,7 +104,13 @@ async def test_process_message_failure(consumer, mock_storage):
         uploadedAt=datetime.now(timezone.utc),
     )
     event = FileUploadedEvent(
-        messageId=uuid4(), correlationId=uuid4(), message=inner_msg
+        messageId=uuid4(),
+        correlationId=uuid4(),
+        message=FileUploadedMessage(
+            messageId=uuid4(),
+            messageName="UploadCompleted",
+            payload=inner_msg,
+        ),
     )
 
     message = MagicMock()
