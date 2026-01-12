@@ -39,9 +39,7 @@ jobs:
       - name: Build and push Docker image
         run: |
           gcloud auth configure-docker asia-southeast1-docker.pkg.dev
-          docker build \
-            -t asia-southeast1-docker.pkg.dev/maliev-website/maliev-website-artifact-prod/maliev-geometryservice:${{ github.sha }} \
-            -f Dockerfile .
+          docker build -t asia-southeast1-docker.pkg.dev/maliev-website/maliev-website-artifact-prod/maliev-geometryservice:${{ github.sha }} -f Dockerfile .
           docker push asia-southeast1-docker.pkg.dev/maliev-website/maliev-website-artifact-prod/maliev-geometryservice:${{ github.sha }}
       - name: Checkout maliev-gitops repository
         uses: actions/checkout@v5
@@ -58,47 +56,46 @@ jobs:
           cd maliev-gitops/3-apps/maliev-geometryservice/overlays/production
           kustomize edit set image \
             asia-southeast1-docker.pkg.dev/maliev-website/maliev-website-artifact/maliev-geometryservice=\
-          asia-southeast1-docker.pkg.dev/maliev-website/maliev-website-artifact-prod/maliev-geometryservice:${{ github.sha }}
+            asia-southeast1-docker.pkg.dev/maliev-website/maliev-website-artifact-prod/maliev-geometryservice:${{ github.sha }}
       - name: Create Pull Request
         env:
           GH_TOKEN: ${{ secrets.GITOPS_PAT }}
           PR_BODY: |
             Automated GitOps Update - **PRODUCTION**
 
-            - **Service**: GeometryService
+            - **Service**: maliev-geometryservice
             - **Environment**: Production
             - **Image Tag**: ${{ github.sha }}
             - **Source Branch**: ${{ github.ref_name }}
             - **Commit**: ${{ github.sha }}
 
             Updates maliev-geometryservice image in production overlay.
-
             **WARNING**: This is a production deployment and should be reviewed before merging.
-
             This PR was automatically created by GitHub Actions.
-
             Once merged, ArgoCD will automatically sync the changes to the maliev-prod namespace.
 
             Triggered by: ${{ github.actor }}
-
             Workflow: ${{ github.workflow }}
-
             Run: [${{ github.run_id }}](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})
         run: |
           cd maliev-gitops
           git config --global user.name 'github-actions[bot]'
           git config --global user.email 'github-actions[bot]@users.noreply.github.com'
+
           # Create a new branch for this update
-          BRANCH_NAME="geometry-service/prod-${{ github.sha }}"
+          BRANCH_NAME="maliev-geometryservice/prod-${{ github.sha }}"
           git checkout -b $BRANCH_NAME
+
           # Commit and push changes to the new branch
           git add .
           if git diff --staged --quiet; then
             echo "No changes to commit"
             exit 0
           fi
-          git commit -m "chore(prod): Update GeometryService image to ${{ github.sha }}"
+
+          git commit -m "chore(prod): Update maliev-geometryservice image to ${{ github.sha }}"
           git push origin $BRANCH_NAME
+
           # Create pull request using GitHub CLI
           gh pr create \
             --title "chore(prod): Update maliev-geometryservice" \
