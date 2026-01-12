@@ -135,8 +135,8 @@ class UploadConsumer:
                             "Successfully analyzed file",
                             extra={
                                 "file.id": str(file_id),
-                                "volume": metrics.volume,
-                                "surface_area": metrics.surface_area,
+                                "volume_cm3": metrics.volume_cm3,
+                                "surface_area_cm2": metrics.surface_area_cm2,
                             },
                         )
 

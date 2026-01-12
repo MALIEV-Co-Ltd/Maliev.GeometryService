@@ -50,7 +50,9 @@ def setup_observability(app: FastAPI | None = None) -> None:
         metric_reader = PeriodicExportingMetricReader(
             OTLPMetricExporter(endpoint=otlp_endpoint, insecure=True)
         )
-        meter_provider = MeterProvider(resource=resource, metric_readers=[metric_reader])
+        meter_provider = MeterProvider(
+            resource=resource, metric_readers=[metric_reader]
+        )
         metrics.set_meter_provider(meter_provider)
 
         # --- 3. Setup Logging ---
@@ -62,7 +64,9 @@ def setup_observability(app: FastAPI | None = None) -> None:
         logger_provider.add_log_record_processor(BatchLogRecordProcessor(log_exporter))
 
         # Bridge Python logging to OpenTelemetry
-        otel_handler = LoggingHandler(level=logging.NOTSET, logger_provider=logger_provider)
+        otel_handler = LoggingHandler(
+            level=logging.NOTSET, logger_provider=logger_provider
+        )
 
         # Configure root logger to include the OTel handler
         root_logger = logging.getLogger()

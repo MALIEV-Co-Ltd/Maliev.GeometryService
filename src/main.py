@@ -7,17 +7,16 @@ from fastapi import APIRouter, FastAPI, responses
 from fastapi.responses import JSONResponse
 from scalar_fastapi import get_scalar_api_reference
 
+from src.consumers.upload_consumer import UploadConsumer
+from src.core.geometry import GeometryProcessor
+from src.core.observability import setup_observability
+from src.infrastructure.storage import HttpDownloadService
+
 # Set up basic logging immediately
 logging.basicConfig(level=logging.INFO)
 
-from src.core.observability import setup_observability
-
 # Initialize observability as early as possible to capture startup diagnostics
 setup_observability()
-
-from src.consumers.upload_consumer import UploadConsumer
-from src.core.geometry import GeometryProcessor
-from src.infrastructure.storage import HttpDownloadService
 
 logger = logging.getLogger(__name__)
 
@@ -114,15 +113,15 @@ async def telemetry_test() -> JSONResponse:
     """Endpoint to verify structured logging, metrics, and tracing."""
     logger.info(
         "Telemetry test initiated",
-        extra={
-            "test.feature": "structured-logging",
-            "test.status": "started"
-        }
+        extra={"test.feature": "structured-logging", "test.status": "started"},
     )
 
     # Example of using a metric
     from src.core.observability import meter
-    counter = meter.create_counter("test.telemetry.calls", description="Counts telemetry test calls")
+
+    counter = meter.create_counter(
+        "test.telemetry.calls", description="Counts telemetry test calls"
+    )
     counter.add(1, {"endpoint": "telemetry-test"})
 
     logger.warning("Simulated warning for telemetry verification")
@@ -131,7 +130,7 @@ async def telemetry_test() -> JSONResponse:
     return JSONResponse(
         content={
             "message": "Telemetry data generated. Check Aspire dashboard.",
-            "service": "maliev-geometryservice"
+            "service": "maliev-geometryservice",
         }
     )
 
