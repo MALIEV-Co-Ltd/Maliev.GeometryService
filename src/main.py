@@ -79,6 +79,12 @@ async def liveness() -> JSONResponse:
     return JSONResponse(content={"status": "alive"})
 
 
+@router.get("/aspire-liveness", tags=["Health"])
+async def aspire_liveness() -> JSONResponse:
+    """Aspire liveness probe."""
+    return JSONResponse(content={"status": "alive"})
+
+
 @router.get("/readiness", tags=["Health"])
 async def readiness() -> JSONResponse:
     """Kubernetes readiness probe."""
@@ -91,4 +97,4 @@ app.include_router(router)
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run(app, host="0.0.0.0", port=8080)
+    uvicorn.run(app, host="0.0.0.0", port=8080, log_config=None)
