@@ -1,5 +1,8 @@
 import asyncio
+import contextlib
 import io
+import os
+import shutil
 import tempfile
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
@@ -29,8 +32,13 @@ class GeometryMetrics(BaseModel):
 
 class GeometryProcessor:
     def __init__(self) -> None:
-        # We'll use this for offloading CPU bound tasks if needed
-        self.executor = ProcessPoolExecutor(max_workers=4)
+        # We'll use this for offloading CPU bound tasks.
+        # Use physical CPU count to avoid excessive context switching.
+        self.executor = ProcessPoolExecutor(max_workers=os.cpu_count() or 4)
+
+    def shutdown(self) -> None:
+        """Cleanly shut down the process pool."""
+        self.executor.shutdown(wait=True)
 
     def analyze_stream(
         self, file_stream: io.BytesIO, file_extension: str
@@ -39,6 +47,7 @@ class GeometryProcessor:
         Analyzes a 3D file stream and extracts geometric metrics.
         Assumes input units are Millimeters (mm).
         """
+        tmp_path = None
         try:
             # Reset stream position just in case
             file_stream.seek(0)
@@ -51,34 +60,41 @@ class GeometryProcessor:
                     with tempfile.NamedTemporaryFile(
                         suffix=f".{ext}", delete=False
                     ) as tmp:
-                        tmp.write(file_stream.getvalue())
+                        shutil.copyfileobj(file_stream, tmp)
                         tmp_path = tmp.name
 
                     try:
+                        # GMSH initialization is NOT thread-safe, but here it runs
+                        # within a ProcessPoolExecutor worker process.
                         gmsh.initialize()
                         gmsh.option.setNumber("General.Verbosity", 0)
                         gmsh.open(tmp_path)
+
+                        # Try to ensure units are in mm if possible or detect scaling.
+                        # For now, we follow trimesh assumptions but force
+                        # triangulation.
                         gmsh.model.mesh.generate(2)
 
+                        # Extract nodes and triangle elements
                         _, coords, _ = gmsh.model.mesh.getNodes()
                         v = coords.reshape((-1, 3))
+
+                        # element_type 2 is 3-node triangle
                         _, _, node_tags = gmsh.model.mesh.getElements(2)
 
                         if len(node_tags) > 0:
+                            # node_tags is 1-indexed in gmsh
                             f = np.array(node_tags[0]) - 1
                             mesh = trimesh.Trimesh(vertices=v, faces=f.reshape((-1, 3)))
                         else:
-                            raise ValueError("GMSH_TESSELLATION_FAILED")
+                            raise ValueError("GMSH_TESSELLATION_FAILED: No triangles")
                     finally:
                         gmsh.finalize()
-                        p = Path(tmp_path)
-                        if p.exists():
-                            p.unlink()
                 except Exception as e:
                     raise ValueError(f"CAD_LOAD_ERROR: {ext} ({str(e)})") from e
             else:
                 # Standard mesh formats (STL, OBJ, 3MF)
-                # Try to load using trimesh natively
+                # Native support for 3MF requires lxml
                 mesh_data = trimesh.load(file_stream, file_type=ext, force="mesh")
                 if isinstance(mesh_data, trimesh.Scene):
                     if len(mesh_data.geometry) > 1:
@@ -111,7 +127,6 @@ class GeometryProcessor:
             euler_number = int(mesh.euler_number)
             extents = mesh.extents
             if extents is None:
-                # Fallback if extents are not available (e.g. empty or corrupt mesh)
                 bbox = BoundingBox(x=0.0, y=0.0, z=0.0)
                 vol_bbox = 0.0
             else:
@@ -120,7 +135,6 @@ class GeometryProcessor:
                 )
                 vol_bbox = float(extents[0]) * float(extents[1]) * float(extents[2])
 
-            # Support Volume Estimation (Bounding box approximation Z-up)
             support_mm3 = max(0.0, vol_bbox - volume_mm3)
 
             return GeometryMetrics(
@@ -137,12 +151,18 @@ class GeometryProcessor:
             if "MULTI_BODY_ERROR" in str(e):
                 raise e from e
             raise ValueError(f"FILE_CORRUPT: {str(e)}") from e
+        finally:
+            if tmp_path and Path(tmp_path).exists():
+                with contextlib.suppress(OSError):
+                    Path(tmp_path).unlink()
 
     async def analyze_async(
         self, file_stream: io.BytesIO, file_extension: str
     ) -> GeometryMetrics:
-        """Wrapper to run analyze_stream in a separate thread to avoid blocking."""
+        """Wrapper to run analyze_stream in a separate process."""
         loop = asyncio.get_running_loop()
+        # Note: Passing large BytesIO via pickle has overhead.
+        # For production, consider saving to disk in main and passing Path.
         return await loop.run_in_executor(
-            None, self.analyze_stream, file_stream, file_extension
+            self.executor, self.analyze_stream, file_stream, file_extension
         )

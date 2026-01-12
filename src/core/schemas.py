@@ -24,7 +24,7 @@ class MassTransitEnvelope(BaseModel):
 
 
 class UploadCompletedMessage(BaseModel):
-    """The actual payload inside the MassTransit envelope for upload.completed."""
+    """The actual payload inside the FileUploadedEvent message."""
 
     model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
     upload_id: str = Field(alias="uploadId")
@@ -38,10 +38,19 @@ class UploadCompletedMessage(BaseModel):
     uploaded_at: datetime = Field(alias="uploadedAt")
 
 
-class FileUploadedEvent(MassTransitEnvelope):
-    """Incoming event from UploadService."""
+class FileUploadedMessage(BaseModel):
+    """The message object published by UploadService."""
 
-    message: UploadCompletedMessage
+    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
+    message_id: UUID = Field(alias="messageId")
+    message_name: str = Field(alias="messageName")
+    payload: UploadCompletedMessage
+
+
+class FileUploadedEvent(MassTransitEnvelope):
+    """Incoming event from UploadService wrapped in MassTransit envelope."""
+
+    message: FileUploadedMessage
 
 
 class FileAnalyzedMessage(BaseModel):

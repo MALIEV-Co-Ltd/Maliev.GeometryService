@@ -27,6 +27,9 @@ def setup_observability(app: FastAPI | None = None) -> None:
     """
     global _is_configured
 
+    # Set logging level for libraries
+    logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
+
     if not _is_configured:
         resource = Resource.create(attributes={SERVICE_NAME: settings.SERVICE_NAME})
         otlp_endpoint = settings.OTEL_EXPORTER_OTLP_ENDPOINT

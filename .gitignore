@@ -1,12 +1,7 @@
-# Byte-compiled / optimized / DLL files
+# Python results
 __pycache__/
 *.py[cod]
 *$py.class
-
-# C extensions
-*.so
-
-# Distribution / packaging
 .Python
 build/
 develop-eggs/
@@ -26,15 +21,47 @@ share/python-wheels/
 *.egg
 MANIFEST
 
-# PyInstaller
-*.manifest
-*.spec
+# Distribution / packaging
+/site
+.pdm.toml
+.pdm-python
+.pdm-build/
+__pypackages__/
 
-# Installer logs
+# IDE files
+.vs/
+.vscode/
+.idea/
+*.swp
+*.swo
+*.user
+*.suo
+
+# Environment & Secrets
+.env
+.venv
+env/
+venv/
+env.bak/
+venv.bak/
+appsettings.Local.json
+
+# OS files
+.DS_Store
+Thumbs.db
+NUL
+
+# Temporary & Logs
+*.log
 pip-log.txt
 pip-delete-this-directory.txt
+celerybeat-schedule
+celerybeat.pid
+*.tmp
+*.bak
+*.sql
 
-# Unit test / coverage reports
+# Test Artifacts
 htmlcov/
 .tox/
 .nox/
@@ -49,104 +76,34 @@ coverage.xml
 .pytest_cache/
 cover/
 
-# Translations
-*.mo
-*.pot
+# Mypy & Ruff
+.mypy_cache/
+.ruff_cache/
+.dmypy.json
+dmypy.json
+.pyre/
+.pytype/
+cython_debug/
 
-# Django stuff:
-*.log
+# Sphinx / Documentation
+docs/_build/
+*.manifest
+*.spec
+
+# Django / Flask / Scrapy
 local_settings.py
 db.sqlite3
 db.sqlite3-journal
-
-# Flask stuff:
 instance/
 .webassets-cache
-
-# Scrapy stuff:
 .scrapy
 
-# Sphinx documentation
-docs/_build/
-
-# PyBuilder
-target/
-
-# Jupyter Notebook
+# Notebooks
 .ipynb_checkpoints
-
-# IPython
 profile_default/
 ipython_config.py
 
-# pyenv
-.python-version
-
-# pipenv
-#   According to pypa/pipenv#598, it is recommended to include Pipfile.lock in version control.
-#   However, in case of collaboration, if having platform-specific dependencies or dependencies
-#   having no cross-platform support, pipenv may install dependencies that don't work, or even
-#   fail to install them.
-#Pipfile.lock
-
-# poetry
-#   Similar to Pipfile.lock, it is generally recommended to include poetry.lock in version control.
-#poetry.lock
-
-# pdm
-.pdm.toml
-.pdm-python
-.pdm-build/
-
-# PEP 582; used by e.g. github.com/fannheyward/coc-pyright
-__pypackages__/
-
-# Celery stuff
-celerybeat-schedule
-celerybeat.pid
-
-# SageMath libraries
-*.sage.py
-
-# Environments
-.env
-.venv
-env/
-venv/
-ENV/
-env.bak/
-venv.bak/
-
-# Spyder project settings
-.spyderproject
-.spyproject
-
-# Rope project settings
-.ropeproject
-
-# mkdocs documentation
-/site
-
-# mypy
-.mypy_cache/
-.dmypy.json
-dmypy.json
-
-# Pyre type checker
-.pyre/
-
-# pytype static type analyzer
-.pytype/
-
-# Cython debug symbols
-cython_debug/
-
-# OS
-.DS_Store
-Thumbs.db
-
-# IDE
-.vscode/
-.idea/
-# Windows NUL device file (accidentally created by redirects)
-NUL
+# Enforced Rules (User Request)
+appsettings.Development.json
+docker-compose*.yml
+docker-compose.override.yml
