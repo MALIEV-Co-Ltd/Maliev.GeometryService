@@ -53,7 +53,7 @@ jobs:
           sudo mv kustomize /usr/local/bin/
       - name: Update image tag in maliev-gitops using Kustomize
         run: |
-          cd maliev-gitops/3-apps/maliev-geometryservice/overlays/development
+          cd maliev-gitops/3-apps/maliev-geometry-service/overlays/development
           kustomize edit set image \
             asia-southeast1-docker.pkg.dev/maliev-website/maliev-website-artifact/maliev-geometryservice=\
             asia-southeast1-docker.pkg.dev/maliev-website/maliev-website-artifact-dev/maliev-geometryservice:${{ github.sha }}
