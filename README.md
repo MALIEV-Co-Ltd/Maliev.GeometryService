@@ -115,7 +115,7 @@ poetry run pytest
 
 ## 📦 Deployment
 
-- **Docker Image**: `REGION-docker.pkg.dev/PROJECT_ID/REPOSITORY/maliev-geometry-service:{sha}`
+- **Docker Image**: `REGION-docker.pkg.dev/PROJECT_ID/REPOSITORY/maliev-geometryservice:{sha}`
 - **Environments**: Development, Staging, Production
 
 ---

@@ -1,4 +1,4 @@
-# Maliev.GeometryService Development Guidelines
+# Maliev.GeometryService (maliev-geometryservice) Development Guidelines
 
 Auto-generated from all feature plans. Last updated: 2025-01-02
 

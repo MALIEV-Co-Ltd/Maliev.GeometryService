@@ -9,7 +9,7 @@ class Settings(BaseSettings):
     STORAGE_BUCKET: str = "uploads"
 
     OTEL_EXPORTER_OTLP_ENDPOINT: str = "http://localhost:4317"
-    SERVICE_NAME: str = "geometry-service"
+    SERVICE_NAME: str = "maliev-geometryservice"
 
     MAX_FILE_SIZE_MB: int = 200
 

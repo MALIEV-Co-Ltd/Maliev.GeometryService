@@ -85,7 +85,7 @@ class UploadConsumer:
 
                     file_id = inner_msg.file_id or inner_msg.upload_id
                     span.set_attribute("file_id", str(file_id))
-                    logger.info(f"Processing file {file_id}")
+                    logger.info("Processing file", extra={"file.id": str(file_id)})
 
                     # 1. Download file with retry logic
                     if not inner_msg.download_url:
@@ -128,7 +128,14 @@ class UploadConsumer:
                             success_event,
                             "maliev.geometryservice.v1.analysis.completed",
                         )
-                        logger.info(f"Successfully analyzed file {file_id}")
+                        logger.info(
+                            "Successfully analyzed file",
+                            extra={
+                                "file.id": str(file_id),
+                                "volume": metrics.volume,
+                                "surface_area": metrics.surface_area,
+                            },
+                        )
 
                     finally:
                         file_stream.close()
