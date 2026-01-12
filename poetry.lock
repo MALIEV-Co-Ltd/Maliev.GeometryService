@@ -1819,7 +1819,7 @@ description = "Python bindings for [Loro](https://loro.dev)"
 optional = false
 python-versions = ">=3.8"
 groups = ["main"]
-markers = "python_version >= \"3.11\" and python_version < \"3.14\""
+markers = "python_full_version >= \"3.11.0\" and python_full_version < \"3.14.0\""
 files = [
     {file = "loro-1.10.3-cp310-cp310-macosx_10_12_x86_64.whl", hash = "sha256:7e7e3461439c57efaadfd364a5a504a849653cf408c97086033004dffb3f2857"},
     {file = "loro-1.10.3-cp310-cp310-macosx_11_0_arm64.whl", hash = "sha256:ed91dae34236f888c357b367d37b050ac4fa21ff30ab0231122f580ca87f46ba"},
@@ -6205,4 +6205,4 @@ type = ["pytest-mypy"]
 [metadata]
 lock-version = "2.1"
 python-versions = "^3.10"
-content-hash = "9b6a588c32b61a478bf2f1a5c00ad668727c12b8d49f0dfe9545103f39e0d881"
+content-hash = "6a9f09a5bd38b2768a7119d1cae3d1a1dd5f6e841cf3e6e97ab7a1135b7a64b4"

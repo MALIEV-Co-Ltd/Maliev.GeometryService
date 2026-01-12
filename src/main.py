@@ -12,6 +12,12 @@ from src.core.geometry import GeometryProcessor
 from src.core.observability import setup_observability
 from src.infrastructure.storage import HttpDownloadService
 
+# Set up basic logging immediately
+logging.basicConfig(level=logging.INFO)
+
+# Initialize observability as early as possible to capture startup diagnostics
+setup_observability()
+
 logger = logging.getLogger(__name__)
 
 # Global consumer instance for cleanup
@@ -70,6 +76,7 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+# Re-run instrumentation with the app instance
 setup_observability(app)
 
 router = APIRouter(prefix="/geometry")
@@ -83,15 +90,15 @@ async def scalar_html() -> responses.HTMLResponse:
     )
 
 
-@router.get("/aspire-liveness", include_in_schema=False)
-async def aspire_liveness() -> JSONResponse:
-    """Aspire-specific liveness check (minimal, fast)."""
-    return JSONResponse(content={"status": "healthy"})
-
-
 @router.get("/liveness", tags=["Health"])
 async def liveness() -> JSONResponse:
     """Kubernetes liveness probe."""
+    return JSONResponse(content={"status": "alive"})
+
+
+@router.get("/aspire-liveness", tags=["Health"])
+async def aspire_liveness() -> JSONResponse:
+    """Aspire liveness probe."""
     return JSONResponse(content={"status": "alive"})
 
 
@@ -99,6 +106,33 @@ async def liveness() -> JSONResponse:
 async def readiness() -> JSONResponse:
     """Kubernetes readiness probe."""
     return JSONResponse(content={"status": "ready"})
+
+
+@router.get("/telemetry-test", tags=["Debug"])
+async def telemetry_test() -> JSONResponse:
+    """Endpoint to verify structured logging, metrics, and tracing."""
+    logger.info(
+        "Telemetry test initiated",
+        extra={"test.feature": "structured-logging", "test.status": "started"},
+    )
+
+    # Example of using a metric
+    from src.core.observability import meter
+
+    counter = meter.create_counter(
+        "test.telemetry.calls", description="Counts telemetry test calls"
+    )
+    counter.add(1, {"endpoint": "telemetry-test"})
+
+    logger.warning("Simulated warning for telemetry verification")
+    logger.error("Simulated error for telemetry verification")
+
+    return JSONResponse(
+        content={
+            "message": "Telemetry data generated. Check Aspire dashboard.",
+            "service": "maliev-geometryservice",
+        }
+    )
 
 
 # Also add mirroring endpoints to the root app for extra robustness
@@ -116,4 +150,4 @@ app.include_router(router)
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run(app, host="0.0.0.0", port=8080)
+    uvicorn.run(app, host="0.0.0.0", port=8080, log_config=None)
