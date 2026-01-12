@@ -3,7 +3,7 @@ FROM python:3.11-slim AS builder
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
-    POETRY_VERSION=1.8.4 \
+    POETRY_VERSION=2.2.1 \
     POETRY_HOME="/opt/poetry" \
     POETRY_VIRTUALENVS_IN_PROJECT=true \
     POETRY_NO_INTERACTION=1 \
@@ -18,7 +18,7 @@ RUN apt-get update \
     build-essential
 
 # Install Poetry
-RUN curl -sSL https://install.python-poetry.org | python3 - 
+RUN curl -sSL https://install.python-poetry.org | python3 -
 
 WORKDIR $PYSETUP_PATH
 COPY pyproject.toml poetry.lock* ./
