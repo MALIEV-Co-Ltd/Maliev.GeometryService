@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import sys
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager, suppress
 
@@ -150,4 +151,9 @@ app.include_router(router)
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run(app, host="0.0.0.0", port=8080, log_config=None)
+    try:
+        logger.info("Starting Geometry Service host")
+        uvicorn.run(app, host="0.0.0.0", port=8080, log_config=None)
+    except Exception as e:
+        logger.critical(f"Geometry Service host terminated unexpectedly: {e}")
+        sys.exit(1)
