@@ -8,38 +8,48 @@ on:
       - main
 
 jobs:
-  validate:
+  build-and-test:
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v5
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - name: Set up .NET
+        uses: actions/setup-dotnet@v5
         with:
-          python-version: "3.11"
+          dotnet-version: "10.x"
 
-      - name: Install Poetry
-        uses: snok/install-poetry@v1
-        with:
-          virtualenvs-create: true
-          virtualenvs-in-project: true
-
-      - name: Install system dependencies
+      - name: Switch to PackageReference for CI build
         run: |
-          sudo apt-get update
-          sudo apt-get install -y gmsh libglu1-mesa libxcursor1 libxinerama1 libxft2 libfltk1.3
+          # Determine version format based on target branch
+          BASE_BRANCH="${{ github.base_ref }}"
+          if [ "$BASE_BRANCH" == "main" ]; then
+            VERSION_FORMAT="1.0.*"
+          else
+            VERSION_FORMAT="1.0.*-*"
+          fi
 
-      - name: Install dependencies
-        run: poetry install
+          echo "Target branch is $BASE_BRANCH. Using version format: $VERSION_FORMAT"
 
-      - name: Lint
-        run: poetry run ruff check .
+          # Replace ProjectReference with PackageReference in all service csproj files
+          find . -name "*.csproj" -type f -exec sed -i \
+            's|<ProjectReference Include=".*Maliev.Aspire.ServiceDefaults.*.csproj" />|<PackageReference Include="Maliev.Aspire.ServiceDefaults" Version="'$VERSION_FORMAT'" />|g' \
+            {} \;
+          find . -name "*.csproj" -type f -exec sed -i \
+            's|<ProjectReference Include=".*Maliev.MessagingContracts.*.csproj" />|<PackageReference Include="Maliev.MessagingContracts" Version="'$VERSION_FORMAT'" />|g' \
+            {} \;
+          echo "Switched to PackageReference for ServiceDefaults and MessagingContracts"
 
-      - name: Type check
-        run: poetry run mypy src
+      - name: Restore dependencies
+        run: dotnet restore Maliev.AccountingService.sln
+        env:
+          NUGET_USERNAME: ${{ github.actor }}
+          NUGET_PASSWORD: ${{ secrets.GITOPS_PAT }}
+
+      - name: Build
+        run: dotnet build Maliev.AccountingService.sln --no-restore --configuration Release
 
       - name: Test
-        run: poetry run pytest
+        run: dotnet test Maliev.AccountingService.sln --no-build --configuration Release --verbosity normal
         working-directory: ${{ github.workspace }}
