@@ -1,7 +1,8 @@
+
+import httpx
 import pytest
 import respx
-import httpx
-import io
+
 from src.infrastructure.storage import HttpDownloadService, PermanentDownloadError
 
 

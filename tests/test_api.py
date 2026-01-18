@@ -1,4 +1,5 @@
 from fastapi.testclient import TestClient
+
 from src.main import app
 
 # We override the lifespan to avoid starting the real consumer (RabbitMQ dependency)
