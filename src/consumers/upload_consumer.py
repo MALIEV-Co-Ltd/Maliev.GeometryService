@@ -88,9 +88,24 @@ class UploadConsumer:
 
                     file_id = inner_msg.file_id or inner_msg.upload_id
                     span.set_attribute("file_id", str(file_id))
-                    logger.info("Processing file", extra={"file.id": str(file_id)})
+
+                    # 0. Filter by file extension before downloading
+                    file_ext = Path(inner_msg.storage_path).suffix.lower().strip(".")
+                    supported_exts = ["igs", "iges", "step", "stp", "stl", "obj", "3mf"]
+
+                    if file_ext not in supported_exts:
+                        logger.debug(
+                            f"Skipping file {file_id}: extension {file_ext} not supported by geometry service"
+                        )
+                        return
+
+                    logger.info(
+                        "Processing 3D file",
+                        extra={"file.id": str(file_id), "extension": file_ext},
+                    )
 
                     # 1. Download file with retry logic
+
                     if not inner_msg.download_url:
                         raise ValueError("MISSING_DOWNLOAD_URL")
 

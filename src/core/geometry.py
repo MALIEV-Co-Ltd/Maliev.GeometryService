@@ -47,6 +47,16 @@ class GeometryProcessor:
         Analyzes a 3D file stream and extracts geometric metrics.
         Assumes input units are Millimeters (mm).
         """
+        file_stream.seek(0)
+        data = file_stream.read()
+        return self.analyze_bytes(data, file_extension)
+
+    def analyze_bytes(self, data: bytes, file_extension: str) -> GeometryMetrics:
+        """
+        Analyzes a 3D file data and extracts geometric metrics.
+        Assumes input units are Millimeters (mm).
+        """
+        file_stream = io.BytesIO(data)
         tmp_path = None
         try:
             # Reset stream position just in case
@@ -77,9 +87,10 @@ class GeometryProcessor:
 
                         # Extract nodes and triangle elements
                         _, coords, _ = gmsh.model.mesh.getNodes()
-                        v = coords.reshape((-1, 3))
+                        v = np.array(coords).reshape((-1, 3))
 
                         # element_type 2 is 3-node triangle
+
                         _, _, node_tags = gmsh.model.mesh.getElements(2)
 
                         if len(node_tags) > 0:
@@ -159,10 +170,14 @@ class GeometryProcessor:
     async def analyze_async(
         self, file_stream: io.BytesIO, file_extension: str
     ) -> GeometryMetrics:
-        """Wrapper to run analyze_stream in a separate process."""
+        """Wrapper to run analyze_bytes in a separate process."""
         loop = asyncio.get_running_loop()
-        # Note: Passing large BytesIO via pickle has overhead.
-        # For production, consider saving to disk in main and passing Path.
+
+        # Read stream into bytes. Bytes are picklable, whereas BytesIO is not
+        # (contains thread locks).
+        file_stream.seek(0)
+        data = file_stream.read()
+
         return await loop.run_in_executor(
-            self.executor, self.analyze_stream, file_stream, file_extension
+            self.executor, self.analyze_bytes, data, file_extension
         )
