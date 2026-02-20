@@ -66,14 +66,18 @@ async def test_process_message_success(consumer, mock_storage, mock_processor):
     message.process.return_value.__aenter__ = AsyncMock()
 
     mock_storage.download_file.return_value = io.BytesIO(b"content")
-    mock_processor.analyze_async.return_value = GeometryMetrics(
-        volume_cm3=1.0,
-        support_volume_cm3=0.5,
-        surface_area_cm2=6.0,
-        bounding_box=BoundingBox(x=10, y=10, z=10),
-        is_manifold=True,
-        triangle_count=12,
-        euler_number=2,
+    mock_processor.analyze_async.return_value = (
+        GeometryMetrics(
+            volume_cm3=1.0,
+            support_volume_cm3=0.5,
+            surface_area_cm2=6.0,
+            bounding_box=BoundingBox(x=10, y=10, z=10),
+            is_manifold=True,
+            triangle_count=12,
+            euler_number=2,
+        ),
+        b"glb-content",
+        b"thumb-content",
     )
 
     consumer.publish_event = AsyncMock()

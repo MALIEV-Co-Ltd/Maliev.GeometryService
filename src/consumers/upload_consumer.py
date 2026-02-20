@@ -38,21 +38,42 @@ class UploadConsumer:
         self.exchange: aio_pika.abc.AbstractRobustExchange | None = None
 
     async def connect(self) -> None:
-        self.connection = await aio_pika.connect_robust(settings.RABBITMQ_URI)
-        self.channel = await self.connection.channel()
-        await self.channel.set_qos(prefetch_count=1)
+        max_retries = 10
+        base_delay = 1.0
 
-        # Declare queues/exchanges
-        self.queue = cast(
-            aio_pika.abc.AbstractRobustQueue,
-            await self.channel.declare_queue("geometry-analysis-queue", durable=True),
-        )
-        self.exchange = cast(
-            aio_pika.abc.AbstractRobustExchange,
-            await self.channel.declare_exchange(
-                "maliev.events", type="topic", durable=True
-            ),
-        )
+        for attempt in range(max_retries):
+            try:
+                self.connection = await aio_pika.connect_robust(settings.RABBITMQ_URI)
+                self.channel = await self.connection.channel()
+                await self.channel.set_qos(prefetch_count=1)
+
+                self.queue = cast(
+                    aio_pika.abc.AbstractRobustQueue,
+                    await self.channel.declare_queue(
+                        "geometry-analysis-queue", durable=True
+                    ),
+                )
+                self.exchange = cast(
+                    aio_pika.abc.AbstractRobustExchange,
+                    await self.channel.declare_exchange(
+                        "maliev.events", type="topic", durable=True
+                    ),
+                )
+                logger.info("Successfully connected to RabbitMQ")
+                return
+            except Exception as e:
+                if attempt == max_retries - 1:
+                    logger.error(
+                        f"Failed to connect to RabbitMQ after "
+                        f"{max_retries} attempts: {e}"
+                    )
+                    raise
+                delay = base_delay * (2**attempt)
+                logger.warning(
+                    f"RabbitMQ connection attempt {attempt + 1}/{max_retries} "
+                    f"failed, retrying in {delay}s: {e}"
+                )
+                await asyncio.sleep(delay)
 
     async def publish_event(
         self,
@@ -95,7 +116,8 @@ class UploadConsumer:
 
                     if file_ext not in supported_exts:
                         logger.debug(
-                            f"Skipping file {file_id}: extension {file_ext} not supported by geometry service"
+                            f"Skipping file {file_id}: extension {file_ext} "
+                            "not supported by geometry service"
                         )
                         return
 
@@ -125,11 +147,31 @@ class UploadConsumer:
 
                         # 3. Analyze geometry
                         file_ext = Path(inner_msg.storage_path).suffix.lower()
-                        metrics = await self.geometry_processor.analyze_async(
+                        (
+                            metrics,
+                            glb_bytes,
+                            thumb_bytes,
+                        ) = await self.geometry_processor.analyze_async(
                             file_stream, file_ext
                         )
 
-                        # 4. Publish Success
+                        # 4. Upload artifacts
+                        glb_path = None
+                        thumb_path = None
+
+                        if glb_bytes:
+                            glb_path = f"{inner_msg.storage_path}_viewer.glb"
+                            await self.upload_artifact(
+                                glb_bytes, glb_path, "model/gltf-binary"
+                            )
+
+                        if thumb_bytes:
+                            thumb_path = f"{inner_msg.storage_path}_thumb.png"
+                            await self.upload_artifact(
+                                thumb_bytes, thumb_path, "image/png"
+                            )
+
+                        # 5. Publish Success
                         success_event = FileAnalyzedEvent(
                             messageId=uuid4(),
                             correlationId=correlation_id,
@@ -140,6 +182,8 @@ class UploadConsumer:
                                 fileId=file_id,
                                 metrics=metrics,
                                 processedAt=datetime.now(timezone.utc),
+                                glbStoragePath=glb_path,
+                                thumbnailStoragePath=thumb_path,
                             ),
                         )
                         await self.publish_event(
@@ -152,6 +196,8 @@ class UploadConsumer:
                                 "file.id": str(file_id),
                                 "volume_cm3": metrics.volume_cm3,
                                 "surface_area_cm2": metrics.surface_area_cm2,
+                                "glb_path": glb_path,
+                                "thumb_path": thumb_path,
                             },
                         )
 
@@ -199,6 +245,16 @@ class UploadConsumer:
                 )
                 await asyncio.sleep(wait_time)
         return None
+
+    async def upload_artifact(self, data: bytes, path: str, content_type: str) -> None:
+        """Uploads an artifact (GLB/PNG) to storage."""
+        try:
+            await self.storage_service.upload_file(data, path, content_type)
+        except Exception as e:
+            logger.error(f"Failed to upload artifact {path}: {e}")
+            # Log warning and continue - user won't see thumbnail but
+            # analysis event won't fail
+            logger.warning(f"Proceeding without artifact {path}")
 
     async def publish_failure(
         self, correlation_id: UUID | None, file_id: str, error_code: str, details: str

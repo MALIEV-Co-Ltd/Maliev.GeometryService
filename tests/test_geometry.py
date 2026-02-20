@@ -69,7 +69,7 @@ def test_analyze_cube_formats(processor, extension):
     with cube_path.open("rb") as f:
         stream = io.BytesIO(f.read())
         try:
-            metrics = processor.analyze_stream(stream, extension)
+            metrics, _, _ = processor.analyze_stream(stream, extension)
         except Exception as e:
             if "NoneType" in str(e):
                 pytest.skip("Backend failed to process minimal CAD asset")
@@ -108,7 +108,7 @@ def test_analyze_broken_mesh(processor):
     broken_path = ASSETS_DIR / "broken.stl"
     with broken_path.open("rb") as f:
         stream = io.BytesIO(f.read())
-        metrics = processor.analyze_stream(stream, ".stl")
+        metrics, _, _ = processor.analyze_stream(stream, ".stl")
 
     assert metrics.is_manifold is False
     assert metrics.volume_cm3 >= 0

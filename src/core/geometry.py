@@ -42,19 +42,21 @@ class GeometryProcessor:
 
     def analyze_stream(
         self, file_stream: io.BytesIO, file_extension: str
-    ) -> GeometryMetrics:
+    ) -> tuple[GeometryMetrics, bytes | None, bytes | None]:
         """
-        Analyzes a 3D file stream and extracts geometric metrics.
-        Assumes input units are Millimeters (mm).
+        Analyzes a 3D file stream and extracts geometric metrics +
+        artifacts (GLB, Thumbnail). Assumes input units are Millimeters (mm).
         """
         file_stream.seek(0)
         data = file_stream.read()
         return self.analyze_bytes(data, file_extension)
 
-    def analyze_bytes(self, data: bytes, file_extension: str) -> GeometryMetrics:
+    def analyze_bytes(
+        self, data: bytes, file_extension: str
+    ) -> tuple[GeometryMetrics, bytes | None, bytes | None]:
         """
         Analyzes a 3D file data and extracts geometric metrics.
-        Assumes input units are Millimeters (mm).
+        Returns (metrics, glb_bytes, thumbnail_bytes).
         """
         file_stream = io.BytesIO(data)
         tmp_path = None
@@ -109,6 +111,9 @@ class GeometryProcessor:
                 mesh_data = trimesh.load(file_stream, file_type=ext, force="mesh")
                 if isinstance(mesh_data, trimesh.Scene):
                     if len(mesh_data.geometry) > 1:
+                        # Merge geometries for visualization/analysis,
+                        # but keeping strict check for now.
+                        # For now, we strict check.
                         raise ValueError("MULTI_BODY_ERROR")
                     if not mesh_data.geometry:
                         raise ValueError("EMPTY_FILE_ERROR")
@@ -148,7 +153,7 @@ class GeometryProcessor:
 
             support_mm3 = max(0.0, vol_bbox - volume_mm3)
 
-            return GeometryMetrics(
+            metrics = GeometryMetrics(
                 volume_cm3=volume_mm3 / 1000.0,
                 support_volume_cm3=support_mm3 / 1000.0,
                 surface_area_cm2=area_mm2 / 100.0,
@@ -157,6 +162,12 @@ class GeometryProcessor:
                 triangle_count=len(mesh.faces),
                 euler_number=euler_number,
             )
+
+            # Generate Artifacts
+            glb_bytes = self._generate_glb(mesh)
+            thumbnail_bytes = self._generate_thumbnail(mesh)
+
+            return metrics, glb_bytes, thumbnail_bytes
 
         except Exception as e:
             if "MULTI_BODY_ERROR" in str(e):
@@ -167,9 +178,30 @@ class GeometryProcessor:
                 with contextlib.suppress(OSError):
                     Path(tmp_path).unlink()
 
+    def _generate_glb(self, mesh: trimesh.Trimesh) -> bytes | None:
+        try:
+            return cast(bytes, mesh.export(file_type="glb"))
+        except Exception:
+            return None
+
+    def _generate_thumbnail(self, mesh: trimesh.Trimesh) -> bytes | None:
+        try:
+            # Create a scene
+            scene = trimesh.Scene(geometry=mesh)
+
+            # trimesh auto-sets camera on scene.save_image
+            # Note: uses pyrender internally if installed
+            png_bytes = scene.save_image(resolution=(512, 512), visible=True)
+            if isinstance(png_bytes, bytes):
+                return png_bytes
+            return None
+        except Exception:
+            # Fallback or failure (e.g. no EGL)
+            return None
+
     async def analyze_async(
         self, file_stream: io.BytesIO, file_extension: str
-    ) -> GeometryMetrics:
+    ) -> tuple[GeometryMetrics, bytes | None, bytes | None]:
         """Wrapper to run analyze_bytes in a separate process."""
         loop = asyncio.get_running_loop()
 

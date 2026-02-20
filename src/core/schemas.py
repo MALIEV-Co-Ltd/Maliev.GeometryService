@@ -60,6 +60,10 @@ class FileAnalyzedMessage(BaseModel):
     file_id: str = Field(alias="fileId")
     metrics: GeometryMetrics
     processed_at: datetime = Field(alias="processedAt")
+    glb_storage_path: str | None = Field(alias="glbStoragePath", default=None)
+    thumbnail_storage_path: str | None = Field(
+        alias="thumbnailStoragePath", default=None
+    )
 
 
 class FileAnalyzedEvent(MassTransitEnvelope):

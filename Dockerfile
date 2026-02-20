@@ -35,7 +35,7 @@ ENV PYTHONUNBUFFERED=1 \
 
 ENV PATH="$VENV_PATH/bin:$PATH"
 
-# Install system dependencies for gmsh and trimesh
+# Install system dependencies for gmsh, trimesh, and pyrender (EGL)
 RUN apt-get update \
     && apt-get install --no-install-recommends -y \
     libglu1-mesa \
@@ -44,8 +44,13 @@ RUN apt-get update \
     libxft2 \
     libfltk1.3 \
     gmsh \
+    libgl1-mesa-dri \
+    libegl1-mesa \
+    libgles2-mesa \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
+
+ENV PYOPENGL_PLATFORM=egl
 
 WORKDIR /app
 
