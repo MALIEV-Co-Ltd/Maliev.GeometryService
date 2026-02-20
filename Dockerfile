@@ -42,11 +42,10 @@ RUN apt-get update \
     libxcursor1 \
     libxinerama1 \
     libxft2 \
-    libfltk1.3 \
     gmsh \
     libgl1-mesa-dri \
-    libegl1-mesa \
-    libgles2-mesa \
+    libegl1 \
+    libgles2 \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
