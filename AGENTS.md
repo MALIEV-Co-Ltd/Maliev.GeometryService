@@ -1,4 +1,4 @@
-# AGENTS.md - Developer Guide for Maliev Geometry Service
+﻿# AGENTS.md - Developer Guide for Maliev Geometry Service
 
 ## 🛠 Build & Development Commands
 
