@@ -44,7 +44,9 @@ def setup_observability(app: FastAPI | None = None) -> None:
 
         # Optional: Console Span Exporter for local debugging
         if os.getenv("DEBUG_TELEMETRY", "false").lower() == "true":
-            tracer_provider.add_span_processor(BatchSpanProcessor(ConsoleSpanExporter()))
+            tracer_provider.add_span_processor(
+                BatchSpanProcessor(ConsoleSpanExporter())
+            )
 
         # --- 2. Setup Metrics ---
         metric_reader = PeriodicExportingMetricReader(

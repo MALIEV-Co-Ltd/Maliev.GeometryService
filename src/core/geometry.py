@@ -11,23 +11,35 @@ from typing import cast
 import gmsh
 import numpy as np
 import trimesh
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field
+
+from src.core.dfm import DfmAnalyzer, DfmReport
+
+
+def to_camel(string: str) -> str:
+    components = string.split("_")
+    return components[0] + "".join(x.title() for x in components[1:])
 
 
 class BoundingBox(BaseModel):
+    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
+
     x: float
     y: float
     z: float
 
 
 class GeometryMetrics(BaseModel):
-    volume_cm3: float
-    support_volume_cm3: float
-    surface_area_cm2: float
-    bounding_box: BoundingBox
-    is_manifold: bool
-    triangle_count: int
-    euler_number: int
+    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
+
+    volume_cm3: float = Field(alias="volumeCm3")
+    support_volume_cm3: float = Field(alias="supportVolumeCm3")
+    surface_area_cm2: float = Field(alias="surfaceAreaCm2")
+    bounding_box: BoundingBox = Field(alias="boundingBox")
+    is_manifold: bool = Field(alias="isManifold")
+    triangle_count: int = Field(alias="triangleCount")
+    euler_number: int = Field(alias="eulerNumber")
+    dfm_report: DfmReport | None = Field(alias="dfmReport", default=None)
 
 
 class GeometryProcessor:
@@ -153,14 +165,22 @@ class GeometryProcessor:
 
             support_mm3 = max(0.0, vol_bbox - volume_mm3)
 
+            dfm_analyzer = DfmAnalyzer()
+            dfm_report: DfmReport | None = None
+            try:
+                dfm_report = dfm_analyzer.analyze(mesh)
+            except Exception:
+                dfm_report = None
+
             metrics = GeometryMetrics(
-                volume_cm3=volume_mm3 / 1000.0,
-                support_volume_cm3=support_mm3 / 1000.0,
-                surface_area_cm2=area_mm2 / 100.0,
-                bounding_box=bbox,
-                is_manifold=is_manifold,
-                triangle_count=len(mesh.faces),
-                euler_number=euler_number,
+                volumeCm3=volume_mm3 / 1000.0,
+                supportVolumeCm3=support_mm3 / 1000.0,
+                surfaceAreaCm2=area_mm2 / 100.0,
+                boundingBox=bbox,
+                isManifold=is_manifold,
+                triangleCount=len(mesh.faces),
+                eulerNumber=euler_number,
+                dfmReport=dfm_report,
             )
 
             # Generate Artifacts
