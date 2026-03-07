@@ -40,6 +40,7 @@ class UploadConsumer:
     async def connect(self) -> None:
         max_retries = 10
         base_delay = 1.0
+        max_delay = 30.0
 
         for attempt in range(max_retries):
             try:
@@ -68,7 +69,7 @@ class UploadConsumer:
                         f"{max_retries} attempts: {e}"
                     )
                     raise
-                delay = base_delay * (2**attempt)
+                delay = min(base_delay * (2**attempt), max_delay)
                 logger.warning(
                     f"RabbitMQ connection attempt {attempt + 1}/{max_retries} "
                     f"failed, retrying in {delay}s: {e}"
@@ -110,11 +111,10 @@ class UploadConsumer:
                     file_id = inner_msg.file_id or inner_msg.upload_id
                     span.set_attribute("file_id", str(file_id))
 
-                    # 0. Filter by file extension before downloading
-                    file_ext = Path(inner_msg.storage_path).suffix.lower().strip(".")
+                    file_ext = Path(inner_msg.storage_path).suffix.lower()
                     supported_exts = ["igs", "iges", "step", "stp", "stl", "obj", "3mf"]
 
-                    if file_ext not in supported_exts:
+                    if file_ext.strip(".") not in supported_exts:
                         logger.debug(
                             f"Skipping file {file_id}: extension {file_ext} "
                             "not supported by geometry service"
@@ -146,7 +146,6 @@ class UploadConsumer:
                         file_stream.seek(0)
 
                         # 3. Analyze geometry
-                        file_ext = Path(inner_msg.storage_path).suffix.lower()
                         (
                             metrics,
                             glb_bytes,
@@ -223,9 +222,7 @@ class UploadConsumer:
                         correlation_id, file_id, "SYSTEM_ERROR", str(e)
                     )
 
-    async def download_with_retry(
-        self, url: str, attempts: int = 3
-    ) -> io.BytesIO | None:
+    async def download_with_retry(self, url: str, attempts: int = 3) -> io.BytesIO:
         """Implements 3-attempt retry logic with exponential backoff."""
         from src.infrastructure.storage import PermanentDownloadError
 
@@ -233,7 +230,6 @@ class UploadConsumer:
             try:
                 return await self.storage_service.download_file(url)
             except PermanentDownloadError:
-                # Do not retry 404, 401, etc.
                 raise
             except Exception as e:
                 if i == attempts - 1:
@@ -244,7 +240,8 @@ class UploadConsumer:
                     f"(Attempt {i + 1}/{attempts})"
                 )
                 await asyncio.sleep(wait_time)
-        return None
+
+        raise RuntimeError("Unexpected: download_with_retry exhausted all attempts")
 
     async def upload_artifact(self, data: bytes, path: str, content_type: str) -> None:
         """Uploads an artifact (GLB/PNG) to storage."""
