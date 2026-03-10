@@ -95,9 +95,12 @@ async def test_process_message_success(consumer, mock_storage, mock_processor):
 
     # Assert
     assert consumer.publish_event.called
-    routing_key = consumer.publish_event.call_args[0][1]
+    # Check first call (analysis.completed) - use call_args_list[0] not call_args
+    # because preview-images.generated is published after, overwriting call_args
+    first_call_args = consumer.publish_event.call_args_list[0]
+    routing_key = first_call_args[0][1]
     assert routing_key == "maliev.geometryservice.v1.analysis.completed"
-    success_event = consumer.publish_event.call_args[0][0]
+    success_event = first_call_args[0][0]
     assert success_event.correlation_id == correlation_id
     assert success_event.message.metrics.volume_cm3 == 1.0
 
