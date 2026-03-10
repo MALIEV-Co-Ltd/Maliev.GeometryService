@@ -112,3 +112,6 @@ docker-compose.override.yml
 # Generated Test Output
 previews/
 test_output/
+
+# Helper Scripts
+*.bat
