@@ -91,12 +91,12 @@ def _generate_preview_images_sync(mesh: trimesh.Trimesh) -> dict[str, bytes | No
 
                 pl.add_mesh(
                     pv_mesh,
-                    color="#B0B0B0",
+                    color="#D0D0D0",
                     smooth_shading=True,
-                    specular=0.5,
-                    specular_power=30,
-                    ambient=0.3,
-                    diffuse=0.7,
+                    specular=0.0,
+                    specular_power=0,
+                    ambient=0.5,
+                    diffuse=0.8,
                 )
 
                 axis = np.array(cam_config["axis"], dtype=float)
@@ -117,21 +117,21 @@ def _generate_preview_images_sync(mesh: trimesh.Trimesh) -> dict[str, bytes | No
                 key_light = pv.Light(
                     position=(center[0] + max_dim * 3, center[1] - max_dim * 2, center[2] + max_dim * 3),
                     focal_point=tuple(center),
-                    intensity=0.8,
+                    intensity=0.6,
                 )
                 pl.add_light(key_light)
                 fill_light = pv.Light(
                     position=(center[0] - max_dim * 3, center[1] - max_dim, center[2] + max_dim),
                     focal_point=tuple(center),
-                    intensity=0.4,
+                    intensity=0.5,
                 )
                 pl.add_light(fill_light)
-                rim_light = pv.Light(
+                ambient_light = pv.Light(
                     position=(center[0], center[1] + max_dim * 3, center[2] + max_dim * 2),
                     focal_point=tuple(center),
                     intensity=0.3,
                 )
-                pl.add_light(rim_light)
+                pl.add_light(ambient_light)
 
                 pl.show(auto_close=False)
                 img = pl.screenshot(transparent_background=False, return_img=True)
