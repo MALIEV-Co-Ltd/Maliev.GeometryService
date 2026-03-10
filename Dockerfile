@@ -35,7 +35,7 @@ ENV PYTHONUNBUFFERED=1 \
 
 ENV PATH="$VENV_PATH/bin:$PATH"
 
-# Install system dependencies for gmsh, trimesh, and pyrender (EGL)
+# Install system dependencies for gmsh and headless rendering (OSMesa)
 RUN apt-get update \
     && apt-get install --no-install-recommends -y \
     libglu1-mesa \
@@ -43,13 +43,13 @@ RUN apt-get update \
     libxinerama1 \
     libxft2 \
     gmsh \
+    libosmesa6 \
     libgl1-mesa-dri \
-    libegl1 \
-    libgles2 \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
-ENV PYOPENGL_PLATFORM=egl
+ENV PYVISTA_OFF_SCREEN=true
+ENV MESA_GL_VERSION_OVERRIDE=3.3
 
 WORKDIR /app
 

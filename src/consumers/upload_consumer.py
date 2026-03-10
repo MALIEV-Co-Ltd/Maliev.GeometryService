@@ -20,6 +20,9 @@ from src.core.schemas import (
     FileAnalyzedEvent,
     FileAnalyzedMessage,
     FileUploadedEvent,
+    PreviewImagesGeneratedEvent,
+    PreviewImagesGeneratedMessage,
+    PreviewImagesMessage,
 )
 from src.infrastructure.storage import IStorageService
 
@@ -78,7 +81,7 @@ class UploadConsumer:
 
     async def publish_event(
         self,
-        event: FileAnalyzedEvent | FileAnalysisFailedEvent,
+        event: FileAnalyzedEvent | FileAnalysisFailedEvent | PreviewImagesGeneratedEvent,
         routing_key: str,
     ) -> None:
         if self.exchange is None:
@@ -150,6 +153,7 @@ class UploadConsumer:
                             metrics,
                             glb_bytes,
                             thumb_bytes,
+                            preview_images,
                         ) = await self.geometry_processor.analyze_async(
                             file_stream, file_ext
                         )
@@ -170,6 +174,17 @@ class UploadConsumer:
                                 thumb_bytes, thumb_path, "image/png"
                             )
 
+                        # 4b. Upload preview images
+                        preview_paths = {}
+                        if preview_images:
+                            for side, image_bytes in preview_images.items():
+                                if image_bytes:
+                                    preview_path = f"{inner_msg.storage_path}_preview_{side}.png"
+                                    await self.upload_artifact(
+                                        image_bytes, preview_path, "image/png"
+                                    )
+                                    preview_paths[side] = preview_path
+
                         # 5. Publish Success
                         success_event = FileAnalyzedEvent(
                             messageId=uuid4(),
@@ -189,6 +204,41 @@ class UploadConsumer:
                             success_event,
                             "maliev.geometryservice.v1.analysis.completed",
                         )
+
+                        # 6. Publish Preview Images Generated Event
+                        if preview_paths:
+                            preview_event = PreviewImagesGeneratedEvent(
+                                messageId=uuid4(),
+                                correlationId=correlation_id,
+                                messageType=[
+                                    "urn:message:Maliev.GeometryService.Api.Events:PreviewImagesGeneratedEvent"
+                                ],
+                                message=PreviewImagesGeneratedMessage(
+                                    storagePath=inner_msg.storage_path,
+                                    previewImages=PreviewImagesMessage(
+                                        front=preview_paths.get("front"),
+                                        left=preview_paths.get("left"),
+                                        right=preview_paths.get("right"),
+                                        back=preview_paths.get("back"),
+                                        top=preview_paths.get("top"),
+                                        bottom=preview_paths.get("bottom"),
+                                    ),
+                                    generatedAt=datetime.now(timezone.utc),
+                                ),
+                            )
+                            await self.publish_event(
+                                preview_event,
+                                "maliev.geometryservice.v1.preview-images.generated",
+                            )
+                            logger.info(
+                                "Successfully generated preview images",
+                                extra={
+                                    "file.id": str(file_id),
+                                    "storage_path": inner_msg.storage_path,
+                                    "preview_paths": preview_paths,
+                                },
+                            )
+
                         logger.info(
                             "Successfully analyzed file",
                             extra={

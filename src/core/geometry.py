@@ -1,7 +1,9 @@
+import os
+
 import asyncio
 import contextlib
 import io
-import os
+import logging
 import shutil
 import tempfile
 from concurrent.futures import ProcessPoolExecutor
@@ -12,6 +14,9 @@ import gmsh
 import numpy as np
 import trimesh
 from pydantic import BaseModel, ConfigDict, Field
+
+
+logger = logging.getLogger(__name__)
 
 
 def to_camel(string: str) -> str:
@@ -37,6 +42,123 @@ class GeometryMetrics(BaseModel):
     is_manifold: bool = Field(alias="isManifold")
     triangle_count: int = Field(alias="triangleCount")
     euler_number: int = Field(alias="eulerNumber")
+
+
+def _generate_preview_images_sync(mesh: trimesh.Trimesh) -> dict[str, bytes | None]:
+    """
+    Generate 6-sided preview images using PyVista offscreen rendering.
+    Returns a dictionary with keys: front, left, right, back, top, bottom.
+    Uses VTK/OSMesa for headless CPU rendering (no GPU required).
+    """
+    results: dict[str, bytes | None] = {}
+    empty: dict[str, bytes | None] = {"front": None, "back": None, "left": None, "right": None, "top": None, "bottom": None}
+
+    try:
+        import pyvista as pv
+
+        pv.OFF_SCREEN = True
+    except Exception as e:
+        logger.error(f"Failed to import pyvista: {e}")
+        return empty
+
+    sides = {
+        "front":  {"axis": (0, -1, 0), "viewup": (0, 0, 1)},
+        "back":   {"axis": (0,  1, 0), "viewup": (0, 0, 1)},
+        "left":   {"axis": (-1, 0, 0), "viewup": (0, 0, 1)},
+        "right":  {"axis": (1,  0, 0), "viewup": (0, 0, 1)},
+        "top":    {"axis": (0,  0, 1), "viewup": (0, 1, 0)},
+        "bottom": {"axis": (0,  0, -1), "viewup": (0, -1, 0)},
+    }
+
+    try:
+        faces_pv = np.column_stack([
+            np.full(len(mesh.faces), 3, dtype=np.int32),
+            mesh.faces
+        ]).ravel()
+        pv_mesh = pv.PolyData(mesh.vertices.copy(), faces_pv)
+        pv_mesh.compute_normals(inplace=True)
+
+        center = np.array(pv_mesh.center)
+        bounds = np.array(pv_mesh.bounds)
+        dims = np.array([bounds[1] - bounds[0], bounds[3] - bounds[2], bounds[5] - bounds[4]])
+        max_dim = float(np.max(dims))
+        distance = max_dim * 2.5
+
+        for side_name, cam_config in sides.items():
+            try:
+                pl = pv.Plotter(off_screen=True, window_size=[512, 512])
+                pl.set_background("white")
+
+                pl.add_mesh(
+                    pv_mesh,
+                    color="#B0B0B0",
+                    smooth_shading=True,
+                    specular=0.5,
+                    specular_power=30,
+                    ambient=0.3,
+                    diffuse=0.7,
+                )
+
+                axis = np.array(cam_config["axis"], dtype=float)
+                viewup = np.array(cam_config["viewup"], dtype=float)
+                camera_pos = center + axis * distance
+                focal_point = center
+
+                pl.camera_position = [
+                    tuple(camera_pos),
+                    tuple(focal_point),
+                    tuple(viewup),
+                ]
+
+                pl.enable_parallel_projection()
+                pl.reset_camera()
+
+                pl.remove_all_lights()
+                key_light = pv.Light(
+                    position=(center[0] + max_dim * 3, center[1] - max_dim * 2, center[2] + max_dim * 3),
+                    focal_point=tuple(center),
+                    intensity=0.8,
+                )
+                pl.add_light(key_light)
+                fill_light = pv.Light(
+                    position=(center[0] - max_dim * 3, center[1] - max_dim, center[2] + max_dim),
+                    focal_point=tuple(center),
+                    intensity=0.4,
+                )
+                pl.add_light(fill_light)
+                rim_light = pv.Light(
+                    position=(center[0], center[1] + max_dim * 3, center[2] + max_dim * 2),
+                    focal_point=tuple(center),
+                    intensity=0.3,
+                )
+                pl.add_light(rim_light)
+
+                pl.show(auto_close=False)
+                img = pl.screenshot(transparent_background=False, return_img=True)
+                pl.close()
+
+                from PIL import Image
+
+                pil_img = Image.fromarray(img)
+                buf = io.BytesIO()
+                pil_img.save(buf, format="PNG")
+                buf.seek(0)
+                results[side_name] = buf.getvalue()
+                buf.close()
+
+            except Exception as e:
+                logger.error(f"Failed to generate preview image for side {side_name}: {e}")
+                results[side_name] = None
+
+    except Exception as e:
+        logger.error(f"Failed to generate preview images: {e}")
+        return empty
+
+    for side in empty:
+        if side not in results:
+            results[side] = None
+
+    return results
 
 
 def _analyze_bytes_worker(data: bytes, file_extension: str) -> dict[str, Any]:
@@ -123,16 +245,15 @@ def _analyze_bytes_worker(data: bytes, file_extension: str) -> dict[str, Any]:
         support_mm3 = max(0.0, vol_bbox - volume_mm3)
 
         glb_bytes: bytes | None = None
-        thumbnail_bytes: bytes | None = None
 
         with contextlib.suppress(Exception):
             glb_bytes = cast(bytes, mesh.export(file_type="glb"))
 
+        preview_images: dict[str, bytes | None] = {}
         with contextlib.suppress(Exception):
-            scene = trimesh.Scene(geometry=mesh)
-            png_bytes = scene.save_image(resolution=(512, 512), visible=True)
-            if isinstance(png_bytes, bytes):
-                thumbnail_bytes = png_bytes
+            preview_images = _generate_preview_images_sync(mesh)
+
+        thumbnail_bytes = preview_images.get("front")
 
         return {
             "volume_cm3": volume_mm3 / 1000.0,
@@ -144,6 +265,7 @@ def _analyze_bytes_worker(data: bytes, file_extension: str) -> dict[str, Any]:
             "euler_number": euler_number,
             "glb_bytes": glb_bytes,
             "thumbnail_bytes": thumbnail_bytes,
+            "preview_images": preview_images,
         }
 
     except ValueError:
@@ -285,17 +407,14 @@ class GeometryProcessor:
 
     def _generate_thumbnail(self, mesh: trimesh.Trimesh) -> bytes | None:
         try:
-            scene = trimesh.Scene(geometry=mesh)
-            png_bytes = scene.save_image(resolution=(512, 512), visible=True)
-            if isinstance(png_bytes, bytes):
-                return png_bytes
-            return None
+            preview_images = _generate_preview_images_sync(mesh)
+            return preview_images.get("front")
         except Exception:
             return None
 
     async def analyze_async(
         self, file_stream: io.BytesIO, file_extension: str
-    ) -> tuple[GeometryMetrics, bytes | None, bytes | None]:
+    ) -> tuple[GeometryMetrics, bytes | None, bytes | None, dict[str, bytes | None]]:
         loop = asyncio.get_running_loop()
         file_stream.seek(0)
         data = file_stream.read()
@@ -314,4 +433,4 @@ class GeometryProcessor:
             eulerNumber=result["euler_number"],
         )
 
-        return metrics, result["glb_bytes"], result["thumbnail_bytes"]
+        return metrics, result["glb_bytes"], result["thumbnail_bytes"], result.get("preview_images", {})

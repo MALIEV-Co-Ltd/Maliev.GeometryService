@@ -28,10 +28,10 @@ pygmsh = "^7.1.17"
 networkx = "<3.6"
 lxml = "^6.0.2"
 pre-commit = "^4.5.1"
-pyglet = "<2"
-pyrender = "^0.1.45"
 boto3 = "^1.36.0"
 aioboto3 = "^13.0.0"
+pyvista = "^0.44.0"
+Pillow = "^11.1.0"
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^8.4.2"

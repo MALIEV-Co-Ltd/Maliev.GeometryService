@@ -47,7 +47,7 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y gmsh libglu1-mesa libxcursor1 libxinerama1 libxft2 libfltk1.3
+          sudo apt-get install -y gmsh libglu1-mesa libxcursor1 libxinerama1 libxft2 libfltk1.3 libosmesa6
 
       - name: Install dependencies
         run: poetry install
@@ -58,3 +58,6 @@ jobs:
       - name: Test
         run: poetry run pytest
         working-directory: ${{ github.workspace }}
+        env:
+          PYVISTA_OFF_SCREEN: "true"
+          MESA_GL_VERSION_OVERRIDE: "3.3"

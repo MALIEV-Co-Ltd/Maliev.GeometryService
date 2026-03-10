@@ -78,6 +78,14 @@ async def test_process_message_success(consumer, mock_storage, mock_processor):
         ),
         b"glb-content",
         b"thumb-content",
+        {
+            "front": b"front-png",
+            "back": b"back-png",
+            "left": b"left-png",
+            "right": b"right-png",
+            "top": b"top-png",
+            "bottom": b"bottom-png",
+        },
     )
 
     consumer.publish_event = AsyncMock()

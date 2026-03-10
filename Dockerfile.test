@@ -1,0 +1,57 @@
+# Dockerfile for running geometry tests with headless rendering
+# This runs tests inside a Linux container where EGL rendering works
+FROM python:3.11-slim
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    POETRY_VERSION=2.2.1 \
+    POETRY_HOME="/opt/poetry" \
+    POETRY_VIRTUALENVS_IN_PROJECT=true \
+    POETRY_NO_INTERACTION=1
+
+ENV PATH="$POETRY_HOME/bin:$PATH"
+
+# Install system dependencies for headless rendering (OSMesa + Xvfb)
+RUN apt-get update && apt-get install -y \
+    curl \
+    build-essential \
+    libglu1-mesa \
+    libxcursor1 \
+    libxinerama1 \
+    libxft2 \
+    libgl1 \
+    libgl1-mesa-dri \
+    libosmesa6 \
+    xvfb \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
+ENV DISPLAY=:99
+
+# Install Poetry
+RUN curl -sSL https://install.python-poetry.org | python3 -
+
+WORKDIR /app
+
+# Copy dependency files first for better caching
+COPY pyproject.toml poetry.lock* ./
+
+# Install dependencies
+RUN poetry install --only main,dev --no-root
+
+# Remove the installed package so mounted source takes precedence
+RUN poetry run pip uninstall -y maliev-geometryservice || true
+
+# Copy source and tests
+COPY src/ ./src/
+COPY tests/ ./tests/
+
+# Add src to PYTHONPATH so mounted source is used
+ENV PYTHONPATH="/app/src:$PYTHONPATH"
+
+# Set environment for headless rendering with PyVista/OSMesa
+ENV PYVISTA_OFF_SCREEN=true
+ENV MESA_GL_VERSION_OVERRIDE=3.3
+
+# Run tests with verbose output to see preview image generation
+CMD ["poetry", "run", "pytest", "-v", "-s", "tests/test_geometry.py"]

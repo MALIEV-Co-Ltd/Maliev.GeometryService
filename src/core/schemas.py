@@ -85,3 +85,30 @@ class FileAnalysisFailedEvent(MassTransitEnvelope):
     """Outgoing failure event wrapped in MassTransit envelope."""
 
     message: FileAnalysisFailedMessage
+
+
+class PreviewImagesMessage(BaseModel):
+    """Payload for preview images."""
+
+    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
+    front: str | None = Field(alias="front", default=None)
+    left: str | None = Field(alias="left", default=None)
+    right: str | None = Field(alias="right", default=None)
+    back: str | None = Field(alias="back", default=None)
+    top: str | None = Field(alias="top", default=None)
+    bottom: str | None = Field(alias="bottom", default=None)
+
+
+class PreviewImagesGeneratedMessage(BaseModel):
+    """Payload for PreviewImagesGeneratedEvent."""
+
+    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
+    storage_path: str = Field(alias="storagePath")
+    preview_images: PreviewImagesMessage = Field(alias="previewImages")
+    generated_at: datetime = Field(alias="generatedAt")
+
+
+class PreviewImagesGeneratedEvent(MassTransitEnvelope):
+    """Outgoing event for generated preview images."""
+
+    message: PreviewImagesGeneratedMessage
