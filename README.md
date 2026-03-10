@@ -44,6 +44,35 @@ This service adheres to the platform development mandates adapted for Python:
 - **Mesh Support**: High-performance analysis of STL, OBJ, and 3MF files.
 - **Topological Validation**: Checks for manifold status and mesh integrity.
 - **Scalable Workers**: Designed to run as multiple consumer instances for high throughput.
+- **6-Sided Preview Images**: Generates 6-view renders (front, back, left, right, top, bottom) of 3D geometry for visual inspection in Job Tickets.
+
+---
+
+## 🖼️ Preview Image Generation
+
+The service generates 6-sided preview images of 3D geometry for use in Job Ticket PDFs. These are rendered headlessly using PyVista with OSMesa.
+
+### Rendering Style
+
+The preview renderer uses Shapr3D/Onshape-style CAD rendering:
+- **Matte gray material** — no specular highlights
+- **Smooth shading** — interpolated normals for curved surfaces
+- **Soft 3-point lighting** — key, fill, and ambient lights for even illumination
+- **No edge lines** — avoids exposing STL mesh tessellation artifacts
+
+### Generating Preview Images for Review
+
+```bash
+# Windows
+generate_previews.bat
+
+# Linux/Bash
+./generate_previews.sh
+```
+
+This builds the Docker test container, runs the preview generation test, and copies output to `previews/` folder.
+
+See [AGENTS.md](./AGENTS.md) for detailed instructions.
 
 ---
 
@@ -92,6 +121,7 @@ This service primarily operates via RabbitMQ events.
 | `maliev.uploadservice` | `v1.upload.completed` | Consumes uploaded file events |
 | `maliev.geometryservice` | `v1.analysis.completed` | Publishes successful analysis results |
 | `maliev.geometryservice` | `v1.analysis.failed` | Publishes analysis failure details |
+| `maliev.geometryservice` | `v1.preview-images.generated` | Publishes 6-sided preview image paths (after analysis) |
 
 ---
 

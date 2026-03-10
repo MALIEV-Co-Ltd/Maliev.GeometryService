@@ -131,3 +131,60 @@ entity.Property<uint>("xmin").HasColumnType("xid").IsRowVersion();
 - ❌ Never use `UseXminAsConcurrencyToken()` (removed in Npgsql EF v7)
 - ❌ Never use entity property `public uint Xmin { get; set; }` or `public uint xmin { get; set; }`
 - ❌ Never use `.Ignore(e => e.Xmin)` — remove the entity property instead
+
+---
+
+## 🎨 Generating Preview Images for Review
+
+Preview images are 6-sided renders of 3D geometry (front, back, left, right, top, bottom) generated using PyVista with OSMesa for headless rendering.
+
+### Running Preview Generation
+
+**Windows:**
+```bash
+generate_previews.bat
+```
+
+**Linux/Bash:**
+```bash
+./generate_previews.sh
+```
+
+Both scripts:
+1. Run the Docker test container with Xvfb
+2. Execute the preview image test
+3. Copy output from `test_output/` to `previews/`
+
+### Manual Docker Commands
+
+If you prefer to run manually:
+
+```bash
+# Build and run the test container
+docker-compose -f docker-compose.test.yml build test
+docker-compose -f docker-compose.test.yml run --rm test
+
+# Copy output to accessible folder
+mkdir -p previews
+cp -r test_output/* previews/
+# or on Windows:
+xcopy /E /I /Y test_output previews
+```
+
+### Preview Output Location
+
+Generated images are saved to:
+- `test_output/` — raw test output (gitignored)
+- `previews/` — copied images for viewing (gitignored)
+
+### Rendering Style
+
+The preview renderer uses Shapr3D/Onshape-style CAD rendering:
+- **Matte gray material** — no specular highlights
+- **Smooth shading** — interpolated normals for curved surfaces
+- **Soft 3-point lighting** — key, fill, and ambient lights for even illumination
+- **No edge lines** — avoids exposing STL mesh tessellation artifacts
+
+### Test STL Model
+
+The reference test model is `tests/assets/dice.stl` — a die with rounded corners and indentations for the dots. This model is used to validate the rendering quality.
