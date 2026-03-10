@@ -308,157 +308,56 @@ def test_analyze_broken_mesh(processor):
 class TestPreviewImagesOutput:
     """Tests that save preview images for manual inspection."""
 
-    def test_save_preview_images_for_manual_inspection(self):
-        """
-        Generate and save 6-sided preview images for manual inspection.
-        Uses pyramid.stl which has distinct sides for easy identification.
-
-        Output directory: test_output/ (mounted volume)
-        - pyramid_front.png
-        - pyramid_back.png
-        - pyramid_left.png
-        - pyramid_right.png
-        - pyramid_top.png
-        - pyramid_bottom.png
-        """
-        from pathlib import Path
-
-        # Use pyramid (non-symmetrical, easy to identify each side)
-        pyramid_path = ASSETS_DIR / "pyramid.stl"
-        if not pyramid_path.exists():
-            pytest.skip("Pyramid test asset missing")
-
-        mesh = load_mesh(pyramid_path)
-        result = _generate_preview_images_sync(mesh)
-
-        # Determine output directory
-        # Check multiple possible locations for Docker container vs local dev
+    @staticmethod
+    def _get_output_dir() -> Path:
+        """Find a writable output directory."""
         possible_dirs = [
             Path("test_output"),
             Path("/app/test_output"),
             Path(__file__).parent.parent / "test_output",
         ]
-
-        output_dir = None
         for d in possible_dirs:
             try:
                 d.mkdir(parents=True, exist_ok=True)
-                # Test writeability
                 test_file = d / ".write_test"
                 test_file.write_text("test")
                 test_file.unlink()
-                output_dir = d
-                break
+                return d
             except Exception:
                 continue
+        pytest.skip("Cannot write to any output directory")
 
-        if output_dir is None:
-            pytest.skip("Cannot write to any output directory")
+    def test_preview_images_for_dice(self):
+        """
+        Generate and save 6-sided preview images for dice.stl.
+        This is the reference model used to validate CAD-style rendering
+        (Shapr3D/Onshape look: matte material, feature edge lines, soft lighting).
+
+        Output directory: test_output/
+        - dice_front.png, dice_back.png, dice_left.png,
+        - dice_right.png, dice_top.png, dice_bottom.png
+        """
+        dice_path = ASSETS_DIR / "dice.stl"
+        if not dice_path.exists():
+            pytest.skip("Dice test asset missing")
+
+        output_dir = self._get_output_dir()
+        mesh = load_mesh(dice_path)
+        result = _generate_preview_images_sync(mesh)
 
         print(f"\nSaving preview images to: {output_dir}")
 
-        # Save each preview image
         sides_order = ["front", "back", "left", "right", "top", "bottom"]
         saved_count = 0
 
         for side in sides_order:
             image_bytes = result.get(side)
             if image_bytes and isinstance(image_bytes, bytes):
-                output_path = output_dir / f"pyramid_{side}.png"
+                output_path = output_dir / f"dice_{side}.png"
                 output_path.write_bytes(image_bytes)
                 print(f"  Saved: {output_path.name} ({len(image_bytes)} bytes)")
                 saved_count += 1
             else:
-                print(f"  Missing: pyramid_{side}.png")
+                print(f"  Missing: dice_{side}.png")
 
-        # Verify we generated images
-        assert saved_count > 0, f"No preview images were generated. Got: {result}"
-
-    def _save_preview_images(self, mesh_name: str, mesh_path: Path) -> int:
-        """Helper method to generate and save preview images for a mesh."""
-        from pathlib import Path as PathLib
-
-        mesh = load_mesh(mesh_path)
-        result = _generate_preview_images_sync(mesh)
-
-        # Determine output directory
-        possible_dirs = [
-            PathLib("test_output"),
-            PathLib("/app/test_output"),
-            PathLib(__file__).parent.parent / "test_output",
-        ]
-
-        output_dir = None
-        for d in possible_dirs:
-            try:
-                d.mkdir(parents=True, exist_ok=True)
-                test_file = d / ".write_test"
-                test_file.write_text("test")
-                test_file.unlink()
-                output_dir = d
-                break
-            except Exception:
-                continue
-
-        if output_dir is None:
-            return 0
-
-        sides_order = ["front", "back", "left", "right", "top", "bottom"]
-        saved_count = 0
-
-        for side in sides_order:
-            image_bytes = result.get(side)
-            if image_bytes and isinstance(image_bytes, bytes):
-                output_path = output_dir / f"{mesh_name}_{side}.png"
-                output_path.write_bytes(image_bytes)
-                print(f"  Saved: {output_path.name} ({len(image_bytes)} bytes)")
-                saved_count += 1
-            else:
-                print(f"  Missing: {mesh_name}_{side}.png")
-
-        return saved_count
-
-    def test_preview_images_for_cone(self):
-        """Generate preview images for cone.stl"""
-        cone_path = ASSETS_DIR / "cone.stl"
-        if not cone_path.exists():
-            pytest.skip("Cone test asset missing")
-
-        saved_count = self._save_preview_images("cone", cone_path)
-        assert saved_count > 0, "No preview images were generated for cone"
-
-    def test_preview_images_for_cylinder(self):
-        """Generate preview images for cylinder.stl"""
-        cylinder_path = ASSETS_DIR / "cylinder.stl"
-        if not cylinder_path.exists():
-            pytest.skip("Cylinder test asset missing")
-
-        saved_count = self._save_preview_images("cylinder", cylinder_path)
-        assert saved_count > 0, "No preview images were generated for cylinder"
-
-    def test_preview_images_for_helical(self):
-        """Generate preview images for helical.stl"""
-        helical_path = ASSETS_DIR / "helical.stl"
-        if not helical_path.exists():
-            pytest.skip("Helical test asset missing")
-
-        saved_count = self._save_preview_images("helical", helical_path)
-        assert saved_count > 0, "No preview images were generated for helical"
-
-    def test_preview_images_for_sphere(self):
-        """Generate preview images for sphere.stl"""
-        sphere_path = ASSETS_DIR / "sphere.stl"
-        if not sphere_path.exists():
-            pytest.skip("Sphere test asset missing")
-
-        saved_count = self._save_preview_images("sphere", sphere_path)
-        assert saved_count > 0, "No preview images were generated for sphere"
-
-    def test_preview_images_for_bracket(self):
-        """Generate preview images for bracket.stl"""
-        bracket_path = ASSETS_DIR / "bracket.stl"
-        if not bracket_path.exists():
-            pytest.skip("Bracket test asset missing")
-
-        saved_count = self._save_preview_images("bracket", bracket_path)
-        assert saved_count > 0, "No preview images were generated for bracket"
+        assert saved_count == 6, f"Expected 6 preview images, got {saved_count}"

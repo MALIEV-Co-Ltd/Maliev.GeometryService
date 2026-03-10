@@ -86,17 +86,23 @@ def _generate_preview_images_sync(mesh: trimesh.Trimesh) -> dict[str, bytes | No
 
         for side_name, cam_config in sides.items():
             try:
-                pl = pv.Plotter(off_screen=True, window_size=[512, 512])
-                pl.set_background("white")
+                pl = pv.Plotter(off_screen=True, window_size=[512, 512], lighting=None)
+                pl.set_background("#F5F5F5")
+                pl.enable_anti_aliasing("msaa")
 
+                # Matte body — Shapr3D/Onshape CAD style
+                # Pure smooth shading with no edge lines. On STL meshes, silhouette
+                # and feature_edges expose triangle tessellation artifacts on fillets.
+                # High ambient + moderate diffuse minimizes triangle-fan ray artifacts
+                # while still showing form through gentle directional shading.
                 pl.add_mesh(
                     pv_mesh,
-                    color="#D0D0D0",
+                    color="#C2C2C2",
                     smooth_shading=True,
-                    specular=0.0,
-                    specular_power=0,
-                    ambient=0.5,
-                    diffuse=0.8,
+                    specular=0.04,
+                    specular_power=5,
+                    ambient=0.45,
+                    diffuse=0.55,
                 )
 
                 axis = np.array(cam_config["axis"], dtype=float)
@@ -113,25 +119,42 @@ def _generate_preview_images_sync(mesh: trimesh.Trimesh) -> dict[str, bytes | No
                 pl.enable_parallel_projection()
                 pl.reset_camera()
 
-                pl.remove_all_lights()
+                # Soft, even CAD-style lighting — Shapr3D uses very uniform
+                # illumination with minimal shadow. Multiple lights from all
+                # directions prevent dark concavities and keep features readable.
+                d = max_dim * 4
+
+                # Upper-right key light
                 key_light = pv.Light(
-                    position=(center[0] + max_dim * 3, center[1] - max_dim * 2, center[2] + max_dim * 3),
+                    position=(center[0] + d, center[1] - d * 0.5, center[2] + d),
                     focal_point=tuple(center),
-                    intensity=0.6,
+                    intensity=0.55,
                 )
                 pl.add_light(key_light)
+
+                # Upper-left fill light
                 fill_light = pv.Light(
-                    position=(center[0] - max_dim * 3, center[1] - max_dim, center[2] + max_dim),
+                    position=(center[0] - d, center[1] - d * 0.3, center[2] + d * 0.8),
                     focal_point=tuple(center),
-                    intensity=0.5,
+                    intensity=0.45,
                 )
                 pl.add_light(fill_light)
-                ambient_light = pv.Light(
-                    position=(center[0], center[1] + max_dim * 3, center[2] + max_dim * 2),
+
+                # Front fill — prevents dark concavities on camera-facing surfaces
+                front_fill = pv.Light(
+                    position=tuple(camera_pos),
                     focal_point=tuple(center),
-                    intensity=0.3,
+                    intensity=0.25,
                 )
-                pl.add_light(ambient_light)
+                pl.add_light(front_fill)
+
+                # Bottom fill — softens underside shadows
+                bottom_fill = pv.Light(
+                    position=(center[0], center[1], center[2] - d),
+                    focal_point=tuple(center),
+                    intensity=0.15,
+                )
+                pl.add_light(bottom_fill)
 
                 pl.show(auto_close=False)
                 img = pl.screenshot(transparent_background=False, return_img=True)
