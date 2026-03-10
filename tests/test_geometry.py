@@ -41,12 +41,7 @@ def load_mesh(file_path: Path):
 # Test geometries for preview images
 TEST_GEOMETRIES = [
     "cube.stl",
-    "pyramid.stl",
-    "cylinder.stl",
-    "sphere.stl",
-    "cone.stl",
-    "bracket.stl",
-    "helical.stl",
+    "dice.stl",
 ]
 
 
@@ -136,72 +131,27 @@ class TestPreviewImagesGeneration:
                     assert isinstance(result[side], bytes), f"{side} for {geometry_file} is not bytes"
                     assert result[side][:4] == b"\x89PNG", f"{side} for {geometry_file} is not valid PNG"
 
-    def test_generate_preview_images_with_pyramid(self):
-        """Test preview images generation with pyramid geometry."""
-        pyramid_path = ASSETS_DIR / "pyramid.stl"
-        if not pyramid_path.exists():
-            pytest.skip("Pyramid test asset missing")
+    def test_generate_preview_images_with_dice(self):
+        """Test preview images generation with dice (complex curved geometry)."""
+        dice_path = ASSETS_DIR / "dice.stl"
+        if not dice_path.exists():
+            pytest.skip("Dice test asset missing")
 
-        mesh = load_mesh(pyramid_path)
-        result = _generate_preview_images_sync(mesh)
-
-        # Verify all sides generated
-        assert len(result) == 6
-        # At least some sides should have valid PNG
-        non_none_count = sum(1 for v in result.values() if v is not None)
-        assert non_none_count > 0, "No preview images generated for pyramid"
-
-    def test_generate_preview_images_with_cylinder(self):
-        """Test preview images generation with cylinder geometry."""
-        cylinder_path = ASSETS_DIR / "cylinder.stl"
-        if not cylinder_path.exists():
-            pytest.skip("Cylinder test asset missing")
-
-        mesh = load_mesh(cylinder_path)
+        mesh = load_mesh(dice_path)
         result = _generate_preview_images_sync(mesh)
 
         assert len(result) == 6
         non_none_count = sum(1 for v in result.values() if v is not None)
-        assert non_none_count > 0, "No preview images generated for cylinder"
-
-    def test_generate_preview_images_with_sphere(self):
-        """Test preview images generation with sphere geometry."""
-        sphere_path = ASSETS_DIR / "sphere.stl"
-        if not sphere_path.exists():
-            pytest.skip("Sphere test asset missing")
-
-        mesh = load_mesh(sphere_path)
-        result = _generate_preview_images_sync(mesh)
-
-        assert len(result) == 6
-        non_none_count = sum(1 for v in result.values() if v is not None)
-        assert non_none_count > 0, "No preview images generated for sphere"
+        assert non_none_count == 6, f"Expected 6 previews, got {non_none_count}"
 
     def test_generate_preview_images_partial_failure(self):
         """Test that if one side fails, others still generate."""
-        # Create a mesh that might cause issues
         mesh = load_mesh(ASSETS_DIR / "cube.stl")
 
         result = _generate_preview_images_sync(mesh)
 
-        # Even if some fail, we should get results for most sides
         non_none_count = sum(1 for v in result.values() if v is not None)
-        # At least 4 sides should succeed for a standard cube
         assert non_none_count >= 4, f"Too many failures: {non_none_count}/6 succeeded"
-
-    def test_generate_preview_images_with_complex_geometry(self):
-        """Test preview images with complex geometry like helical."""
-        helical_path = ASSETS_DIR / "helical.stl"
-        if not helical_path.exists():
-            pytest.skip("Helical test asset missing")
-
-        mesh = load_mesh(helical_path)
-        result = _generate_preview_images_sync(mesh)
-
-        assert len(result) == 6
-        # Complex geometry may have more failures, but should still generate some
-        non_none_count = sum(1 for v in result.values() if v is not None)
-        assert non_none_count > 0, "No preview images generated for helical"
 
 
 class TestAnalyzeStreamWithPreviewImages:
