@@ -1,29 +1,36 @@
 import asyncio
+import base64
 import io
 import json
 import logging
 import os
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 from uuid import UUID, uuid4
 
 import aio_pika
 import aio_pika.abc
+import httpx
 
 from src.core.config import settings
 from src.core.geometry import GeometryProcessor
 from src.core.observability import tracer
 from src.core.schemas import (
     FileAnalysisFailedEvent,
-    FileAnalysisFailedMessage,
+    FileAnalysisFailedMessageBody,
+    FileAnalysisFailedPayload,
     FileAnalyzedEvent,
-    FileAnalyzedMessage,
+    FileAnalyzedMessageBody,
+    FileAnalyzedPayload,
     FileUploadedEvent,
+    MessageTypeEnum,
     PreviewImagesGeneratedEvent,
-    PreviewImagesGeneratedMessage,
+    PreviewImagesGeneratedMessageBody,
+    PreviewImagesGeneratedPayload,
     PreviewImagesMessage,
 )
+from src.infrastructure.auth import ServiceAccountTokenProvider
 from src.infrastructure.storage import IStorageService
 
 logger = logging.getLogger(__name__)
@@ -35,6 +42,7 @@ class UploadConsumer:
     ):
         self.storage_service = storage_service
         self.geometry_processor = geometry_processor
+        self._token_provider = ServiceAccountTokenProvider()
         self.connection: aio_pika.abc.AbstractRobustConnection | None = None
         self.channel: aio_pika.abc.AbstractChannel | None = None
         self.queue: aio_pika.abc.AbstractRobustQueue | None = None
@@ -81,7 +89,9 @@ class UploadConsumer:
 
     async def publish_event(
         self,
-        event: FileAnalyzedEvent | FileAnalysisFailedEvent | PreviewImagesGeneratedEvent,
+        event: FileAnalyzedEvent
+        | FileAnalysisFailedEvent
+        | PreviewImagesGeneratedEvent,
         routing_key: str,
     ) -> None:
         if self.exchange is None:
@@ -161,17 +171,21 @@ class UploadConsumer:
                         # 4. Upload artifacts
                         glb_path = None
                         thumb_path = None
+                        parent_upload_id = inner_msg.upload_id
 
                         if glb_bytes:
                             glb_path = f"{inner_msg.storage_path}_viewer.glb"
                             await self.upload_artifact(
-                                glb_bytes, glb_path, "model/gltf-binary"
+                                glb_bytes,
+                                glb_path,
+                                "model/gltf-binary",
+                                parent_upload_id,
                             )
 
                         if thumb_bytes:
                             thumb_path = f"{inner_msg.storage_path}_thumb.png"
                             await self.upload_artifact(
-                                thumb_bytes, thumb_path, "image/png"
+                                thumb_bytes, thumb_path, "image/png", parent_upload_id
                             )
 
                         # 4b. Upload preview images
@@ -179,25 +193,43 @@ class UploadConsumer:
                         if preview_images:
                             for side, image_bytes in preview_images.items():
                                 if image_bytes:
-                                    preview_path = f"{inner_msg.storage_path}_preview_{side}.png"
+                                    preview_path = (
+                                        f"{inner_msg.storage_path}_preview_{side}.png"
+                                    )
                                     await self.upload_artifact(
-                                        image_bytes, preview_path, "image/png"
+                                        image_bytes,
+                                        preview_path,
+                                        "image/png",
+                                        parent_upload_id,
                                     )
                                     preview_paths[side] = preview_path
 
                         # 5. Publish Success
+                        _now = datetime.now(timezone.utc)
                         success_event = FileAnalyzedEvent(
                             messageId=uuid4(),
                             correlationId=correlation_id,
                             messageType=[
-                                "urn:message:Maliev.GeometryService.Api.Events:FileAnalyzedEvent"
+                                "urn:message:Maliev.MessagingContracts.Contracts.Geometry:FileAnalyzedEvent"
                             ],
-                            message=FileAnalyzedMessage(
-                                fileId=file_id,
-                                metrics=metrics,
-                                processedAt=datetime.now(timezone.utc),
-                                glbStoragePath=glb_path,
-                                thumbnailStoragePath=thumb_path,
+                            message=FileAnalyzedMessageBody(
+                                messageId=uuid4(),
+                                messageName="FileAnalyzedEvent",
+                                messageType=MessageTypeEnum.Event,
+                                messageVersion="1.0.0",
+                                publishedBy="GeometryService",
+                                consumedBy=["IntranetBff"],
+                                correlationId=correlation_id,
+                                causationId=None,
+                                occurredAtUtc=_now,
+                                isPublic=False,
+                                payload=FileAnalyzedPayload(
+                                    fileId=file_id,
+                                    metrics=metrics,
+                                    processedAt=_now,
+                                    glbStoragePath=glb_path,
+                                    thumbnailStoragePath=thumb_path,
+                                ),
                             ),
                         )
                         await self.publish_event(
@@ -207,23 +239,37 @@ class UploadConsumer:
 
                         # 6. Publish Preview Images Generated Event
                         if preview_paths:
+                            _preview_now = datetime.now(timezone.utc)
                             preview_event = PreviewImagesGeneratedEvent(
                                 messageId=uuid4(),
                                 correlationId=correlation_id,
                                 messageType=[
-                                    "urn:message:Maliev.GeometryService.Api.Events:PreviewImagesGeneratedEvent"
+                                    "urn:message:Maliev.MessagingContracts.Contracts.Geometry:PreviewImagesGeneratedEvent"
                                 ],
-                                message=PreviewImagesGeneratedMessage(
-                                    storagePath=inner_msg.storage_path,
-                                    previewImages=PreviewImagesMessage(
-                                        front=preview_paths.get("front"),
-                                        left=preview_paths.get("left"),
-                                        right=preview_paths.get("right"),
-                                        back=preview_paths.get("back"),
-                                        top=preview_paths.get("top"),
-                                        bottom=preview_paths.get("bottom"),
+                                message=PreviewImagesGeneratedMessageBody(
+                                    messageId=uuid4(),
+                                    messageName="PreviewImagesGeneratedEvent",
+                                    messageType=MessageTypeEnum.Event,
+                                    messageVersion="1.0.0",
+                                    publishedBy="GeometryService",
+                                    consumedBy=["IntranetBff"],
+                                    correlationId=correlation_id,
+                                    causationId=None,
+                                    occurredAtUtc=_preview_now,
+                                    isPublic=False,
+                                    payload=PreviewImagesGeneratedPayload(
+                                        storagePath=inner_msg.storage_path,
+                                        previewImages=PreviewImagesMessage(
+                                            front_256=preview_paths.get("front_256"),
+                                            back_256=preview_paths.get("back_256"),
+                                            left_256=preview_paths.get("left_256"),
+                                            right_256=preview_paths.get("right_256"),
+                                            top_256=preview_paths.get("top_256"),
+                                            bottom_256=preview_paths.get("bottom_256"),
+                                            iso_256=preview_paths.get("iso_256"),
+                                        ),
+                                        generatedAt=_preview_now,
                                     ),
-                                    generatedAt=datetime.now(timezone.utc),
                                 ),
                             )
                             await self.publish_event(
@@ -235,19 +281,22 @@ class UploadConsumer:
                                 extra={
                                     "file.id": str(file_id),
                                     "storage_path": inner_msg.storage_path,
-                                    "preview_paths": preview_paths,
+                                    "preview_paths": str(list(preview_paths.keys())),
                                 },
                             )
 
+                        extra: dict[str, Any] = {
+                            "file.id": str(file_id),
+                            "volume_cm3": metrics.volume_cm3,
+                            "surface_area_cm2": metrics.surface_area_cm2,
+                            "bounding_box": f"{metrics.bounding_box.x} x {metrics.bounding_box.y} x {metrics.bounding_box.z}",
+                            "glb_path": glb_path,
+                        }
+                        if thumb_path is not None:
+                            extra["thumb_path"] = thumb_path
                         logger.info(
                             "Successfully analyzed file",
-                            extra={
-                                "file.id": str(file_id),
-                                "volume_cm3": metrics.volume_cm3,
-                                "surface_area_cm2": metrics.surface_area_cm2,
-                                "glb_path": glb_path,
-                                "thumb_path": thumb_path,
-                            },
+                            extra=extra,
                         )
 
                     finally:
@@ -293,27 +342,68 @@ class UploadConsumer:
 
         raise RuntimeError("Unexpected: download_with_retry exhausted all attempts")
 
-    async def upload_artifact(self, data: bytes, path: str, content_type: str) -> None:
-        """Uploads an artifact (GLB/PNG) to storage."""
+    async def upload_artifact(
+        self, data: bytes, path: str, content_type: str, parent_upload_id: str = ""
+    ) -> None:
+        """Uploads an artifact (GLB/PNG) to GCS via UploadService HTTP endpoint."""
         try:
-            await self.storage_service.upload_file(data, path, content_type)
-        except Exception as e:
+            upload_service_url = settings.UPLOAD_SERVICE_URL
+            artifact_id = str(uuid4())
+            token = self._token_provider.get_token()
+
+            payload = {
+                "artifactId": artifact_id,
+                "parentUploadId": parent_upload_id,
+                "storagePath": path,
+                "contentType": content_type,
+                "artifactData": base64.b64encode(data).decode("utf-8"),
+            }
+
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                response = await client.post(
+                    f"{upload_service_url}/upload/v1/uploads/artifacts",
+                    json=payload,
+                    headers={"Authorization": f"Bearer {token}"},
+                )
+                response.raise_for_status()
+                result = response.json()
+                logger.info(
+                    f"Artifact uploaded successfully: {result.get('storagePath')}"
+                )
+
+        except httpx.HTTPStatusError as e:
+            logger.error(
+                f"Failed to upload artifact {path}: HTTP {e.response.status_code} - {e}"
+            )
+            logger.warning(f"Proceeding without artifact {path}")
+        except httpx.RequestError as e:
             logger.error(f"Failed to upload artifact {path}: {e}")
-            # Log warning and continue - user won't see thumbnail but
-            # analysis event won't fail
             logger.warning(f"Proceeding without artifact {path}")
 
     async def publish_failure(
         self, correlation_id: UUID | None, file_id: str, error_code: str, details: str
     ) -> None:
+        _now = datetime.now(timezone.utc)
         failure_event = FileAnalysisFailedEvent(
             messageId=uuid4(),
             correlationId=correlation_id,
             messageType=[
-                "urn:message:Maliev.GeometryService.Api.Events:FileAnalysisFailedEvent"
+                "urn:message:Maliev.MessagingContracts.Contracts.Geometry:FileAnalysisFailedEvent"
             ],
-            message=FileAnalysisFailedMessage(
-                fileId=file_id, errorCode=error_code, details=details
+            message=FileAnalysisFailedMessageBody(
+                messageId=uuid4(),
+                messageName="FileAnalysisFailedEvent",
+                messageType=MessageTypeEnum.Event,
+                messageVersion="1.0.0",
+                publishedBy="GeometryService",
+                consumedBy=["IntranetBff"],
+                correlationId=correlation_id,
+                causationId=None,
+                occurredAtUtc=_now,
+                isPublic=False,
+                payload=FileAnalysisFailedPayload(
+                    fileId=file_id, errorCode=error_code, details=details
+                ),
             ),
         )
         await self.publish_event(

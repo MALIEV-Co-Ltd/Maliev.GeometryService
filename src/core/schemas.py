@@ -1,4 +1,5 @@
 from datetime import datetime
+from enum import Enum
 from typing import Any
 from uuid import UUID
 
@@ -12,6 +13,12 @@ def to_camel(string: str) -> str:
     return components[0] + "".join(x.title() for x in components[1:])
 
 
+# ---------------------------------------------------------------------------
+# MassTransit transport envelope (outer wrapper)
+# Wire format: { "messageId": ..., "messageType": [...], "message": { ... } }
+# ---------------------------------------------------------------------------
+
+
 class MassTransitEnvelope(BaseModel):
     model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
     message_id: UUID = Field(alias="messageId")
@@ -21,6 +28,45 @@ class MassTransitEnvelope(BaseModel):
     destination_address: str | None = Field(alias="destinationAddress", default=None)
     message_type: list[str] = Field(alias="messageType", default_factory=list)
     headers: dict[str, Any] = Field(default_factory=dict)
+
+
+# ---------------------------------------------------------------------------
+# Shared base for the inner "message" body (mirrors C# BaseMessage)
+# All outgoing event bodies must include these fields so that C# consumers
+# can deserialize them into the full event record (e.g. FileAnalyzedEvent).
+# ---------------------------------------------------------------------------
+
+
+class MessageTypeEnum(str, Enum):
+    Event = "Event"
+    Command = "Command"
+    Request = "Request"
+    Response = "Response"
+
+
+class BaseMessageBody(BaseModel):
+    """
+    Mirrors the C# BaseMessage record.
+    Every field published inside the MassTransit "message" envelope key must
+    include these alongside the event-specific "payload" object.
+    """
+
+    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
+    message_id: UUID = Field(alias="messageId")
+    message_name: str = Field(alias="messageName")
+    message_type: MessageTypeEnum = Field(alias="messageType")
+    message_version: str = Field(alias="messageVersion", default="1.0.0")
+    published_by: str = Field(alias="publishedBy")
+    consumed_by: list[str] = Field(alias="consumedBy", default_factory=list)
+    correlation_id: UUID | None = Field(alias="correlationId", default=None)
+    causation_id: UUID | None = Field(alias="causationId", default=None)
+    occurred_at_utc: datetime = Field(alias="occurredAtUtc")
+    is_public: bool = Field(alias="isPublic", default=False)
+
+
+# ---------------------------------------------------------------------------
+# Incoming: FileUploadedEvent (published by C# UploadService — unchanged)
+# ---------------------------------------------------------------------------
 
 
 class UploadCompletedMessage(BaseModel):
@@ -53,8 +99,23 @@ class FileUploadedEvent(MassTransitEnvelope):
     message: FileUploadedMessage
 
 
-class FileAnalyzedMessage(BaseModel):
-    """Payload for FileAnalyzedEvent."""
+# ---------------------------------------------------------------------------
+# Outgoing: FileAnalyzedEvent
+# Wire format:
+#   { "messageId": ..., "messageType": ["urn:...FileAnalyzedEvent"], "headers": {},
+#     "message": {
+#       "messageId": ..., "messageName": "FileAnalyzedEvent", "messageType": "Event",
+#       "messageVersion": "1.0.0", "publishedBy": "GeometryService",
+#       "consumedBy": [], "correlationId": ..., "causationId": null,
+#       "occurredAtUtc": ..., "isPublic": false,
+#       "payload": { "fileId": ..., "metrics": {...}, ... }
+#     }
+#   }
+# ---------------------------------------------------------------------------
+
+
+class FileAnalyzedPayload(BaseModel):
+    """Nested payload data inside FileAnalyzedEvent.message — mirrors C# FileAnalyzedEventPayload."""
 
     model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
     file_id: str = Field(alias="fileId")
@@ -66,14 +127,25 @@ class FileAnalyzedMessage(BaseModel):
     )
 
 
+class FileAnalyzedMessageBody(BaseMessageBody):
+    """The full body of FileAnalyzedEvent.message — includes BaseMessage fields + payload."""
+
+    payload: FileAnalyzedPayload
+
+
 class FileAnalyzedEvent(MassTransitEnvelope):
     """Outgoing success event wrapped in MassTransit envelope."""
 
-    message: FileAnalyzedMessage
+    message: FileAnalyzedMessageBody
 
 
-class FileAnalysisFailedMessage(BaseModel):
-    """Payload for FileAnalysisFailedEvent."""
+# ---------------------------------------------------------------------------
+# Outgoing: FileAnalysisFailedEvent
+# ---------------------------------------------------------------------------
+
+
+class FileAnalysisFailedPayload(BaseModel):
+    """Nested payload data inside FileAnalysisFailedEvent.message."""
 
     model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
     file_id: str = Field(alias="fileId")
@@ -81,26 +153,38 @@ class FileAnalysisFailedMessage(BaseModel):
     details: str | None = Field(default=None)
 
 
+class FileAnalysisFailedMessageBody(BaseMessageBody):
+    """The full body of FileAnalysisFailedEvent.message."""
+
+    payload: FileAnalysisFailedPayload
+
+
 class FileAnalysisFailedEvent(MassTransitEnvelope):
     """Outgoing failure event wrapped in MassTransit envelope."""
 
-    message: FileAnalysisFailedMessage
+    message: FileAnalysisFailedMessageBody
+
+
+# ---------------------------------------------------------------------------
+# Outgoing: PreviewImagesGeneratedEvent
+# ---------------------------------------------------------------------------
 
 
 class PreviewImagesMessage(BaseModel):
-    """Payload for preview images."""
+    """Seven preview image storage paths (6 orthographic + 1 isometric)."""
 
     model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
-    front: str | None = Field(alias="front", default=None)
-    left: str | None = Field(alias="left", default=None)
-    right: str | None = Field(alias="right", default=None)
-    back: str | None = Field(alias="back", default=None)
-    top: str | None = Field(alias="top", default=None)
-    bottom: str | None = Field(alias="bottom", default=None)
+    front_256: str | None = Field(alias="front_256", default=None)
+    back_256: str | None = Field(alias="back_256", default=None)
+    left_256: str | None = Field(alias="left_256", default=None)
+    right_256: str | None = Field(alias="right_256", default=None)
+    top_256: str | None = Field(alias="top_256", default=None)
+    bottom_256: str | None = Field(alias="bottom_256", default=None)
+    iso_256: str | None = Field(alias="iso_256", default=None)
 
 
-class PreviewImagesGeneratedMessage(BaseModel):
-    """Payload for PreviewImagesGeneratedEvent."""
+class PreviewImagesGeneratedPayload(BaseModel):
+    """Nested payload data inside PreviewImagesGeneratedEvent.message."""
 
     model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
     storage_path: str = Field(alias="storagePath")
@@ -108,7 +192,23 @@ class PreviewImagesGeneratedMessage(BaseModel):
     generated_at: datetime = Field(alias="generatedAt")
 
 
+class PreviewImagesGeneratedMessageBody(BaseMessageBody):
+    """The full body of PreviewImagesGeneratedEvent.message."""
+
+    payload: PreviewImagesGeneratedPayload
+
+
 class PreviewImagesGeneratedEvent(MassTransitEnvelope):
     """Outgoing event for generated preview images."""
 
-    message: PreviewImagesGeneratedMessage
+    message: PreviewImagesGeneratedMessageBody
+
+
+# ---------------------------------------------------------------------------
+# Keep old aliases so any other import sites don't break
+# ---------------------------------------------------------------------------
+
+# The inner payload types keep compatible names for upload_consumer.py imports
+FileAnalyzedMessage = FileAnalyzedPayload
+FileAnalysisFailedMessage = FileAnalysisFailedPayload
+PreviewImagesGeneratedMessage = PreviewImagesGeneratedPayload

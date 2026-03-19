@@ -11,6 +11,7 @@ from scalar_fastapi import get_scalar_api_reference
 from src.consumers.upload_consumer import UploadConsumer
 from src.core.geometry import GeometryProcessor
 from src.core.observability import setup_observability
+from src.infrastructure.iam_registration import register_iam_permissions
 from src.infrastructure.storage import HttpDownloadService
 
 # Set up basic logging immediately
@@ -30,6 +31,19 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
     # Startup
     global consumer
     logger.info("Starting Geometry Service background consumer...")
+
+    # Register IAM permissions via RabbitMQ
+    logger.info("Registering IAM permissions...")
+    try:
+        registration_success = await register_iam_permissions()
+        if registration_success:
+            logger.info("Successfully registered IAM permissions")
+        else:
+            logger.warning(
+                "Failed to register IAM permissions - service may not have proper permissions"
+            )
+    except Exception as e:
+        logger.warning(f"Error registering IAM permissions: {e}")
 
     storage_service = HttpDownloadService()
     geometry_processor = GeometryProcessor()
@@ -153,7 +167,7 @@ if __name__ == "__main__":
 
     try:
         logger.info("Starting Geometry Service host")
-        uvicorn.run(app, host="0.0.0.0", port=8080, log_config=None)
+        uvicorn.run(app, host="0.0.0.0", port=8081, log_config=None)
     except Exception as e:
         logger.critical(f"Geometry Service host terminated unexpectedly: {e}")
         sys.exit(1)

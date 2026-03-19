@@ -1,9 +1,9 @@
 import io
 from pathlib import Path
 
+import numpy as np
 import pytest
 import trimesh
-import numpy as np
 
 from src.core.geometry import GeometryProcessor, _generate_preview_images_sync
 
@@ -70,9 +70,15 @@ class TestThumbnailGeneration:
             mesh = load_mesh(geometry_path)
             result = processor._generate_thumbnail(mesh)
 
-            assert result is not None, f"Failed to generate thumbnail for {geometry_file}"
-            assert isinstance(result, bytes), f"Thumbnail for {geometry_file} is not bytes"
-            assert result[:4] == b"\x89PNG", f"Thumbnail for {geometry_file} is not valid PNG"
+            assert result is not None, (
+                f"Failed to generate thumbnail for {geometry_file}"
+            )
+            assert isinstance(result, bytes), (
+                f"Thumbnail for {geometry_file} is not bytes"
+            )
+            assert result[:4] == b"\x89PNG", (
+                f"Thumbnail for {geometry_file} is not valid PNG"
+            )
 
     def test_generate_thumbnail_with_empty_mesh(self, processor):
         """Test thumbnail generation with empty mesh returns None."""
@@ -86,7 +92,7 @@ class TestThumbnailGeneration:
 
 
 class TestPreviewImagesGeneration:
-    """Tests for 6-sided preview image generation functionality."""
+    """Tests for 7-view preview image generation functionality (6 ortho + 1 isometric)."""
 
     def test_generate_preview_images_returns_dict(self):
         """Test that preview images generation returns a dictionary."""
@@ -97,18 +103,28 @@ class TestPreviewImagesGeneration:
 
         assert isinstance(result, dict)
 
-    def test_generate_preview_images_contains_all_six_sides(self):
-        """Test that preview images contain all 6 required keys."""
+    def test_generate_preview_images_contains_all_seven_views(self):
+        """Test that preview images contain all 7 required keys (6 ortho + 1 isometric)."""
         cube_path = ASSETS_DIR / "cube.stl"
         mesh = load_mesh(cube_path)
 
         result = _generate_preview_images_sync(mesh)
 
-        expected_keys = {"front", "left", "right", "back", "top", "bottom"}
-        assert set(result.keys()) == expected_keys, f"Missing keys: {expected_keys - set(result.keys())}"
+        expected_keys = {
+            "front_256",
+            "back_256",
+            "left_256",
+            "right_256",
+            "top_256",
+            "bottom_256",
+            "iso_256",
+        }
+        assert set(result.keys()) == expected_keys, (
+            f"Missing keys: {expected_keys - set(result.keys())}"
+        )
 
     def test_generate_preview_images_bytes_for_all_sides(self):
-        """Test that all 6 sides generate valid PNG bytes."""
+        """Test that all 7 views generate valid PNG bytes."""
         for geometry_file in TEST_GEOMETRIES:
             geometry_path = ASSETS_DIR / geometry_file
             if not geometry_path.exists():
@@ -117,19 +133,23 @@ class TestPreviewImagesGeneration:
             mesh = load_mesh(geometry_path)
             result = _generate_preview_images_sync(mesh)
 
-            # All sides should be present
-            assert "front" in result, f"Missing 'front' for {geometry_file}"
-            assert "back" in result, f"Missing 'back' for {geometry_file}"
-            assert "left" in result, f"Missing 'left' for {geometry_file}"
-            assert "right" in result, f"Missing 'right' for {geometry_file}"
-            assert "top" in result, f"Missing 'top' for {geometry_file}"
-            assert "bottom" in result, f"Missing 'bottom' for {geometry_file}"
-
-            # Each side should be PNG bytes
-            for side in ["front", "back", "left", "right", "top", "bottom"]:
-                if result[side] is not None:
-                    assert isinstance(result[side], bytes), f"{side} for {geometry_file} is not bytes"
-                    assert result[side][:4] == b"\x89PNG", f"{side} for {geometry_file} is not valid PNG"
+            for key in [
+                "front_256",
+                "back_256",
+                "left_256",
+                "right_256",
+                "top_256",
+                "bottom_256",
+                "iso_256",
+            ]:
+                assert key in result, f"Missing '{key}' for {geometry_file}"
+                if result[key] is not None:
+                    assert isinstance(result[key], bytes), (
+                        f"{key} for {geometry_file} is not bytes"
+                    )
+                    assert result[key][:4] == b"\x89PNG", (
+                        f"{key} for {geometry_file} is not valid PNG"
+                    )
 
     def test_generate_preview_images_with_dice(self):
         """Test preview images generation with dice (complex curved geometry)."""
@@ -140,18 +160,18 @@ class TestPreviewImagesGeneration:
         mesh = load_mesh(dice_path)
         result = _generate_preview_images_sync(mesh)
 
-        assert len(result) == 6
+        assert len(result) == 7
         non_none_count = sum(1 for v in result.values() if v is not None)
-        assert non_none_count == 6, f"Expected 6 previews, got {non_none_count}"
+        assert non_none_count == 7, f"Expected 7 previews, got {non_none_count}"
 
     def test_generate_preview_images_partial_failure(self):
-        """Test that if one side fails, others still generate."""
+        """Test that if one view fails, others still generate."""
         mesh = load_mesh(ASSETS_DIR / "cube.stl")
 
         result = _generate_preview_images_sync(mesh)
 
         non_none_count = sum(1 for v in result.values() if v is not None)
-        assert non_none_count >= 4, f"Too many failures: {non_none_count}/6 succeeded"
+        assert non_none_count >= 6, f"Too many failures: {non_none_count}/7 succeeded"
 
 
 class TestAnalyzeStreamWithPreviewImages:
@@ -279,13 +299,14 @@ class TestPreviewImagesOutput:
 
     def test_preview_images_for_dice(self):
         """
-        Generate and save 6-sided preview images for dice.stl.
+        Generate and save 7-view preview images for dice.stl (6 ortho + 1 isometric).
         This is the reference model used to validate CAD-style rendering
-        (Shapr3D/Onshape look: matte material, feature edge lines, soft lighting).
+        (Shapr3D/Onshape look: matte material, smooth shading, soft lighting).
 
         Output directory: test_output/
-        - dice_front.png, dice_back.png, dice_left.png,
-        - dice_right.png, dice_top.png, dice_bottom.png
+        - dice_front_256.png, dice_back_256.png, dice_left_256.png,
+        - dice_right_256.png, dice_top_256.png, dice_bottom_256.png,
+        - dice_iso_256.png
         """
         dice_path = ASSETS_DIR / "dice.stl"
         if not dice_path.exists():
@@ -297,17 +318,25 @@ class TestPreviewImagesOutput:
 
         print(f"\nSaving preview images to: {output_dir}")
 
-        sides_order = ["front", "back", "left", "right", "top", "bottom"]
+        views_order = [
+            "front_256",
+            "back_256",
+            "left_256",
+            "right_256",
+            "top_256",
+            "bottom_256",
+            "iso_256",
+        ]
         saved_count = 0
 
-        for side in sides_order:
-            image_bytes = result.get(side)
+        for view in views_order:
+            image_bytes = result.get(view)
             if image_bytes and isinstance(image_bytes, bytes):
-                output_path = output_dir / f"dice_{side}.png"
+                output_path = output_dir / f"dice_{view}.png"
                 output_path.write_bytes(image_bytes)
                 print(f"  Saved: {output_path.name} ({len(image_bytes)} bytes)")
                 saved_count += 1
             else:
-                print(f"  Missing: dice_{side}.png")
+                print(f"  Missing: dice_{view}.png")
 
-        assert saved_count == 6, f"Expected 6 preview images, got {saved_count}"
+        assert saved_count == 7, f"Expected 7 preview images, got {saved_count}"

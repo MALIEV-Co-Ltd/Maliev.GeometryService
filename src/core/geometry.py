@@ -1,20 +1,18 @@
-import os
-
 import asyncio
 import contextlib
 import io
 import logging
+import os
 import shutil
 import tempfile
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, TypedDict, cast
 
 import gmsh
 import numpy as np
 import trimesh
 from pydantic import BaseModel, ConfigDict, Field
-
 
 logger = logging.getLogger(__name__)
 
@@ -44,14 +42,135 @@ class GeometryMetrics(BaseModel):
     euler_number: int = Field(alias="eulerNumber")
 
 
+class ViewConfig(TypedDict):
+    """Configuration for a single camera view."""
+
+    camera_dir: tuple[float, float, float]
+    viewup: tuple[float, float, float]
+    distance_padding: float
+
+
+VIEW_CONFIGS: dict[str, ViewConfig] = {
+    # camera_dir is the unit offset from center where the camera is placed.
+    # Camera looks from (center + camera_dir * distance) toward center.
+    # distance_padding scales the base distance — smaller = closer to the object.
+    "front": {"camera_dir": (0, -1, 0), "viewup": (0, 0, 1), "distance_padding": 1.3},
+    "back": {"camera_dir": (0, 1, 0), "viewup": (0, 0, 1), "distance_padding": 1.3},
+    "left": {"camera_dir": (-1, 0, 0), "viewup": (0, 0, 1), "distance_padding": 1.3},
+    "right": {"camera_dir": (1, 0, 0), "viewup": (0, 0, 1), "distance_padding": 1.3},
+    "top": {"camera_dir": (0, 0, 1), "viewup": (0, 1, 0), "distance_padding": 1.3},
+    "bottom": {"camera_dir": (0, 0, -1), "viewup": (0, -1, 0), "distance_padding": 1.3},
+    "iso": {"camera_dir": (1, -1, 0.5), "viewup": (0, 0, 1), "distance_padding": 1.05},
+}
+
+ORTHO_VIEWS = ["front", "back", "left", "right", "top", "bottom"]
+ISOMETRIC_VIEWS = ["iso"]
+ALL_VIEWS = ORTHO_VIEWS + ISOMETRIC_VIEWS
+DEFAULT_SIZE = 256
+
+
+def _render_single_view(
+    pv_mesh: Any,
+    feature_edges: Any,
+    center: np.ndarray[Any, np.dtype[Any]],
+    max_dim: float,
+    camera_dir: tuple[float, float, float],
+    viewup: tuple[float, float, float],
+    size: int,
+    distance_padding: float = 1.3,
+) -> bytes | None:
+    import math
+
+    import pyvista as pv
+    from PIL import Image
+
+    # 85mm lens equivalent: vertical FOV = 2*atan(24/(2*85)) ≈ 16°
+    view_angle = 16.0
+
+    # Compute distance so the model's bounding sphere fills the view with padding.
+    # half_fov = 8°, so distance = (max_dim/2) / tan(8°) * padding
+    distance = (
+        (max_dim / 2.0) / math.tan(math.radians(view_angle / 2.0)) * distance_padding
+    )
+
+    pl = pv.Plotter(off_screen=True, window_size=[size, size], lighting=None)
+    pl.set_background("#FFFFFF")
+    pl.enable_anti_aliasing("msaa")
+
+    # Shaded body mesh
+    pl.add_mesh(
+        pv_mesh,
+        color="#D4D4D4",
+        smooth_shading=True,
+        specular=0.02,
+        specular_power=8,
+        ambient=0.55,
+        diffuse=0.45,
+    )
+
+    # CAD feature edges — sharp boundary lines only, no tessellation artifacts
+    if feature_edges is not None and feature_edges.n_lines > 0:
+        pl.add_mesh(
+            feature_edges,
+            color="#4A4A4A",
+            line_width=1.5,
+            lighting=False,
+        )
+
+    # Place camera at center + direction * distance, looking back at center
+    cam_pos = center + np.array(camera_dir) * distance
+    focal_point = center
+
+    pl.camera_position = [
+        tuple(cam_pos),
+        tuple(focal_point),
+        tuple(viewup),
+    ]
+
+    # Apply FOV — must be set after camera_position
+    pl.camera.view_angle = view_angle
+
+    d = max_dim * 4
+
+    key_light = pv.Light(
+        position=(center[0] + d, center[1] - d * 0.5, center[2] + d),
+        focal_point=tuple(center),
+        intensity=0.35,
+    )
+    pl.add_light(key_light)
+
+    fill_light = pv.Light(
+        position=(center[0] - d, center[1] - d * 0.3, center[2] + d * 0.8),
+        focal_point=tuple(center),
+        intensity=0.30,
+    )
+    pl.add_light(fill_light)
+
+    front_fill = pv.Light(
+        position=tuple(cam_pos),
+        focal_point=tuple(center),
+        intensity=0.20,
+    )
+    pl.add_light(front_fill)
+
+    pl.show(auto_close=False)
+    img = pl.screenshot(transparent_background=False, return_img=True)
+    pl.close()
+
+    pil_img = Image.fromarray(img)
+    buf = io.BytesIO()
+    pil_img.save(buf, format="PNG")
+    buf.seek(0)
+    return buf.getvalue()
+
+
 def _generate_preview_images_sync(mesh: trimesh.Trimesh) -> dict[str, bytes | None]:
     """
-    Generate 6-sided preview images using PyVista offscreen rendering.
-    Returns a dictionary with keys: front, left, right, back, top, bottom.
+    Generate 7 preview images (6 orthographic + 1 isometric) at 256x256.
     Uses VTK/OSMesa for headless CPU rendering (no GPU required).
     """
     results: dict[str, bytes | None] = {}
-    empty: dict[str, bytes | None] = {"front": None, "back": None, "left": None, "right": None, "top": None, "bottom": None}
+    empty: dict[str, bytes | None] = {f"{view}_256": None for view in ALL_VIEWS}
 
     try:
         import pyvista as pv
@@ -61,125 +180,73 @@ def _generate_preview_images_sync(mesh: trimesh.Trimesh) -> dict[str, bytes | No
         logger.error(f"Failed to import pyvista: {e}")
         return empty
 
-    sides = {
-        "front":  {"axis": (0, -1, 0), "viewup": (0, 0, 1)},
-        "back":   {"axis": (0,  1, 0), "viewup": (0, 0, 1)},
-        "left":   {"axis": (-1, 0, 0), "viewup": (0, 0, 1)},
-        "right":  {"axis": (1,  0, 0), "viewup": (0, 0, 1)},
-        "top":    {"axis": (0,  0, 1), "viewup": (0, 1, 0)},
-        "bottom": {"axis": (0,  0, -1), "viewup": (0, -1, 0)},
-    }
-
     try:
-        faces_pv = np.column_stack([
-            np.full(len(mesh.faces), 3, dtype=np.int32),
-            mesh.faces
-        ]).ravel()
+        if len(mesh.faces) == 0:
+            logger.warning("Mesh has no polygon faces — skipping preview generation")
+            return empty
+
+        mesh.process()
+        # Center mesh at origin so camera directions are axis-aligned
+        mesh.vertices -= mesh.centroid
+
+        faces_pv = np.column_stack(
+            [np.full(len(mesh.faces), 3, dtype=np.int32), mesh.faces]
+        ).ravel()
         pv_mesh = pv.PolyData(mesh.vertices.copy(), faces_pv)
-        pv_mesh.compute_normals(inplace=True)
 
-        center = np.array(pv_mesh.center)
+        # Extract feature edges BEFORE split_vertices destroys adjacency info.
+        # split_vertices=False keeps shared vertices so adjacent face angles
+        # can be compared for feature edge detection.
+        pv_mesh.compute_normals(
+            cell_normals=True, point_normals=True, split_vertices=False, inplace=True
+        )
+        feature_edges = pv_mesh.extract_feature_edges(
+            boundary_edges=False,
+            feature_edges=True,
+            manifold_edges=False,
+            non_manifold_edges=False,
+            feature_angle=30,
+        )
+
+        # Recompute with split_vertices=True for smooth per-face shading
+        pv_mesh.compute_normals(
+            cell_normals=True, point_normals=True, split_vertices=True, inplace=True
+        )
+
+        center = np.zeros(3)  # mesh is now at origin
         bounds = np.array(pv_mesh.bounds)
-        dims = np.array([bounds[1] - bounds[0], bounds[3] - bounds[2], bounds[5] - bounds[4]])
+        dims = np.array(
+            [bounds[1] - bounds[0], bounds[3] - bounds[2], bounds[5] - bounds[4]]
+        )
         max_dim = float(np.max(dims))
-        distance = max_dim * 2.5
 
-        for side_name, cam_config in sides.items():
+        for view_name in ALL_VIEWS:
+            config = VIEW_CONFIGS[view_name]
             try:
-                pl = pv.Plotter(off_screen=True, window_size=[512, 512], lighting=None)
-                pl.set_background("#F5F5F5")
-                pl.enable_anti_aliasing("msaa")
-
-                # Matte body — Shapr3D/Onshape CAD style
-                # Pure smooth shading with no edge lines. On STL meshes, silhouette
-                # and feature_edges expose triangle tessellation artifacts on fillets.
-                # High ambient + moderate diffuse minimizes triangle-fan ray artifacts
-                # while still showing form through gentle directional shading.
-                pl.add_mesh(
-                    pv_mesh,
-                    color="#C2C2C2",
-                    smooth_shading=True,
-                    specular=0.04,
-                    specular_power=5,
-                    ambient=0.45,
-                    diffuse=0.55,
+                image_bytes = _render_single_view(
+                    pv_mesh=pv_mesh,
+                    feature_edges=feature_edges,
+                    center=center,
+                    max_dim=max_dim,
+                    camera_dir=config["camera_dir"],
+                    viewup=config["viewup"],
+                    size=DEFAULT_SIZE,
+                    distance_padding=config["distance_padding"],
                 )
-
-                axis = np.array(cam_config["axis"], dtype=float)
-                viewup = np.array(cam_config["viewup"], dtype=float)
-                camera_pos = center + axis * distance
-                focal_point = center
-
-                pl.camera_position = [
-                    tuple(camera_pos),
-                    tuple(focal_point),
-                    tuple(viewup),
-                ]
-
-                pl.enable_parallel_projection()
-                pl.reset_camera()
-
-                # Soft, even CAD-style lighting — Shapr3D uses very uniform
-                # illumination with minimal shadow. Multiple lights from all
-                # directions prevent dark concavities and keep features readable.
-                d = max_dim * 4
-
-                # Upper-right key light
-                key_light = pv.Light(
-                    position=(center[0] + d, center[1] - d * 0.5, center[2] + d),
-                    focal_point=tuple(center),
-                    intensity=0.55,
-                )
-                pl.add_light(key_light)
-
-                # Upper-left fill light
-                fill_light = pv.Light(
-                    position=(center[0] - d, center[1] - d * 0.3, center[2] + d * 0.8),
-                    focal_point=tuple(center),
-                    intensity=0.45,
-                )
-                pl.add_light(fill_light)
-
-                # Front fill — prevents dark concavities on camera-facing surfaces
-                front_fill = pv.Light(
-                    position=tuple(camera_pos),
-                    focal_point=tuple(center),
-                    intensity=0.25,
-                )
-                pl.add_light(front_fill)
-
-                # Bottom fill — softens underside shadows
-                bottom_fill = pv.Light(
-                    position=(center[0], center[1], center[2] - d),
-                    focal_point=tuple(center),
-                    intensity=0.15,
-                )
-                pl.add_light(bottom_fill)
-
-                pl.show(auto_close=False)
-                img = pl.screenshot(transparent_background=False, return_img=True)
-                pl.close()
-
-                from PIL import Image
-
-                pil_img = Image.fromarray(img)
-                buf = io.BytesIO()
-                pil_img.save(buf, format="PNG")
-                buf.seek(0)
-                results[side_name] = buf.getvalue()
-                buf.close()
-
+                results[f"{view_name}_256"] = image_bytes
             except Exception as e:
-                logger.error(f"Failed to generate preview image for side {side_name}: {e}")
-                results[side_name] = None
+                logger.error(
+                    f"Failed to generate preview image for view {view_name}: {e}"
+                )
+                results[f"{view_name}_256"] = None
 
     except Exception as e:
         logger.error(f"Failed to generate preview images: {e}")
         return empty
 
-    for side in empty:
-        if side not in results:
-            results[side] = None
+    for key in empty:
+        if key not in results:
+            results[key] = None
 
     return results
 
@@ -273,10 +340,19 @@ def _analyze_bytes_worker(data: bytes, file_extension: str) -> dict[str, Any]:
             glb_bytes = cast(bytes, mesh.export(file_type="glb"))
 
         preview_images: dict[str, bytes | None] = {}
-        with contextlib.suppress(Exception):
-            preview_images = _generate_preview_images_sync(mesh)
+        if len(mesh.faces) > 0:
+            with contextlib.suppress(Exception):
+                preview_images = _generate_preview_images_sync(mesh)
+            if not is_manifold:
+                logger.warning(
+                    "Mesh is not manifold (not watertight) — previews generated with best-effort geometry"
+                )
+        else:
+            logger.warning(
+                "Mesh has no polygon faces — skipping preview generation (point cloud or line mesh)"
+            )
 
-        thumbnail_bytes = preview_images.get("front")
+        thumbnail_bytes = preview_images.get("iso_256")
 
         return {
             "volume_cm3": volume_mm3 / 1000.0,
@@ -429,9 +505,11 @@ class GeometryProcessor:
             return None
 
     def _generate_thumbnail(self, mesh: trimesh.Trimesh) -> bytes | None:
+        if len(mesh.faces) == 0:
+            return None
         try:
             preview_images = _generate_preview_images_sync(mesh)
-            return preview_images.get("front")
+            return preview_images.get("iso_256")
         except Exception:
             return None
 
@@ -456,4 +534,9 @@ class GeometryProcessor:
             eulerNumber=result["euler_number"],
         )
 
-        return metrics, result["glb_bytes"], result["thumbnail_bytes"], result.get("preview_images", {})
+        return (
+            metrics,
+            result["glb_bytes"],
+            result["thumbnail_bytes"],
+            result.get("preview_images", {}),
+        )

@@ -24,6 +24,7 @@ opentelemetry-instrumentation-fastapi = "^0.50b0"
 meshio = "*"
 aiofiles = "^25.1.0"
 httpx = "^0.28.1"
+PyJWT = {version = "^2.9.0", extras = ["crypto"]}
 pygmsh = "^7.1.17"
 networkx = "<3.6"
 lxml = "^6.0.2"

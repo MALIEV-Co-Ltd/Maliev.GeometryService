@@ -14,6 +14,11 @@ This project uses **Poetry** for dependency management and **Pytest** for testin
   - `AMQP_URL`: RabbitMQ connection string (e.g., `amqp://guest:guest@localhost:5672/`)
   - `MAX_FILE_SIZE_MB`: Maximum allowed file size for analysis (default: 100)
   - `OTEL_EXPORTER_OTLP_ENDPOINT`: OpenTelemetry collector endpoint
+  - `UPLOAD_SERVICE_URL`: UploadService endpoint for artifact uploads (e.g., `http://uploadservice:8080`) — **Required for uploading preview images**. Injected automatically by Aspire.
+  - `JWT_PRIVATE_KEY`: Base64-encoded RSA private key PEM for RS256 signing — **preferred**. Injected automatically by Aspire.
+  - `JWT_SECURITY_KEY`: HMAC-SHA256 fallback key — used when `JWT_PRIVATE_KEY` is not set. Injected automatically by Aspire.
+  - `JWT_ISSUER`: JWT issuer claim (default: `https://api.maliev.com`). Injected automatically by Aspire.
+  - `JWT_AUDIENCE`: JWT audience claim (default: `https://api.maliev.com`). Injected automatically by Aspire.
 
 ### Testing
 - **Run All Tests**: `poetry run pytest`
