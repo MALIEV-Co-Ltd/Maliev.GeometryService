@@ -89,6 +89,7 @@ async def test_process_message_success(consumer, mock_storage, mock_processor):
     )
 
     consumer.publish_event = AsyncMock()
+    consumer._token_provider.get_token = MagicMock(return_value="fake-jwt-token")
 
     # Execute
     await consumer.process_message(message)
@@ -134,6 +135,7 @@ async def test_process_message_failure(consumer, mock_storage):
 
     mock_storage.download_file.side_effect = Exception("Download failed")
     consumer.publish_event = AsyncMock()
+    consumer._token_provider.get_token = MagicMock(return_value="fake-jwt-token")
 
     # Execute
     await consumer.process_message(message)
