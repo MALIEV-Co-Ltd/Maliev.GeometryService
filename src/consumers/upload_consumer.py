@@ -180,8 +180,8 @@ class UploadConsumer:
 
                         # 3a. Phase 1 — compute metrics (fast)
                         # Add total timeout so the consumer never hangs waiting for a dead worker.
-                        # The gmsh SIGALRM timeout in geometry.py kills the worker after
-                        # GMSH_MESH_TIMEOUT_SECONDS; this outer timeout is a safety net.
+                        # The cascadio thread-based timeout in geometry.py abandons the C-extension
+                        # thread after timeout_seconds; this outer timeout is a safety net.
                         PHASE1_TIMEOUT_SECONDS = 300  # 5 minutes max for the whole phase
                         loop = asyncio.get_running_loop()
                         executor = self.geometry_processor.executor
@@ -276,6 +276,9 @@ class UploadConsumer:
                         # Publish DFM analysis event — all three process-specific reports at once
                         _dfm_now = datetime.now(timezone.utc)
                         dfm_reports_data = metrics_result.get("dfmReports", {})
+                        fdm_raw = dfm_reports_data.get("FDM")
+                        sla_raw = dfm_reports_data.get("SLA")
+                        cnc_raw = dfm_reports_data.get("CNC")
                         dfm_event = DfmAnalysisReadyEvent(
                             messageId=uuid4(),
                             correlationId=correlation_id,
@@ -296,9 +299,9 @@ class UploadConsumer:
                                 payload=DfmAnalysisReadyPayload(
                                     fileId=file_id,
                                     storagePath=inner_msg.storage_path,
-                                    fdmReport=dfm_reports_data.get("FDM"),
-                                    slaReport=dfm_reports_data.get("SLA"),
-                                    cncReport=dfm_reports_data.get("CNC"),
+                                    fdmReport=FdmDfmReport.model_validate(fdm_raw) if fdm_raw else None,
+                                    slaReport=SlaDfmReport.model_validate(sla_raw) if sla_raw else None,
+                                    cncReport=CncDfmReport.model_validate(cnc_raw) if cnc_raw else None,
                                     analyzedAt=_dfm_now,
                                 ),
                             ),

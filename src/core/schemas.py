@@ -247,9 +247,9 @@ class DfmAnalysisReadyPayload(BaseModel):
     model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
     file_id: str = Field(alias="fileId")
     storage_path: str = Field(alias="storagePath")
-    fdm_report: dict[str, Any] | None = Field(alias="fdmReport", default=None)
-    sla_report: dict[str, Any] | None = Field(alias="slaReport", default=None)
-    cnc_report: dict[str, Any] | None = Field(alias="cncReport", default=None)
+    fdm_report: FdmDfmReport | None = Field(alias="fdmReport", default=None)
+    sla_report: SlaDfmReport | None = Field(alias="slaReport", default=None)
+    cnc_report: CncDfmReport | None = Field(alias="cncReport", default=None)
     analyzed_at: datetime = Field(alias="analyzedAt")
 
 

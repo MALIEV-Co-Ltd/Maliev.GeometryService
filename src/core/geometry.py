@@ -664,7 +664,8 @@ def _load_cad_with_cascadio(file_path: str, timeout_seconds: int = 60) -> trimes
     """
     Load STEP/IGES file via cascadio (OpenCascade) with 0.1mm linear deviation
     and 0.5 rad angular deviation for smooth circles and fillets.
-    Uses a thread-based timeout to prevent hangs on complex geometry.
+    Uses a thread-based timeout; the executor is shut down without waiting
+    if cascadio hangs in C-extension code.
     """
     import concurrent.futures
     try:
@@ -677,20 +678,28 @@ def _load_cad_with_cascadio(file_path: str, timeout_seconds: int = 60) -> trimes
 
     def _do_load() -> trimesh.Trimesh:
         result = cascadio.load(file_path, linear_deflection=0.1, angular_deflection=0.5)
-        return trimesh.Trimesh(
-            vertices=result["vertices"],
-            faces=result["faces"],
-            process=True,
-        )
-
-    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-        future = pool.submit(_do_load)
-        try:
-            return future.result(timeout=timeout_seconds)
-        except concurrent.futures.TimeoutError:
-            raise TimeoutError(
-                f"cascadio timed out after {timeout_seconds}s loading {file_path}"
+        if not isinstance(result, dict):
+            raise ValueError(f"cascadio.load returned unexpected type: {type(result)}")
+        vertices = result.get("vertices")
+        faces = result.get("faces")
+        if vertices is None or faces is None or len(vertices) == 0:
+            raise ValueError(
+                f"cascadio returned empty or malformed tessellation for {file_path}"
             )
+        return trimesh.Trimesh(vertices=vertices, faces=faces, process=True)
+
+    pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    future = pool.submit(_do_load)
+    try:
+        mesh = future.result(timeout=timeout_seconds)
+        return mesh
+    except concurrent.futures.TimeoutError:
+        future.cancel()
+        raise TimeoutError(
+            f"cascadio timed out after {timeout_seconds}s loading {file_path}"
+        )
+    finally:
+        pool.shutdown(wait=False)  # do not block on hung C-extension thread
 
 
 def _compute_metrics_worker(data: bytes, file_extension: str) -> dict[str, Any]:
