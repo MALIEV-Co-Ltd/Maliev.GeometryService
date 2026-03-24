@@ -5,7 +5,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from src.core.geometry import GeometryMetrics
+from src.core.geometry import CncDfmReport, FdmDfmReport, GeometryMetrics, SlaDfmReport
 
 
 def to_camel(string: str) -> str:
@@ -125,6 +125,10 @@ class FileAnalyzedPayload(BaseModel):
     thumbnail_storage_path: str | None = Field(
         alias="thumbnailStoragePath", default=None
     )
+    storage_path: str | None = Field(alias="storagePath", default=None)
+    dfm_report: FdmDfmReport | SlaDfmReport | CncDfmReport | None = Field(
+        alias="dfmReport", default=None
+    )
 
 
 class FileAnalyzedMessageBody(BaseMessageBody):
@@ -137,6 +141,33 @@ class FileAnalyzedEvent(MassTransitEnvelope):
     """Outgoing success event wrapped in MassTransit envelope."""
 
     message: FileAnalyzedMessageBody
+
+
+# ---------------------------------------------------------------------------
+# Outgoing: FileMetricsReadyEvent
+# ---------------------------------------------------------------------------
+
+
+class FileMetricsReadyPayload(BaseModel):
+    """Nested payload data inside FileMetricsReadyEvent.message."""
+
+    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
+    file_id: str = Field(alias="fileId")
+    storage_path: str = Field(alias="storagePath")
+    metrics: GeometryMetrics
+    processed_at: datetime = Field(alias="processedAt")
+
+
+class FileMetricsReadyMessageBody(BaseMessageBody):
+    """The full body of FileMetricsReadyEvent.message."""
+
+    payload: FileMetricsReadyPayload
+
+
+class FileMetricsReadyEvent(MassTransitEnvelope):
+    """Outgoing early metrics event wrapped in MassTransit envelope."""
+
+    message: FileMetricsReadyMessageBody
 
 
 # ---------------------------------------------------------------------------
@@ -171,16 +202,17 @@ class FileAnalysisFailedEvent(MassTransitEnvelope):
 
 
 class PreviewImagesMessage(BaseModel):
-    """Seven preview image storage paths (6 orthographic + 1 isometric)."""
+    """Seven preview image storage paths (6 orthographic + 1 isometric) plus 1200px ISO WebP."""
 
     model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
-    front_256: str | None = Field(alias="front_256", default=None)
-    back_256: str | None = Field(alias="back_256", default=None)
-    left_256: str | None = Field(alias="left_256", default=None)
-    right_256: str | None = Field(alias="right_256", default=None)
-    top_256: str | None = Field(alias="top_256", default=None)
-    bottom_256: str | None = Field(alias="bottom_256", default=None)
-    iso_256: str | None = Field(alias="iso_256", default=None)
+    front_small: str | None = Field(alias="frontSmall", default=None)
+    back_small: str | None = Field(alias="backSmall", default=None)
+    left_small: str | None = Field(alias="leftSmall", default=None)
+    right_small: str | None = Field(alias="rightSmall", default=None)
+    top_small: str | None = Field(alias="topSmall", default=None)
+    bottom_small: str | None = Field(alias="bottomSmall", default=None)
+    thumbnail_small: str | None = Field(alias="thumbnailSmall", default=None)
+    thumbnail_large: str | None = Field(alias="thumbnailLarge", default=None)
 
 
 class PreviewImagesGeneratedPayload(BaseModel):
@@ -202,6 +234,35 @@ class PreviewImagesGeneratedEvent(MassTransitEnvelope):
     """Outgoing event for generated preview images."""
 
     message: PreviewImagesGeneratedMessageBody
+
+
+# ---------------------------------------------------------------------------
+# Outgoing: DfmAnalysisReadyEvent
+# ---------------------------------------------------------------------------
+
+
+class DfmAnalysisReadyPayload(BaseModel):
+    """Nested payload data inside DfmAnalysisReadyEvent.message."""
+
+    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
+    file_id: str = Field(alias="fileId")
+    storage_path: str = Field(alias="storagePath")
+    fdm_report: dict[str, Any] | None = Field(alias="fdmReport", default=None)
+    sla_report: dict[str, Any] | None = Field(alias="slaReport", default=None)
+    cnc_report: dict[str, Any] | None = Field(alias="cncReport", default=None)
+    analyzed_at: datetime = Field(alias="analyzedAt")
+
+
+class DfmAnalysisReadyMessageBody(BaseMessageBody):
+    """The full body of DfmAnalysisReadyEvent.message."""
+
+    payload: DfmAnalysisReadyPayload
+
+
+class DfmAnalysisReadyEvent(MassTransitEnvelope):
+    """Outgoing DFM analysis event wrapped in MassTransit envelope."""
+
+    message: DfmAnalysisReadyMessageBody
 
 
 # ---------------------------------------------------------------------------

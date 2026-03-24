@@ -49,7 +49,7 @@ class TestThumbnailGeneration:
     """Tests for thumbnail generation functionality."""
 
     def test_generate_thumbnail_returns_bytes(self, processor):
-        """Test that thumbnail generation returns valid PNG bytes."""
+        """Test that thumbnail generation returns valid image bytes (WebP)."""
         cube_path = ASSETS_DIR / "cube.stl"
         mesh = load_mesh(cube_path)
 
@@ -57,8 +57,8 @@ class TestThumbnailGeneration:
 
         assert result is not None
         assert isinstance(result, bytes)
-        # PNG files start with these bytes
-        assert result[:4] == b"\x89PNG"
+        # WebP files start with RIFF....WEBP
+        assert result[:4] == b"RIFF"
 
     def test_generate_thumbnail_different_geometries(self, processor):
         """Test thumbnail generation with different geometry types."""
@@ -76,8 +76,9 @@ class TestThumbnailGeneration:
             assert isinstance(result, bytes), (
                 f"Thumbnail for {geometry_file} is not bytes"
             )
-            assert result[:4] == b"\x89PNG", (
-                f"Thumbnail for {geometry_file} is not valid PNG"
+            # WebP files start with RIFF....WEBP
+            assert result[:4] == b"RIFF", (
+                f"Thumbnail for {geometry_file} is not valid WebP"
             )
 
     def test_generate_thumbnail_with_empty_mesh(self, processor):
@@ -104,27 +105,28 @@ class TestPreviewImagesGeneration:
         assert isinstance(result, dict)
 
     def test_generate_preview_images_contains_all_seven_views(self):
-        """Test that preview images contain all 7 required keys (6 ortho + 1 isometric)."""
+        """Test that preview images contain all required keys (6 ortho _small + thumbnail_small + thumbnail_large)."""
         cube_path = ASSETS_DIR / "cube.stl"
         mesh = load_mesh(cube_path)
 
         result = _generate_preview_images_sync(mesh)
 
         expected_keys = {
-            "front_256",
-            "back_256",
-            "left_256",
-            "right_256",
-            "top_256",
-            "bottom_256",
-            "iso_256",
+            "front_small",
+            "back_small",
+            "left_small",
+            "right_small",
+            "top_small",
+            "bottom_small",
+            "thumbnail_small",
+            "thumbnail_large",
         }
         assert set(result.keys()) == expected_keys, (
             f"Missing keys: {expected_keys - set(result.keys())}"
         )
 
     def test_generate_preview_images_bytes_for_all_sides(self):
-        """Test that all 7 views generate valid PNG bytes."""
+        """Test that all views generate valid WebP bytes."""
         for geometry_file in TEST_GEOMETRIES:
             geometry_path = ASSETS_DIR / geometry_file
             if not geometry_path.exists():
@@ -134,21 +136,23 @@ class TestPreviewImagesGeneration:
             result = _generate_preview_images_sync(mesh)
 
             for key in [
-                "front_256",
-                "back_256",
-                "left_256",
-                "right_256",
-                "top_256",
-                "bottom_256",
-                "iso_256",
+                "front_small",
+                "back_small",
+                "left_small",
+                "right_small",
+                "top_small",
+                "bottom_small",
+                "thumbnail_small",
+                "thumbnail_large",
             ]:
                 assert key in result, f"Missing '{key}' for {geometry_file}"
                 if result[key] is not None:
                     assert isinstance(result[key], bytes), (
                         f"{key} for {geometry_file} is not bytes"
                     )
-                    assert result[key][:4] == b"\x89PNG", (
-                        f"{key} for {geometry_file} is not valid PNG"
+                    # WebP files start with RIFF....WEBP
+                    assert result[key][:4] == b"RIFF", (
+                        f"{key} for {geometry_file} is not valid WebP"
                     )
 
     def test_generate_preview_images_with_dice(self):
@@ -160,9 +164,9 @@ class TestPreviewImagesGeneration:
         mesh = load_mesh(dice_path)
         result = _generate_preview_images_sync(mesh)
 
-        assert len(result) == 7
+        assert len(result) == 8
         non_none_count = sum(1 for v in result.values() if v is not None)
-        assert non_none_count == 7, f"Expected 7 previews, got {non_none_count}"
+        assert non_none_count == 8, f"Expected 8 previews, got {non_none_count}"
 
     def test_generate_preview_images_partial_failure(self):
         """Test that if one view fails, others still generate."""
@@ -171,7 +175,7 @@ class TestPreviewImagesGeneration:
         result = _generate_preview_images_sync(mesh)
 
         non_none_count = sum(1 for v in result.values() if v is not None)
-        assert non_none_count >= 6, f"Too many failures: {non_none_count}/7 succeeded"
+        assert non_none_count >= 6, f"Too many failures: {non_none_count}/8 succeeded"
 
 
 class TestAnalyzeStreamWithPreviewImages:
@@ -319,24 +323,25 @@ class TestPreviewImagesOutput:
         print(f"\nSaving preview images to: {output_dir}")
 
         views_order = [
-            "front_256",
-            "back_256",
-            "left_256",
-            "right_256",
-            "top_256",
-            "bottom_256",
-            "iso_256",
+            "front_small",
+            "back_small",
+            "left_small",
+            "right_small",
+            "top_small",
+            "bottom_small",
+            "thumbnail_small",
+            "thumbnail_large",
         ]
         saved_count = 0
 
         for view in views_order:
             image_bytes = result.get(view)
             if image_bytes and isinstance(image_bytes, bytes):
-                output_path = output_dir / f"dice_{view}.png"
+                output_path = output_dir / f"dice_{view}.webp"
                 output_path.write_bytes(image_bytes)
                 print(f"  Saved: {output_path.name} ({len(image_bytes)} bytes)")
                 saved_count += 1
             else:
-                print(f"  Missing: dice_{view}.png")
+                print(f"  Missing: dice_{view}.webp")
 
-        assert saved_count == 7, f"Expected 7 preview images, got {saved_count}"
+        assert saved_count == 8, f"Expected 8 preview images, got {saved_count}"
