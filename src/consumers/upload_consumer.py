@@ -22,8 +22,11 @@ from src.core.geometry import (
     GeometryMetrics,
     GeometryProcessor,
     SlaDfmReport,
+    _compute_dfm_worker,
     _compute_metrics_worker,
-    _generate_artifacts_worker,
+    _export_glb_worker,
+    _render_large_preview_worker,
+    _render_small_thumbnail_worker,
     compute_metrics_trimesh_only,
 )
 from src.core.observability import tracer
@@ -46,6 +49,9 @@ from src.core.schemas import (
     PreviewImagesGeneratedMessageBody,
     PreviewImagesGeneratedPayload,
     PreviewImagesMessage,
+    SmallThumbnailReadyEvent,
+    SmallThumbnailReadyMessageBody,
+    SmallThumbnailReadyPayload,
 )
 from src.infrastructure.auth import ServiceAccountTokenProvider
 from src.infrastructure.storage import IStorageService
@@ -110,7 +116,8 @@ class UploadConsumer:
         | FileAnalysisFailedEvent
         | FileMetricsReadyEvent
         | PreviewImagesGeneratedEvent
-        | DfmAnalysisReadyEvent,
+        | DfmAnalysisReadyEvent
+        | SmallThumbnailReadyEvent,
         routing_key: str,
     ) -> None:
         if self.exchange is None:
@@ -144,7 +151,19 @@ class UploadConsumer:
                     span.set_attribute("file_id", str(file_id))
 
                     file_ext = Path(inner_msg.storage_path).suffix.lower()
-                    supported_exts = ["igs", "iges", "step", "stp", "stl", "obj", "3mf"]
+                    supported_exts = [
+                        "igs",
+                        "iges",
+                        "step",
+                        "stp",
+                        "stl",
+                        "obj",
+                        "3mf",
+                        "blend",
+                        "fbx",
+                        "gltf",
+                        "glb",
+                    ]
 
                     if file_ext.strip(".") not in supported_exts:
                         logger.debug(
@@ -182,16 +201,24 @@ class UploadConsumer:
                         # Add total timeout so the consumer never hangs waiting for a dead worker.
                         # The cascadio thread-based timeout in geometry.py abandons the C-extension
                         # thread after timeout_seconds; this outer timeout is a safety net.
-                        PHASE1_TIMEOUT_SECONDS = 300  # 5 minutes max for the whole phase
+                        PHASE1_TIMEOUT_SECONDS = (
+                            300  # 5 minutes max for the whole phase
+                        )
                         loop = asyncio.get_running_loop()
                         executor = self.geometry_processor.executor
                         logger.info(
                             "Starting Phase 1 metrics computation",
-                            extra={"event": "phase1_start", "file_id": str(file_id), "extension": file_ext},
+                            extra={
+                                "event": "phase1_start",
+                                "file_id": str(file_id),
+                                "extension": file_ext,
+                            },
                         )
                         try:
                             metrics_result = await asyncio.wait_for(
-                                loop.run_in_executor(executor, _compute_metrics_worker, data, file_ext),
+                                loop.run_in_executor(
+                                    executor, _compute_metrics_worker, data, file_ext
+                                ),
                                 timeout=PHASE1_TIMEOUT_SECONDS,
                             )
                             logger.info(
@@ -205,7 +232,10 @@ class UploadConsumer:
                         except asyncio.TimeoutError:
                             logger.error(
                                 f"Phase 1 timed out after {PHASE1_TIMEOUT_SECONDS}s — killing executor",
-                                extra={"event": "phase1_timeout", "file_id": str(file_id)},
+                                extra={
+                                    "event": "phase1_timeout",
+                                    "file_id": str(file_id),
+                                },
                             )
                             # Forcefully shutdown the executor so ProcessPoolExecutor
                             # kills all workers and recovers for the next message.
@@ -217,7 +247,10 @@ class UploadConsumer:
                             # Try trimesh-only fallback so we don't fail the whole job.
                             logger.warning(
                                 f"Phase 1 worker crashed — trying trimesh-only fallback: {ex}",
-                                extra={"event": "phase1_worker_crash", "file_id": str(file_id)},
+                                extra={
+                                    "event": "phase1_worker_crash",
+                                    "file_id": str(file_id),
+                                },
                             )
                             self.geometry_processor.shutdown()
                             self.geometry_processor = GeometryProcessor()
@@ -225,10 +258,15 @@ class UploadConsumer:
                             # Use trimesh directly in this process (no executor) for metrics only.
                             # This is slower but won't crash on problematic STEP files.
                             fallback_stream = io.BytesIO(data)
-                            metrics_result = compute_metrics_trimesh_only(fallback_stream, file_ext)
+                            metrics_result = compute_metrics_trimesh_only(
+                                fallback_stream, file_ext
+                            )
                             logger.info(
                                 "Phase 1 fallback complete (trimesh-only)",
-                                extra={"event": "phase1_fallback_complete", "file_id": str(file_id)},
+                                extra={
+                                    "event": "phase1_fallback_complete",
+                                    "file_id": str(file_id),
+                                },
                             )
 
                         metrics = GeometryMetrics(
@@ -265,6 +303,7 @@ class UploadConsumer:
                                     storagePath=inner_msg.storage_path,
                                     metrics=metrics,
                                     processedAt=_metrics_now,
+                                    # smallThumbnailStoragePath removed — thumbnail is now a separate event
                                 ),
                             ),
                         )
@@ -273,247 +312,333 @@ class UploadConsumer:
                             "maliev.geometryservice.v1.metrics.ready",
                         )
 
-                        # Publish DFM analysis event — all three process-specific reports at once
-                        _dfm_now = datetime.now(timezone.utc)
-                        dfm_reports_data = metrics_result.get("dfmReports", {})
-                        fdm_raw = dfm_reports_data.get("FDM")
-                        sla_raw = dfm_reports_data.get("SLA")
-                        cnc_raw = dfm_reports_data.get("CNC")
-                        dfm_event = DfmAnalysisReadyEvent(
-                            messageId=uuid4(),
-                            correlationId=correlation_id,
-                            messageType=[
-                                "urn:message:Maliev.MessagingContracts.Contracts.Geometry:DfmAnalysisReadyEvent"
-                            ],
-                            message=DfmAnalysisReadyMessageBody(
-                                messageId=uuid4(),
-                                messageName="DfmAnalysisReadyEvent",
-                                messageType=MessageTypeEnum.Event,
-                                messageVersion="1.0.0",
-                                publishedBy="GeometryService",
-                                consumedBy=["IntranetBff"],
-                                correlationId=correlation_id,
-                                causationId=None,
-                                occurredAtUtc=_dfm_now,
-                                isPublic=False,
-                                payload=DfmAnalysisReadyPayload(
-                                    fileId=file_id,
-                                    storagePath=inner_msg.storage_path,
-                                    fdmReport=FdmDfmReport.model_validate(fdm_raw) if fdm_raw else None,
-                                    slaReport=SlaDfmReport.model_validate(sla_raw) if sla_raw else None,
-                                    cncReport=CncDfmReport.model_validate(cnc_raw) if cnc_raw else None,
-                                    analyzedAt=_dfm_now,
-                                ),
-                            ),
-                        )
-                        await self.publish_event(dfm_event, "maliev.geometryservice.v1.dfm.ready")
-
-                        # 3b. Phase 2 — generate artifacts (slow)
+                        # 3b. Phase 2 — 4 independent parallel workers
                         mesh_stl_bytes = metrics_result.get("mesh_stl_bytes")
-                        glb_bytes: bytes | None = None
-                        thumb_bytes: bytes | None = None
-                        preview_images: dict[str, bytes | None] = {}
+                        cad_glb_bytes = metrics_result.get("cad_glb_bytes")
 
-                        if mesh_stl_bytes:
-                            PHASE2_TIMEOUT_SECONDS = 300  # 5 minutes max
-                            logger.info(
-                                "Starting Phase 2 artifact generation",
-                                extra={"event": "phase2_start", "file_id": str(file_id)},
+                        if not mesh_stl_bytes:
+                            logger.warning(
+                                "No STL bytes available — skipping Phase 2",
+                                extra={"event": "phase2_skip", "file_id": str(file_id)},
                             )
-                            try:
-                                artifacts_result = await asyncio.wait_for(
-                                    loop.run_in_executor(executor, _generate_artifacts_worker, mesh_stl_bytes),
-                                    timeout=PHASE2_TIMEOUT_SECONDS,
-                                )
-                                logger.info(
-                                    "Phase 2 artifact generation complete",
-                                    extra={"event": "phase2_complete", "file_id": str(file_id)},
-                                )
-                            except asyncio.TimeoutError:
-                                logger.error(
-                                    f"Phase 2 timed out after {PHASE2_TIMEOUT_SECONDS}s",
-                                    extra={"event": "phase2_timeout", "file_id": str(file_id)},
-                                )
-                                raise ValueError("ARTIFACT_GENERATION_TIMEOUT")
-                            except BrokenProcessPool as ex:
-                                logger.error(
-                                    f"Phase 2 worker crashed: {ex}",
-                                    extra={"event": "phase2_worker_crash", "file_id": str(file_id)},
-                                )
-                                raise ValueError("ARTIFACT_GENERATION_ERROR")
-                            glb_bytes = artifacts_result.get("glb_bytes")
-                            thumb_bytes = artifacts_result.get("thumbnail_bytes")
-                            preview_images = artifacts_result.get("preview_images", {})
+                        else:
+                            upload_id = inner_msg.upload_id
 
-                        # 4. Upload artifacts
-                        glb_path = None
-                        thumb_path = None
-                        parent_upload_id = inner_msg.upload_id
-
-                        if glb_bytes:
-                            glb_path = f"{inner_msg.storage_path}_viewer.glb"
-                            await self.upload_artifact(
-                                glb_bytes,
-                                glb_path,
-                                "model/gltf-binary",
-                                parent_upload_id,
-                            )
-
-                        if thumb_bytes:
-                            thumb_path = (
-                                f"{inner_msg.storage_path}_thumbnail_small.webp"
-                            )
-                            await self.upload_artifact(
-                                thumb_bytes, thumb_path, "image/webp", parent_upload_id
-                            )
-
-                        # 4b. Upload preview images
-                        preview_paths = {}
-                        thumbnail_large_path = None
-                        if preview_images:
-                            for side, image_bytes in preview_images.items():
-                                if side in ("thumbnail_small", "thumbnail_large"):
-                                    continue  # handled separately
-                                if image_bytes:
-                                    preview_path = (
-                                        f"{inner_msg.storage_path}_preview_{side}.webp"
+                            async def _run_small_thumbnail() -> None:
+                                try:
+                                    thumb = await asyncio.wait_for(
+                                        loop.run_in_executor(
+                                            executor,
+                                            _render_small_thumbnail_worker,
+                                            mesh_stl_bytes,
+                                        ),
+                                        timeout=120,
+                                    )
+                                    if not thumb:
+                                        return
+                                    thumb_path = (
+                                        f"{inner_msg.storage_path}_thumbnail_small.webp"
                                     )
                                     await self.upload_artifact(
-                                        image_bytes,
-                                        preview_path,
-                                        "image/webp",
-                                        parent_upload_id,
+                                        thumb, thumb_path, "image/webp", upload_id
                                     )
-                                    preview_paths[side] = preview_path
-
-                            thumbnail_large_bytes = preview_images.get(
-                                "thumbnail_large"
-                            )
-                            if thumbnail_large_bytes:
-                                thumbnail_large_path = (
-                                    f"{inner_msg.storage_path}_thumbnail_large.webp"
-                                )
-                                await self.upload_artifact(
-                                    thumbnail_large_bytes,
-                                    thumbnail_large_path,
-                                    "image/webp",
-                                    parent_upload_id,
-                                )
-
-                        # 5. Publish Success
-                        _now = datetime.now(timezone.utc)
-                        dfm_reports_data = metrics_result.get("dfmReports", {})
-                        fdm_dfm_data = dfm_reports_data.get("FDM", {})
-                        dfm_report: (
-                            FdmDfmReport | SlaDfmReport | CncDfmReport | None
-                        ) = None
-                        if fdm_dfm_data:
-                            dfm_report = FdmDfmReport(
-                                reportType=fdm_dfm_data.get("reportType", "FDM"),
-                                thinWallCount=fdm_dfm_data.get("thinWallCount", 0),
-                                thinWallRegions=fdm_dfm_data.get("thinWallRegions", []),
-                                overhangFaceCount=fdm_dfm_data.get(
-                                    "overhangFaceCount", 0
-                                ),
-                                overhangAreaCm2=fdm_dfm_data.get(
-                                    "overhangAreaCm2", 0.0
-                                ),
-                                overhangRegions=fdm_dfm_data.get("overhangRegions", []),
-                                supportRequired=fdm_dfm_data.get(
-                                    "supportRequired", False
-                                ),
-                                estimatedSupportVolumeCm3=fdm_dfm_data.get(
-                                    "estimatedSupportVolumeCm3"
-                                ),
-                                smallDetailCount=fdm_dfm_data.get(
-                                    "smallDetailCount", 0
-                                ),
-                            )
-                        success_event = FileAnalyzedEvent(
-                            messageId=uuid4(),
-                            correlationId=correlation_id,
-                            messageType=[
-                                "urn:message:Maliev.MessagingContracts.Contracts.Geometry:FileAnalyzedEvent"
-                            ],
-                            message=FileAnalyzedMessageBody(
-                                messageId=uuid4(),
-                                messageName="FileAnalyzedEvent",
-                                messageType=MessageTypeEnum.Event,
-                                messageVersion="1.0.0",
-                                publishedBy="GeometryService",
-                                consumedBy=["IntranetBff"],
-                                correlationId=correlation_id,
-                                causationId=None,
-                                occurredAtUtc=_now,
-                                isPublic=False,
-                                payload=FileAnalyzedPayload(
-                                    fileId=file_id,
-                                    metrics=metrics,
-                                    processedAt=_now,
-                                    glbStoragePath=glb_path,
-                                    thumbnailStoragePath=thumb_path,
-                                    storagePath=inner_msg.storage_path,
-                                    dfmReport=dfm_report,
-                                ),
-                            ),
-                        )
-                        await self.publish_event(
-                            success_event,
-                            "maliev.geometryservice.v1.analysis.completed",
-                        )
-
-                        # 6. Publish Preview Images Generated Event
-                        if preview_paths:
-                            _preview_now = datetime.now(timezone.utc)
-                            preview_event = PreviewImagesGeneratedEvent(
-                                messageId=uuid4(),
-                                correlationId=correlation_id,
-                                messageType=[
-                                    "urn:message:Maliev.MessagingContracts.Contracts.Geometry:PreviewImagesGeneratedEvent"
-                                ],
-                                message=PreviewImagesGeneratedMessageBody(
-                                    messageId=uuid4(),
-                                    messageName="PreviewImagesGeneratedEvent",
-                                    messageType=MessageTypeEnum.Event,
-                                    messageVersion="1.0.0",
-                                    publishedBy="GeometryService",
-                                    consumedBy=["IntranetBff"],
-                                    correlationId=correlation_id,
-                                    causationId=None,
-                                    occurredAtUtc=_preview_now,
-                                    isPublic=False,
-                                    payload=PreviewImagesGeneratedPayload(
-                                        storagePath=inner_msg.storage_path,
-                                        previewImages=PreviewImagesMessage(
-                                            front_small=preview_paths.get(
-                                                "front_small"
+                                    _now = datetime.now(timezone.utc)
+                                    thumb_event = SmallThumbnailReadyEvent(
+                                        messageId=uuid4(),
+                                        correlationId=correlation_id,
+                                        messageType=[
+                                            "urn:message:Maliev.MessagingContracts.Contracts.Geometry:SmallThumbnailReadyEvent"
+                                        ],
+                                        message=SmallThumbnailReadyMessageBody(
+                                            messageId=uuid4(),
+                                            messageName="SmallThumbnailReadyEvent",
+                                            messageType=MessageTypeEnum.Event,
+                                            messageVersion="1.0.0",
+                                            publishedBy="GeometryService",
+                                            consumedBy=["IntranetBff"],
+                                            correlationId=correlation_id,
+                                            causationId=None,
+                                            occurredAtUtc=_now,
+                                            isPublic=False,
+                                            payload=SmallThumbnailReadyPayload(
+                                                fileId=file_id,
+                                                storagePath=inner_msg.storage_path,
+                                                thumbnailStoragePath=thumb_path,
                                             ),
-                                            back_small=preview_paths.get("back_small"),
-                                            left_small=preview_paths.get("left_small"),
-                                            right_small=preview_paths.get(
-                                                "right_small"
-                                            ),
-                                            top_small=preview_paths.get("top_small"),
-                                            bottom_small=preview_paths.get(
-                                                "bottom_small"
-                                            ),
-                                            thumbnail_small=thumb_path,
-                                            thumbnail_large=thumbnail_large_path,
                                         ),
-                                        generatedAt=_preview_now,
-                                    ),
-                                ),
-                            )
-                            await self.publish_event(
-                                preview_event,
-                                "maliev.geometryservice.v1.preview-images.generated",
+                                    )
+                                    await self.publish_event(
+                                        thumb_event,
+                                        "maliev.geometryservice.v1.thumbnail.small.ready",
+                                    )
+                                    logger.info(
+                                        "Small thumbnail published",
+                                        extra={
+                                            "event": "thumbnail_small_published",
+                                            "file_id": str(file_id),
+                                        },
+                                    )
+                                except Exception as e:
+                                    logger.warning(
+                                        f"Small thumbnail task failed (non-fatal): {e}",
+                                        extra={
+                                            "event": "thumbnail_small_error",
+                                            "file_id": str(file_id),
+                                        },
+                                    )
+
+                            async def _run_glb() -> None:
+                                try:
+                                    glb = await asyncio.wait_for(
+                                        loop.run_in_executor(
+                                            executor,
+                                            _export_glb_worker,
+                                            mesh_stl_bytes,
+                                            cad_glb_bytes,
+                                        ),
+                                        timeout=120,
+                                    )
+                                    if not glb:
+                                        return
+                                    glb_path = f"{inner_msg.storage_path}_viewer.glb"
+                                    await self.upload_artifact(
+                                        glb, glb_path, "model/gltf-binary", upload_id
+                                    )
+                                    _now = datetime.now(timezone.utc)
+                                    glb_event = FileAnalyzedEvent(
+                                        messageId=uuid4(),
+                                        correlationId=correlation_id,
+                                        messageType=[
+                                            "urn:message:Maliev.MessagingContracts.Contracts.Geometry:FileAnalyzedEvent"
+                                        ],
+                                        message=FileAnalyzedMessageBody(
+                                            messageId=uuid4(),
+                                            messageName="FileAnalyzedEvent",
+                                            messageType=MessageTypeEnum.Event,
+                                            messageVersion="1.0.0",
+                                            publishedBy="GeometryService",
+                                            consumedBy=["IntranetBff"],
+                                            correlationId=correlation_id,
+                                            causationId=None,
+                                            occurredAtUtc=_now,
+                                            isPublic=False,
+                                            payload=FileAnalyzedPayload(
+                                                fileId=file_id,
+                                                metrics=metrics,
+                                                processedAt=_now,
+                                                glbStoragePath=glb_path,
+                                                thumbnailStoragePath=None,
+                                                storagePath=inner_msg.storage_path,
+                                                dfmReport=None,
+                                            ),
+                                        ),
+                                    )
+                                    await self.publish_event(
+                                        glb_event,
+                                        "maliev.geometryservice.v1.analysis.completed",
+                                    )
+                                    logger.info(
+                                        "GLB published",
+                                        extra={
+                                            "event": "glb_published",
+                                            "file_id": str(file_id),
+                                        },
+                                    )
+                                except Exception as e:
+                                    logger.warning(
+                                        f"GLB task failed (non-fatal): {e}",
+                                        extra={
+                                            "event": "glb_error",
+                                            "file_id": str(file_id),
+                                        },
+                                    )
+
+                            async def _run_dfm() -> None:
+                                try:
+                                    reports = await asyncio.wait_for(
+                                        loop.run_in_executor(
+                                            executor,
+                                            _compute_dfm_worker,
+                                            mesh_stl_bytes,
+                                        ),
+                                        timeout=300,
+                                    )
+                                    _now = datetime.now(timezone.utc)
+                                    fdm_raw = reports.get("FDM")
+                                    sla_raw = reports.get("SLA")
+                                    cnc_raw = reports.get("CNC")
+                                    dfm_event = DfmAnalysisReadyEvent(
+                                        messageId=uuid4(),
+                                        correlationId=correlation_id,
+                                        messageType=[
+                                            "urn:message:Maliev.MessagingContracts.Contracts.Geometry:DfmAnalysisReadyEvent"
+                                        ],
+                                        message=DfmAnalysisReadyMessageBody(
+                                            messageId=uuid4(),
+                                            messageName="DfmAnalysisReadyEvent",
+                                            messageType=MessageTypeEnum.Event,
+                                            messageVersion="1.0.0",
+                                            publishedBy="GeometryService",
+                                            consumedBy=["IntranetBff"],
+                                            correlationId=correlation_id,
+                                            causationId=None,
+                                            occurredAtUtc=_now,
+                                            isPublic=False,
+                                            payload=DfmAnalysisReadyPayload(
+                                                fileId=file_id,
+                                                storagePath=inner_msg.storage_path,
+                                                fdmReport=FdmDfmReport.model_validate(
+                                                    fdm_raw
+                                                )
+                                                if fdm_raw
+                                                else None,
+                                                slaReport=SlaDfmReport.model_validate(
+                                                    sla_raw
+                                                )
+                                                if sla_raw
+                                                else None,
+                                                cncReport=CncDfmReport.model_validate(
+                                                    cnc_raw
+                                                )
+                                                if cnc_raw
+                                                else None,
+                                                analyzedAt=_now,
+                                            ),
+                                        ),
+                                    )
+                                    await self.publish_event(
+                                        dfm_event, "maliev.geometryservice.v1.dfm.ready"
+                                    )
+                                    logger.info(
+                                        "DFM published",
+                                        extra={
+                                            "event": "dfm_published",
+                                            "file_id": str(file_id),
+                                        },
+                                    )
+                                except Exception as e:
+                                    logger.warning(
+                                        f"DFM task failed (non-fatal): {e}",
+                                        extra={
+                                            "event": "dfm_error",
+                                            "file_id": str(file_id),
+                                        },
+                                    )
+
+                            async def _run_previews() -> None:
+                                try:
+                                    preview_images = await asyncio.wait_for(
+                                        loop.run_in_executor(
+                                            executor,
+                                            _render_large_preview_worker,
+                                            mesh_stl_bytes,
+                                        ),
+                                        timeout=300,
+                                    )
+
+                                    preview_paths: dict[str, str] = {}
+                                    thumbnail_large_path: str | None = None
+
+                                    for side, image_bytes in preview_images.items():
+                                        if side in (
+                                            "thumbnail_small",
+                                            "thumbnail_large",
+                                        ):
+                                            continue
+                                        if image_bytes:
+                                            preview_path = f"{inner_msg.storage_path}_preview_{side}.webp"
+                                            await self.upload_artifact(
+                                                image_bytes,
+                                                preview_path,
+                                                "image/webp",
+                                                upload_id,
+                                            )
+                                            preview_paths[side] = preview_path
+
+                                    thumbnail_large_bytes = preview_images.get(
+                                        "thumbnail_large"
+                                    )
+                                    if thumbnail_large_bytes:
+                                        thumbnail_large_path = f"{inner_msg.storage_path}_thumbnail_large.webp"
+                                        await self.upload_artifact(
+                                            thumbnail_large_bytes,
+                                            thumbnail_large_path,
+                                            "image/webp",
+                                            upload_id,
+                                        )
+
+                                    _now = datetime.now(timezone.utc)
+                                    preview_event = PreviewImagesGeneratedEvent(
+                                        messageId=uuid4(),
+                                        correlationId=correlation_id,
+                                        messageType=[
+                                            "urn:message:Maliev.MessagingContracts.Contracts.Geometry:PreviewImagesGeneratedEvent"
+                                        ],
+                                        message=PreviewImagesGeneratedMessageBody(
+                                            messageId=uuid4(),
+                                            messageName="PreviewImagesGeneratedEvent",
+                                            messageType=MessageTypeEnum.Event,
+                                            messageVersion="1.0.0",
+                                            publishedBy="GeometryService",
+                                            consumedBy=["IntranetBff"],
+                                            correlationId=correlation_id,
+                                            causationId=None,
+                                            occurredAtUtc=_now,
+                                            isPublic=False,
+                                            payload=PreviewImagesGeneratedPayload(
+                                                storagePath=inner_msg.storage_path,
+                                                previewImages=PreviewImagesMessage(
+                                                    frontSmall=preview_paths.get(
+                                                        "front"
+                                                    ),
+                                                    backSmall=preview_paths.get("back"),
+                                                    leftSmall=preview_paths.get("left"),
+                                                    rightSmall=preview_paths.get(
+                                                        "right"
+                                                    ),
+                                                    topSmall=preview_paths.get("top"),
+                                                    bottomSmall=preview_paths.get(
+                                                        "bottom"
+                                                    ),
+                                                    thumbnailSmall=None,
+                                                    thumbnailLarge=thumbnail_large_path,
+                                                ),
+                                                generatedAt=_now,
+                                            ),
+                                        ),
+                                    )
+                                    await self.publish_event(
+                                        preview_event,
+                                        "maliev.geometryservice.v1.preview-images.generated",
+                                    )
+                                    logger.info(
+                                        "Previews published",
+                                        extra={
+                                            "event": "previews_published",
+                                            "file_id": str(file_id),
+                                        },
+                                    )
+                                except Exception as e:
+                                    logger.warning(
+                                        f"Previews task failed (non-fatal): {e}",
+                                        extra={
+                                            "event": "previews_error",
+                                            "file_id": str(file_id),
+                                        },
+                                    )
+
+                            await asyncio.gather(
+                                _run_small_thumbnail(),
+                                _run_glb(),
+                                _run_dfm(),
+                                _run_previews(),
+                                return_exceptions=True,
                             )
                             logger.info(
-                                "Successfully generated preview images",
+                                "Phase 2 all tasks complete",
                                 extra={
-                                    "file.id": str(file_id),
-                                    "storage_path": inner_msg.storage_path,
-                                    "preview_paths": str(list(preview_paths.keys())),
+                                    "event": "phase2_complete",
+                                    "file_id": str(file_id),
                                 },
                             )
 
@@ -522,10 +647,7 @@ class UploadConsumer:
                             "volume_cm3": metrics.volume_cm3,
                             "surface_area_cm2": metrics.surface_area_cm2,
                             "bounding_box": f"{metrics.bounding_box.x} x {metrics.bounding_box.y} x {metrics.bounding_box.z}",
-                            "glb_path": glb_path,
                         }
-                        if thumb_path is not None:
-                            extra["thumb_path"] = thumb_path
                         logger.info(
                             "Successfully analyzed file",
                             extra=extra,

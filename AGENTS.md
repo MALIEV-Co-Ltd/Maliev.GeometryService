@@ -118,6 +118,20 @@ This project uses **Poetry** for dependency management and **Pytest** for testin
 - [ ] RabbitMQ event keys match expected CamelCase aliases.
 
 
+## Git & Version Control — Mandatory Rules
+
+### 🚨 CRITICAL: Always Commit Code Changes (Non-Negotiable)
+- **You MUST commit your changes to the local repository after completing any meaningful unit of work.**
+- **Never accumulate uncommitted changes.** Do not wait until end of session or until something breaks.
+- **Commit early and often** — if a change is meaningful (even a small fix or refactor), commit it.
+- **You do NOT need to push to remote** — local commits are sufficient to protect against accidental loss.
+- **If you are unsure whether to commit, commit anyway.** Extra commits are harmless; lost work is irreversible.
+- This rule applies even if you are just "testing" or "exploring" — use git branches to isolate experimental work and commit those changes too.
+
+### 🚨 CRITICAL: Never Use `git checkout` to Restore Broken Files
+- **NEVER use `git checkout` to restore or recover files.** This operation discards uncommitted changes permanently and will result in data loss.
+- **To undo/recover from broken files: first commit your current changes, then use `git revert` or `git reset --soft` to safely undo.**
+
 ## Database & EF Core — Mandatory Rules
 
 ### EF Core Design Package

@@ -266,6 +266,32 @@ class DfmAnalysisReadyEvent(MassTransitEnvelope):
 
 
 # ---------------------------------------------------------------------------
+# Outgoing: SmallThumbnailReadyEvent
+# ---------------------------------------------------------------------------
+
+
+class SmallThumbnailReadyPayload(BaseModel):
+    """Nested payload data inside SmallThumbnailReadyEvent.message."""
+
+    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
+    file_id: str = Field(alias="fileId")
+    storage_path: str = Field(alias="storagePath")
+    thumbnail_storage_path: str = Field(alias="thumbnailStoragePath")
+
+
+class SmallThumbnailReadyMessageBody(BaseMessageBody):
+    """The full body of SmallThumbnailReadyEvent.message."""
+
+    payload: SmallThumbnailReadyPayload
+
+
+class SmallThumbnailReadyEvent(MassTransitEnvelope):
+    """Outgoing event published when the 256px isometric thumbnail is ready."""
+
+    message: SmallThumbnailReadyMessageBody
+
+
+# ---------------------------------------------------------------------------
 # Keep old aliases so any other import sites don't break
 # ---------------------------------------------------------------------------
 

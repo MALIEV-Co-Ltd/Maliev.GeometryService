@@ -20,13 +20,10 @@
    ```
    *Required Variables:*
    - `RABBITMQ_URI`: amqp://guest:guest@localhost:5672/
-   - `STORAGE_ENDPOINT`: localhost:9000
-   - `STORAGE_ACCESS_KEY`: minioadmin
-   - `STORAGE_SECRET_KEY`: minioadmin
 
 ## Running Locally
 
-1. **Start Infrastructure (RabbitMQ, MinIO)**:
+1. **Start Infrastructure (RabbitMQ)**:
    ```bash
    docker-compose up -d
    ```

@@ -3,11 +3,6 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 class Settings(BaseSettings):
     RABBITMQ_URI: str = "amqp://guest:guest@localhost:5672/"
-    STORAGE_ENDPOINT: str = "localhost:9000"
-    STORAGE_ACCESS_KEY: str = "minioadmin"
-    STORAGE_SECRET_KEY: str = "minioadmin"
-    STORAGE_BUCKET: str = "uploads"
-
     UPLOAD_SERVICE_URL: str = "http://localhost:6900"
 
     JWT_SECURITY_KEY: str = ""

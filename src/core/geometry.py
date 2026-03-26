@@ -414,7 +414,6 @@ def _render_single_view(
     )
     pl.add_light(front_fill)
 
-    pl.show(auto_close=False)
     img = pl.screenshot(transparent_background=False, return_img=True)
     pl.close()
 
@@ -562,7 +561,11 @@ def _run_gmsh_with_timeout(file_path: str, timeout_seconds: int) -> trimesh.Trim
         # Log before dying so Aspire structured logs capture it
         logger.error(
             f"gmsh mesh generation timed out after {timeout_seconds}s — killing worker process",
-            extra={"event": "gmsh_timeout", "timeout_seconds": timeout_seconds, "file": file_path},
+            extra={
+                "event": "gmsh_timeout",
+                "timeout_seconds": timeout_seconds,
+                "file": file_path,
+            },
         )
         # os._exit bypasses Python cleanup but ensures the process dies immediately.
         # ProcessPoolExecutor will detect the abnormal exit and raise BrokenProcessPool.
@@ -649,7 +652,11 @@ def _run_gmsh_with_timeout(file_path: str, timeout_seconds: int) -> trimesh.Trim
             # gmsh is still running or raised an error — kill this process
             logger.error(
                 f"gmsh mesh generation timed out after {timeout_seconds}s (Windows) — killing worker process",
-                extra={"event": "gmsh_timeout", "timeout_seconds": timeout_seconds, "file": file_path},
+                extra={
+                    "event": "gmsh_timeout",
+                    "timeout_seconds": timeout_seconds,
+                    "file": file_path,
+                },
             )
             os._exit(1)
 
@@ -660,14 +667,19 @@ def _run_gmsh_with_timeout(file_path: str, timeout_seconds: int) -> trimesh.Trim
     return mesh
 
 
-def _load_cad_with_cascadio(file_path: str, timeout_seconds: int = 60) -> trimesh.Trimesh:
+def _load_cad_with_cascadio(
+    file_path: str, timeout_seconds: int = 60
+) -> tuple[trimesh.Trimesh, bytes]:
     """
     Load STEP/IGES file via cascadio (OpenCascade) with 0.1mm linear deviation
     and 0.5 rad angular deviation for smooth circles and fillets.
+    Returns (mesh, glb_bytes) — the trimesh for metrics and the cascadio-produced
+    GLB bytes for direct upload (avoids re-tessellating in Phase 2).
     Uses a thread-based timeout; the executor is shut down without waiting
     if cascadio hangs in C-extension code.
     """
     import concurrent.futures
+
     try:
         import cascadio
     except ImportError as exc:
@@ -676,23 +688,50 @@ def _load_cad_with_cascadio(file_path: str, timeout_seconds: int = 60) -> trimes
             "Install with: pip install cascadio"
         ) from exc
 
-    def _do_load() -> trimesh.Trimesh:
-        result = cascadio.load(file_path, linear_deflection=0.1, angular_deflection=0.5)
-        if not isinstance(result, dict):
-            raise ValueError(f"cascadio.load returned unexpected type: {type(result)}")
-        vertices = result.get("vertices")
-        faces = result.get("faces")
-        if vertices is None or faces is None or len(vertices) == 0:
-            raise ValueError(
-                f"cascadio returned empty or malformed tessellation for {file_path}"
+    def _do_load() -> tuple[trimesh.Trimesh, bytes]:
+        import os
+        import tempfile as _tempfile
+
+        with _tempfile.TemporaryDirectory() as tmpdir:
+            glb_path = os.path.join(tmpdir, "output.glb")
+            ret = cascadio.step_to_glb(
+                file_path,
+                glb_path,
+                tol_linear=0.1,
+                tol_angular=0.5,
             )
-        return trimesh.Trimesh(vertices=vertices, faces=faces, process=True)
+            if ret != 0:
+                raise ValueError(
+                    f"cascadio.step_to_glb returned error code {ret} for {file_path}"
+                )
+            if not os.path.exists(glb_path):
+                raise ValueError(
+                    f"cascadio.step_to_glb produced no output file for {file_path}"
+                )
+            with open(glb_path, "rb") as f:
+                glb_bytes = f.read()
+            loaded = trimesh.load(glb_path, force="mesh")
+            if isinstance(loaded, trimesh.Scene):
+                meshes = list(loaded.geometry.values())
+                if not meshes:
+                    raise ValueError(f"cascadio produced empty scene for {file_path}")
+                mesh = trimesh.util.concatenate(meshes)
+            elif isinstance(loaded, trimesh.Trimesh):
+                mesh = loaded
+            else:
+                raise ValueError(f"cascadio produced unexpected type: {type(loaded)}")
+            if len(mesh.vertices) == 0:
+                raise ValueError(f"cascadio produced empty mesh for {file_path}")
+            # glTF/GLB stores coordinates in meters (spec). Convert to mm so all
+            # metric computation (extents, volume, area) is consistent with STL/OBJ input.
+            # cad_glb_bytes stays in meters — correct for BabylonJS rendering.
+            mesh.apply_scale(1000.0)
+            return mesh, glb_bytes
 
     pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
     future = pool.submit(_do_load)
     try:
-        mesh = future.result(timeout=timeout_seconds)
-        return mesh
+        return future.result(timeout=timeout_seconds)
     except concurrent.futures.TimeoutError:
         future.cancel()
         raise TimeoutError(
@@ -715,6 +754,7 @@ def _compute_metrics_worker(data: bytes, file_extension: str) -> dict[str, Any]:
         ext = file_extension.strip(".").lower()
 
         mesh: trimesh.Trimesh | None = None
+        cad_glb_bytes: bytes | None = None
         if ext in ["igs", "iges", "step", "stp"]:
             try:
                 # Write to a temp file that cascadio will open.
@@ -725,19 +765,33 @@ def _compute_metrics_worker(data: bytes, file_extension: str) -> dict[str, Any]:
 
                 logger.info(
                     "Loading CAD file with cascadio (timeout=60s)",
-                    extra={"event": "cascadio_start", "extension": ext, "tmp_path": tmp_path},
+                    extra={
+                        "event": "cascadio_start",
+                        "extension": ext,
+                        "tmp_path": tmp_path,
+                    },
                 )
-                mesh = _load_cad_with_cascadio(tmp_path, timeout_seconds=60)
+                mesh, cad_glb_bytes = _load_cad_with_cascadio(
+                    tmp_path, timeout_seconds=60
+                )
                 logger.info(
                     "cascadio tessellation complete",
-                    extra={"event": "cascadio_complete", "extension": ext, "triangle_count": len(mesh.faces) if mesh else 0},
+                    extra={
+                        "event": "cascadio_complete",
+                        "extension": ext,
+                        "triangle_count": len(mesh.faces) if mesh else 0,
+                    },
                 )
             except ValueError:
                 raise
             except Exception as e:
                 logger.error(
                     f"CAD_LOAD_ERROR during cascadio processing: {e}",
-                    extra={"event": "cascadio_error", "extension": ext, "error": str(e)},
+                    extra={
+                        "event": "cascadio_error",
+                        "extension": ext,
+                        "error": str(e),
+                    },
                 )
                 raise ValueError(f"CAD_LOAD_ERROR: {ext} ({str(e)})") from e
         else:
@@ -750,6 +804,12 @@ def _compute_metrics_worker(data: bytes, file_extension: str) -> dict[str, Any]:
                 mesh = cast(trimesh.Trimesh, list(mesh_data.geometry.values())[0])
             else:
                 mesh = cast(trimesh.Trimesh, mesh_data)
+            # glTF/GLB spec mandates meters — convert to mm for metric computation
+            if ext in ("glb", "gltf"):
+                mesh.apply_scale(1000.0)
+                cad_glb_bytes = (
+                    data  # uploaded GLB bytes stay in meters (correct for BabylonJS)
+                )
 
         if mesh is None or not isinstance(mesh, trimesh.Trimesh):
             raise ValueError("FILE_CORRUPT")
@@ -783,58 +843,6 @@ def _compute_metrics_worker(data: bytes, file_extension: str) -> dict[str, Any]:
 
         support_mm3 = max(0.0, vol_bbox - volume_mm3)
 
-        thin_wall_count, thin_wall_centroids = _compute_thin_wall_analysis(mesh)
-        overhang_face_count, overhang_area_cm2, overhang_centroids = (
-            _compute_overhang_analysis(mesh)
-        )
-        sharp_corner_count, sharp_corner_centroids = _compute_sharp_corner_analysis(
-            mesh
-        )
-        hollow_centroids = _compute_hollow_analysis(mesh)
-
-        fdm_dfm_report = {
-            "reportType": "FDM",
-            "thinWallCount": thin_wall_count,
-            "thinWallRegions": thin_wall_centroids,
-            "overhangFaceCount": overhang_face_count,
-            "overhangAreaCm2": overhang_area_cm2,
-            "overhangRegions": overhang_centroids,
-            "supportRequired": overhang_face_count > 0 or thin_wall_count > 0,
-            "estimatedSupportVolumeCm3": support_mm3 / 1000.0
-            if overhang_face_count > 0
-            else None,
-            "smallDetailCount": 0,
-        }
-
-        sla_dfm_report = {
-            "reportType": "SLA",
-            "thinWallCount": thin_wall_count,
-            "thinWallRegions": thin_wall_centroids,
-            "overhangFaceCount": overhang_face_count,
-            "overhangAreaCm2": overhang_area_cm2,
-            "overhangRegions": overhang_centroids,
-            "resinTrappingRisk": len(hollow_centroids) > 0,
-            "resinTrappingRegions": hollow_centroids,
-            "suctionRisk": overhang_face_count > 0 and len(mesh.faces) > 1000,
-            "suctionRegions": overhang_centroids[:10]
-            if overhang_face_count > 0
-            else [],
-            "hollowRegions": hollow_centroids,
-        }
-
-        cnc_dfm_report = {
-            "reportType": "CNC",
-            "sharpCornerCount": sharp_corner_count,
-            "sharpCornerRegions": sharp_corner_centroids,
-            "hasUndercuts": False,
-            "undercutRegions": [],
-            "hasDrillHoles": False,
-            "drillHoleCount": 0,
-            "requiresEdm": sharp_corner_count > 20,
-            "requiresGrinding": False,
-            "minimumFeatureSizeMm": 1.0,
-        }
-
         mesh_stl_bytes: bytes | None = None
         with contextlib.suppress(Exception):
             mesh_stl_bytes = cast(bytes, mesh.export(file_type="stl"))
@@ -858,11 +866,7 @@ def _compute_metrics_worker(data: bytes, file_extension: str) -> dict[str, Any]:
             "triangle_count": len(mesh.faces),
             "euler_number": euler_number,
             "mesh_stl_bytes": mesh_stl_bytes,
-            "dfmReports": {
-                "FDM": fdm_dfm_report,
-                "SLA": sla_dfm_report,
-                "CNC": cnc_dfm_report,
-            },
+            "cad_glb_bytes": cad_glb_bytes,
         }
 
     except ValueError:
@@ -870,7 +874,11 @@ def _compute_metrics_worker(data: bytes, file_extension: str) -> dict[str, Any]:
     except Exception as e:
         logger.error(
             f"Unexpected error in _compute_metrics_worker: {e}",
-            extra={"event": "worker_unexpected_error", "error": str(e), "traceback": traceback.format_exc()},
+            extra={
+                "event": "worker_unexpected_error",
+                "error": str(e),
+                "traceback": traceback.format_exc(),
+            },
         )
         if "MULTI_BODY_ERROR" in str(e):
             raise
@@ -884,48 +892,17 @@ def _compute_metrics_worker(data: bytes, file_extension: str) -> dict[str, Any]:
                     Path(tmp_path).unlink()
 
 
-def _generate_artifacts_worker(mesh_stl_bytes: bytes) -> dict[str, Any]:
-    """
-    Phase 2 worker: loads mesh from STL bytes, generates GLB + 7 preview images.
-    Returns glb_bytes, thumbnail_bytes, preview_images.
-    Runs in a separate process.
-    """
-    try:
-        mesh = trimesh.load(io.BytesIO(mesh_stl_bytes), file_type="stl", force="mesh")
-        if not isinstance(mesh, trimesh.Trimesh):
-            raise ValueError("Failed to load mesh from STL bytes")
-
-        glb_bytes: bytes | None = None
-        with contextlib.suppress(Exception):
-            glb_bytes = cast(bytes, mesh.export(file_type="glb"))
-
-        preview_images: dict[str, bytes | None] = {}
-        if len(mesh.faces) > 0:
-            with contextlib.suppress(Exception):
-                preview_images = _generate_preview_images_sync(mesh)
-        else:
-            logger.warning(
-                "Mesh has no polygon faces — skipping preview generation (point cloud or line mesh)"
-            )
-
-        thumbnail_bytes = preview_images.get("thumbnail_small")
-
-        return {
-            "glb_bytes": glb_bytes,
-            "thumbnail_bytes": thumbnail_bytes,
-            "preview_images": preview_images,
-        }
-    except Exception as e:
-        raise ValueError(f"ARTIFACT_GENERATION_ERROR: {str(e)}") from e
-
-
-def compute_metrics_trimesh_only(data_stream: io.BytesIO, file_extension: str) -> dict[str, Any]:
+def compute_metrics_trimesh_only(
+    data_stream: io.BytesIO, file_extension: str
+) -> dict[str, Any]:
     """
     Fallback metrics computation using ONLY trimesh (no gmsh).
     Used when gmsh crashes or times out on problematic STEP files.
     This function runs in the consumer's main process (not in an executor).
     """
-    file_stream = io.BytesIO(data_stream.read()) if hasattr(data_stream, 'read') else data_stream
+    file_stream = (
+        io.BytesIO(data_stream.read()) if hasattr(data_stream, "read") else data_stream
+    )
     file_stream.seek(0)
 
     ext = file_extension.strip(".").lower()
@@ -990,7 +967,9 @@ def compute_metrics_trimesh_only(data_stream: io.BytesIO, file_extension: str) -
         "overhangAreaCm2": 0.0,
         "overhangRegions": [],
         "supportRequired": overhang_face_count > 0 or thin_wall_count > 0,
-        "estimatedSupportVolumeCm3": support_mm3 / 1000.0 if overhang_face_count > 0 else None,
+        "estimatedSupportVolumeCm3": support_mm3 / 1000.0
+        if overhang_face_count > 0
+        else None,
         "smallDetailCount": 0,
     }
 
@@ -1073,12 +1052,20 @@ def _analyze_bytes_worker(data: bytes, file_extension: str) -> dict[str, Any]:
 
                 logger.info(
                     f"Loading CAD file with gmsh (timeout={GMSH_MESH_TIMEOUT_SECONDS}s)",
-                    extra={"event": "gmsh_start", "extension": ext, "tmp_path": tmp_path},
+                    extra={
+                        "event": "gmsh_start",
+                        "extension": ext,
+                        "tmp_path": tmp_path,
+                    },
                 )
                 mesh = _run_gmsh_with_timeout(tmp_path, GMSH_MESH_TIMEOUT_SECONDS)
                 logger.info(
                     "gmsh tessellation complete",
-                    extra={"event": "gmsh_complete", "extension": ext, "triangle_count": len(mesh.faces) if mesh else 0},
+                    extra={
+                        "event": "gmsh_complete",
+                        "extension": ext,
+                        "triangle_count": len(mesh.faces) if mesh else 0,
+                    },
                 )
             except ValueError:
                 raise
@@ -1088,16 +1075,21 @@ def _analyze_bytes_worker(data: bytes, file_extension: str) -> dict[str, Any]:
                     extra={"event": "gmsh_error", "extension": ext, "error": str(e)},
                 )
                 raise ValueError(f"CAD_LOAD_ERROR: {ext} ({str(e)})") from e
-        else:
-            mesh_data = trimesh.load(file_stream, file_type=ext, force="mesh")
-            if isinstance(mesh_data, trimesh.Scene):
-                if len(mesh_data.geometry) > 1:
-                    raise ValueError("MULTI_BODY_ERROR")
-                if not mesh_data.geometry:
-                    raise ValueError("EMPTY_FILE_ERROR")
-                mesh = cast(trimesh.Trimesh, list(mesh_data.geometry.values())[0])
             else:
-                mesh = cast(trimesh.Trimesh, mesh_data)
+                mesh_data = trimesh.load(file_stream, file_type=ext, force="mesh")
+                if isinstance(mesh_data, trimesh.Scene):
+                    if len(mesh_data.geometry) > 1:
+                        raise ValueError("MULTI_BODY_ERROR")
+                    if not mesh_data.geometry:
+                        raise ValueError("EMPTY_FILE_ERROR")
+                    mesh = cast(trimesh.Trimesh, list(mesh_data.geometry.values())[0])
+                else:
+                    mesh = cast(trimesh.Trimesh, mesh_data)
+            # glTF/GLB spec mandates meters — convert to mm so all downstream
+            # metric computation (volume, surface area, bounding box) is in mm.
+            # The original cad_glb_bytes stays in meters for BabylonJS rendering.
+            if ext in ("glb", "gltf"):
+                mesh.apply_scale(1000.0)
 
         if mesh is None or not isinstance(mesh, trimesh.Trimesh):
             raise ValueError("FILE_CORRUPT")
@@ -1176,9 +1168,161 @@ def _analyze_bytes_worker(data: bytes, file_extension: str) -> dict[str, Any]:
                 Path(tmp_path).unlink()
 
 
+def _render_small_thumbnail_worker(stl_bytes: bytes) -> bytes | None:
+    """Phase 2 worker: renders a 256px isometric thumbnail from STL bytes. Runs in a separate process."""
+    try:
+        import pyvista as pv
+
+        pv.OFF_SCREEN = True
+
+        mesh = trimesh.load(io.BytesIO(stl_bytes), file_type="stl", force="mesh")
+        if not isinstance(mesh, trimesh.Trimesh) or len(mesh.faces) == 0:
+            return None
+
+        thumb_mesh = mesh.copy()
+        thumb_mesh.vertices -= thumb_mesh.centroid
+        faces_pv = np.column_stack(
+            [np.full(len(thumb_mesh.faces), 3, dtype=np.int32), thumb_mesh.faces]
+        ).ravel()
+        pv_mesh_thumb = pv.PolyData(thumb_mesh.vertices.copy(), faces_pv)
+        pv_mesh_thumb.compute_normals(
+            cell_normals=True, point_normals=True, split_vertices=False, inplace=True
+        )
+        feat_edges = pv_mesh_thumb.extract_feature_edges(
+            boundary_edges=False,
+            feature_edges=True,
+            manifold_edges=False,
+            non_manifold_edges=False,
+            feature_angle=30,
+        )
+        pv_mesh_thumb.compute_normals(
+            cell_normals=True, point_normals=True, split_vertices=True, inplace=True
+        )
+        tb = np.array(pv_mesh_thumb.bounds)
+        max_dim = float(np.max([tb[1] - tb[0], tb[3] - tb[2], tb[5] - tb[4]]))
+        iso_cfg = VIEW_CONFIGS["iso"]
+        return _render_single_view(
+            pv_mesh=pv_mesh_thumb,
+            feature_edges=feat_edges,
+            center=np.zeros(3),
+            max_dim=max_dim,
+            camera_dir=iso_cfg["camera_dir"],
+            viewup=iso_cfg["viewup"],
+            size=DEFAULT_SIZE,
+            distance_padding=iso_cfg["distance_padding"],
+            fmt="WEBP",
+            quality=80,
+        )
+    except Exception as e:
+        logger.warning(f"_render_small_thumbnail_worker failed: {e}")
+        return None
+
+
+def _export_glb_worker(
+    stl_bytes: bytes, cad_glb_bytes: bytes | None = None
+) -> bytes | None:
+    """Phase 2 worker: returns GLB bytes for the 3D viewer. Runs in a separate process."""
+    if cad_glb_bytes:
+        return cad_glb_bytes
+    try:
+        mesh = trimesh.load(io.BytesIO(stl_bytes), file_type="stl", force="mesh")
+        if not isinstance(mesh, trimesh.Trimesh):
+            return None
+        # STL is always in mm per convention. Convert back to meters for GLB
+        # so BabylonJS renders the model at the correct physical size.
+        mesh.apply_scale(0.001)
+        return cast(bytes, mesh.export(file_type="glb"))
+    except Exception as e:
+        logger.warning(f"_export_glb_worker failed: {e}")
+        return None
+
+
+def _compute_dfm_worker(stl_bytes: bytes) -> dict[str, Any]:
+    """Phase 2 worker: runs DFM analysis on the mesh. Runs in a separate process."""
+    try:
+        mesh = trimesh.load(io.BytesIO(stl_bytes), file_type="stl", force="mesh")
+        if not isinstance(mesh, trimesh.Trimesh):
+            return {}
+
+        extents = mesh.extents if mesh.extents is not None else [0.0, 0.0, 0.0]
+        vol_bbox = float(extents[0]) * float(extents[1]) * float(extents[2])
+        volume_mm3 = float(mesh.volume) if mesh.is_watertight else 0.0
+        support_mm3 = max(0.0, vol_bbox - volume_mm3)
+
+        thin_wall_count, thin_wall_centroids = _compute_thin_wall_analysis(mesh)
+        overhang_face_count, overhang_area_cm2, overhang_centroids = (
+            _compute_overhang_analysis(mesh)
+        )
+        sharp_corner_count, sharp_corner_centroids = _compute_sharp_corner_analysis(
+            mesh
+        )
+        hollow_centroids = _compute_hollow_analysis(mesh)
+
+        return {
+            "FDM": {
+                "reportType": "FDM",
+                "thinWallCount": thin_wall_count,
+                "thinWallRegions": thin_wall_centroids,
+                "overhangFaceCount": overhang_face_count,
+                "overhangAreaCm2": overhang_area_cm2,
+                "overhangRegions": overhang_centroids,
+                "supportRequired": overhang_face_count > 0 or thin_wall_count > 0,
+                "estimatedSupportVolumeCm3": support_mm3 / 1000.0
+                if overhang_face_count > 0
+                else None,
+                "smallDetailCount": 0,
+            },
+            "SLA": {
+                "reportType": "SLA",
+                "thinWallCount": thin_wall_count,
+                "thinWallRegions": thin_wall_centroids,
+                "overhangFaceCount": overhang_face_count,
+                "overhangAreaCm2": overhang_area_cm2,
+                "overhangRegions": overhang_centroids,
+                "resinTrappingRisk": len(hollow_centroids) > 0,
+                "resinTrappingRegions": hollow_centroids,
+                "suctionRisk": overhang_face_count > 0 and len(mesh.faces) > 1000,
+                "suctionRegions": overhang_centroids[:10]
+                if overhang_face_count > 0
+                else [],
+                "hollowRegions": hollow_centroids,
+            },
+            "CNC": {
+                "reportType": "CNC",
+                "sharpCornerCount": sharp_corner_count,
+                "sharpCornerRegions": sharp_corner_centroids,
+                "hasUndercuts": False,
+                "undercutRegions": [],
+                "hasDrillHoles": False,
+                "drillHoleCount": 0,
+                "requiresEdm": sharp_corner_count > 20,
+                "requiresGrinding": False,
+                "minimumFeatureSizeMm": 1.0,
+            },
+        }
+    except Exception as e:
+        logger.warning(f"_compute_dfm_worker failed: {e}")
+        return {}
+
+
+def _render_large_preview_worker(stl_bytes: bytes) -> dict[str, bytes | None]:
+    """Phase 2 worker: generates 7 preview images (6 ortho + 1 iso) + 1200px ISO. Runs in a separate process."""
+    try:
+        mesh = trimesh.load(io.BytesIO(stl_bytes), file_type="stl", force="mesh")
+        if not isinstance(mesh, trimesh.Trimesh):
+            return {}
+        if len(mesh.faces) == 0:
+            logger.warning("Mesh has no polygon faces — skipping preview generation")
+            return {}
+        return _generate_preview_images_sync(mesh)
+    except Exception as e:
+        logger.warning(f"_render_large_preview_worker failed: {e}")
+        return {}
+
+
 class GeometryProcessor:
     def __init__(self) -> None:
-        self.executor = ProcessPoolExecutor(max_workers=os.cpu_count() or 4)
+        self.executor = ProcessPoolExecutor(max_workers=max(4, os.cpu_count() or 4))
 
     def shutdown(self) -> None:
         self.executor.shutdown(wait=True)
