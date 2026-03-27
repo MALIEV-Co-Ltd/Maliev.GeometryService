@@ -589,16 +589,16 @@ class UploadConsumer:
                                                 storagePath=inner_msg.storage_path,
                                                 previewImages=PreviewImagesMessage(
                                                     frontSmall=preview_paths.get(
-                                                        "front"
+                                                        "front_small"
                                                     ),
-                                                    backSmall=preview_paths.get("back"),
-                                                    leftSmall=preview_paths.get("left"),
+                                                    backSmall=preview_paths.get("back_small"),
+                                                    leftSmall=preview_paths.get("left_small"),
                                                     rightSmall=preview_paths.get(
-                                                        "right"
+                                                        "right_small"
                                                     ),
-                                                    topSmall=preview_paths.get("top"),
+                                                    topSmall=preview_paths.get("top_small"),
                                                     bottomSmall=preview_paths.get(
-                                                        "bottom"
+                                                        "bottom_small"
                                                     ),
                                                     thumbnailSmall=None,
                                                     thumbnailLarge=thumbnail_large_path,
