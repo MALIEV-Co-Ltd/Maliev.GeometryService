@@ -844,8 +844,13 @@ def _compute_metrics_worker(data: bytes, file_extension: str) -> dict[str, Any]:
         support_mm3 = max(0.0, vol_bbox - volume_mm3)
 
         mesh_stl_bytes: bytes | None = None
-        with contextlib.suppress(Exception):
+        try:
             mesh_stl_bytes = cast(bytes, mesh.export(file_type="stl"))
+        except Exception as ex:
+            logger.warning(
+                "STL export failed for geometry, Phase 2 may produce degraded results: %s",
+                ex,
+            )
 
         logger.info(
             "Metrics computed successfully",
@@ -1002,8 +1007,13 @@ def compute_metrics_trimesh_only(
 
     # Export STL for Phase 2 (needed for GLB generation)
     mesh_stl_bytes: bytes | None = None
-    with contextlib.suppress(Exception):
+    try:
         mesh_stl_bytes = cast(bytes, mesh.export(file_type="stl"))
+    except Exception as ex:
+        logger.warning(
+            "STL export failed for geometry, Phase 2 may produce degraded results: %s",
+            ex,
+        )
 
     logger.info(
         "FALLBACK: Metrics computed with trimesh only",
