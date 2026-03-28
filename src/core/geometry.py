@@ -797,11 +797,12 @@ def _compute_metrics_worker(data: bytes, file_extension: str) -> dict[str, Any]:
         else:
             mesh_data = trimesh.load(file_stream, file_type=ext, force="mesh")
             if isinstance(mesh_data, trimesh.Scene):
-                if len(mesh_data.geometry) > 1:
-                    raise ValueError("MULTI_BODY_ERROR")
                 if not mesh_data.geometry:
                     raise ValueError("EMPTY_FILE_ERROR")
-                mesh = cast(trimesh.Trimesh, list(mesh_data.geometry.values())[0])
+                if len(mesh_data.geometry) > 1:
+                    mesh = cast(trimesh.Trimesh, trimesh.util.concatenate(list(mesh_data.geometry.values())))
+                else:
+                    mesh = cast(trimesh.Trimesh, list(mesh_data.geometry.values())[0])
             else:
                 mesh = cast(trimesh.Trimesh, mesh_data)
             # glTF/GLB spec mandates meters — convert to mm for metric computation
@@ -851,6 +852,8 @@ def _compute_metrics_worker(data: bytes, file_extension: str) -> dict[str, Any]:
                 "STL export failed for geometry, Phase 2 may produce degraded results: %s",
                 ex,
             )
+            if ext == "stl":
+                mesh_stl_bytes = data  # fall back to original STL bytes
 
         logger.info(
             "Metrics computed successfully",

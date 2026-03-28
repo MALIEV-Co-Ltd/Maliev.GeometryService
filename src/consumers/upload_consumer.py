@@ -316,9 +316,12 @@ class UploadConsumer:
                         mesh_stl_bytes = metrics_result.get("mesh_stl_bytes")
                         cad_glb_bytes = metrics_result.get("cad_glb_bytes")
 
-                        if not mesh_stl_bytes:
+                        if not mesh_stl_bytes and file_ext.strip(".") == "stl":
+                            mesh_stl_bytes = data
+
+                        if not mesh_stl_bytes and not cad_glb_bytes:
                             logger.warning(
-                                "No STL bytes available — skipping Phase 2",
+                                "No STL or GLB bytes available — skipping Phase 2",
                                 extra={"event": "phase2_skip", "file_id": str(file_id)},
                             )
                         else:
