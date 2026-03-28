@@ -80,7 +80,7 @@ class UploadConsumer:
             try:
                 self.connection = await aio_pika.connect_robust(settings.RABBITMQ_URI)
                 self.channel = await self.connection.channel()
-                await self.channel.set_qos(prefetch_count=1)
+                await self.channel.set_qos(prefetch_count=max(4, os.cpu_count() or 4))
 
                 self.queue = cast(
                     aio_pika.abc.AbstractRobustQueue,
@@ -591,12 +591,18 @@ class UploadConsumer:
                                                     frontSmall=preview_paths.get(
                                                         "front_small"
                                                     ),
-                                                    backSmall=preview_paths.get("back_small"),
-                                                    leftSmall=preview_paths.get("left_small"),
+                                                    backSmall=preview_paths.get(
+                                                        "back_small"
+                                                    ),
+                                                    leftSmall=preview_paths.get(
+                                                        "left_small"
+                                                    ),
                                                     rightSmall=preview_paths.get(
                                                         "right_small"
                                                     ),
-                                                    topSmall=preview_paths.get("top_small"),
+                                                    topSmall=preview_paths.get(
+                                                        "top_small"
+                                                    ),
                                                     bottomSmall=preview_paths.get(
                                                         "bottom_small"
                                                     ),
