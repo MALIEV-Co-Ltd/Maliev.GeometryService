@@ -799,10 +799,12 @@ def _compute_metrics_worker(data: bytes, file_extension: str) -> dict[str, Any]:
             if isinstance(mesh_data, trimesh.Scene):
                 if not mesh_data.geometry:
                     raise ValueError("EMPTY_FILE_ERROR")
-                if len(mesh_data.geometry) > 1:
-                    mesh = cast(trimesh.Trimesh, trimesh.util.concatenate(list(mesh_data.geometry.values())))
-                else:
-                    mesh = cast(trimesh.Trimesh, list(mesh_data.geometry.values())[0])
+                # dump(concatenate=True) applies each body's scene-graph transform before
+                # merging, so relative positions between bodies are preserved.
+                dumped = mesh_data.dump(concatenate=True)
+                if not isinstance(dumped, trimesh.Trimesh) or len(dumped.vertices) == 0:
+                    raise ValueError("EMPTY_FILE_ERROR")
+                mesh = dumped
             else:
                 mesh = cast(trimesh.Trimesh, mesh_data)
             # glTF/GLB spec mandates meters — convert to mm for metric computation
