@@ -579,9 +579,9 @@ def _run_gmsh_with_timeout(file_path: str, timeout_seconds: int) -> trimesh.Trim
             gmsh.initialize()
             gmsh.option.setNumber("General.Verbosity", 0)
             gmsh.open(file_path)
-            # Use 2.0mm mesh for maximum reliability on problematic STEP files.
-            # DFM metrics (volume, bounding box, watertight check) don't need fine resolution.
-            gmsh.option.setNumber("Mesh.CharacteristicLengthMax", 2.0)
+            # Use 0.1mm mesh to balance smooth curve tessellation with reasonable
+            # performance for both DFM analysis and GLB rendering quality.
+            gmsh.option.setNumber("Mesh.CharacteristicLengthMax", 0.1)
             gmsh.option.setNumber("Mesh.AngleSmoothNormals", 0.30)
             # Enable geometry healing for problematic STEP files
             gmsh.option.setNumber("Geometry.OCCFixDegenerated", 1)
@@ -614,9 +614,9 @@ def _run_gmsh_with_timeout(file_path: str, timeout_seconds: int) -> trimesh.Trim
                 gmsh.initialize()
                 gmsh.option.setNumber("General.Verbosity", 0)
                 gmsh.open(file_path)
-                # Use 2.0mm mesh for maximum reliability on problematic STEP files.
-                # DFM metrics don't need fine resolution.
-                gmsh.option.setNumber("Mesh.CharacteristicLengthMax", 2.0)
+                # Use 0.1mm mesh to balance smooth curve tessellation with reasonable
+                # performance for both DFM analysis and GLB rendering quality.
+                gmsh.option.setNumber("Mesh.CharacteristicLengthMax", 0.1)
                 gmsh.option.setNumber("Mesh.AngleSmoothNormals", 0.30)
                 # Enable geometry healing for problematic STEP files
                 gmsh.option.setNumber("Geometry.OCCFixDegenerated", 1)
@@ -1236,16 +1236,51 @@ def _render_small_thumbnail_worker(stl_bytes: bytes) -> bytes | None:
 def _export_glb_worker(
     stl_bytes: bytes, cad_glb_bytes: bytes | None = None
 ) -> bytes | None:
-    """Phase 2 worker: returns GLB bytes for the 3D viewer. Runs in a separate process."""
-    if cad_glb_bytes:
-        return cad_glb_bytes
+    """Phase 2 worker: returns GLB bytes for the 3D viewer in Y-up, millimeters.
+
+    Coordinate convention: all GLBs served to the viewer are **Y-up, mm**.
+    The viewer (babylon-viewer.js) applies a +90° X rotation at load time to
+    display the model in Z-up (CAD standard: X=right, Y=depth, Z=up).
+
+    - STL/OBJ/3MF input: Z-up, mm. Pre-rotate −90°X to Y-up before export
+      so the viewer's +90°X restores Z-up at display time.
+    - STEP/IGES via cascadio: already Y-up, meters (glTF spec). Scale ×1000,
+      center, export — no axis rotation needed.
+    - Uploaded GLB/glTF: already Y-up, meters (glTF spec). Same as cascadio.
+    """
+    # Z-up → Y-up pre-rotation (applied to STL/native-Z-up meshes only).
+    # −90° around X: (x, y, z) → (x, z, −y) — original Z (up) becomes glTF Y (up).
+    z_to_yup = np.array(
+        [[1, 0, 0, 0], [0, 0, 1, 0], [0, -1, 0, 0], [0, 0, 0, 1]], dtype=float
+    )
+
     try:
+        if cad_glb_bytes:
+            # CAD GLB from cascadio (STEP/IGES) preserves OCCT-native Z-up orientation
+            # rather than converting to glTF Y-up. Apply the same Z-up → Y-up pre-rotation
+            # used by the STL path so both paths produce Y-up, mm GLBs for the viewer.
+            # The viewer's +90°X load-time rotation will then restore Z-up for display.
+            scene_data = trimesh.load(io.BytesIO(cad_glb_bytes), file_type="glb")
+            if isinstance(scene_data, trimesh.Scene):
+                mesh = scene_data.dump(concatenate=True)
+            else:
+                mesh = scene_data
+            if not isinstance(mesh, trimesh.Trimesh) or len(mesh.vertices) == 0:
+                return None
+            mesh.apply_scale(1000)  # meters → mm
+            mesh.apply_translation(-mesh.center_mass)  # center at origin
+            mesh.apply_transform(z_to_yup)  # Z-up (OCCT) → Y-up (glTF)
+            return cast(bytes, mesh.export(file_type="glb"))
+
+        # STL path (from STL/OBJ/3MF uploads). Native Z-up, mm.
         mesh = trimesh.load(io.BytesIO(stl_bytes), file_type="stl", force="mesh")
         if not isinstance(mesh, trimesh.Trimesh):
             return None
-        # STL is always in mm per convention. Convert back to meters for GLB
-        # so BabylonJS renders the model at the correct physical size.
-        mesh.apply_scale(0.001)
+        # Center to remove slicer build-plate offsets.
+        mesh.apply_translation(-mesh.center_mass)
+        # Pre-rotate Z-up → Y-up so the viewer's +90°X restores Z-up display.
+        mesh.apply_transform(z_to_yup)
+        # GLB stays in mm — no unit conversion.
         return cast(bytes, mesh.export(file_type="glb"))
     except Exception as e:
         logger.warning(f"_export_glb_worker failed: {e}")
