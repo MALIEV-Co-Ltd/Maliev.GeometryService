@@ -1,6 +1,12 @@
 # AGENTS.md - Developer Guide for Maliev Geometry Service
 
-## 🛠 Build & Development Commands
+> **Workspace root** `B:\maliev` contains **41 independent git repos**. Each `Maliev.*` folder and `maliev-gitops` is its own repo. There is no single repo at the workspace root. Always work within the target service directory.
+
+---
+
+## Build, Test & Lint Commands
+
+All commands run from `B:\maliev\Maliev.GeometryService`.
 
 This project uses **Poetry** for dependency management and **Pytest** for testing.
 
@@ -21,30 +27,31 @@ This project uses **Poetry** for dependency management and **Pytest** for testin
   - `JWT_AUDIENCE`: JWT audience claim (default: `https://api.maliev.com`). Injected automatically by Aspire.
 
 ### Testing
-- **Run All Tests**: `poetry run pytest`
-- **Run Single File**: `poetry run pytest tests/test_geometry.py`
-- **Run Specific Test Case**: `poetry run pytest tests/test_geometry.py::test_analyze_step`
-- **Run with stdout enabled**: `poetry run pytest -s`
-- **Run with Coverage**: `poetry run pytest --cov=src`
+```bash
+poetry run pytest                       # Run all tests
+poetry run pytest tests/test_geometry.py::test_analyze_step  # Single test
+poetry run pytest --cov=src             # With coverage
+```
 
 ### Code Quality (Linting & Typing)
-- **Lint Check (Ruff)**: `poetry run ruff check .`
-- **Lint Fix**: `poetry run ruff check . --fix`
-- **Format Check**: `poetry run ruff format --check .`
-- **Format Apply**: `poetry run ruff format .`
-- **Type Check (Mypy)**: `poetry run mypy src` (Strict mode is mandatory)
+```bash
+poetry run ruff check .                 # Lint
+poetry run ruff format .                # Format
+poetry run mypy src                     # Type check (strict mode)
+```
 
 ---
 
-## 📐 Code Style Guidelines
+## Code Style & Conventions
 
-### 1. Type Hinting & Signatures
-- **Mandatory Types**: All functions, methods, and variables must have explicit type hints.
-- **Modern Syntax**: Use Python 3.10+ union types (e.g., `str | None` instead of `Optional[str]`).
-- **Generic Collections**: Use built-in generics (e.g., `list[int]`, `dict[str, Any]`).
-- **Mypy Compliance**: All code must pass `mypy src --strict`.
+### Python (GeometryService only)
+- **Types**: Mandatory type hints, Python 3.10+ syntax (`str | None`, `list[int]`)
+- **Naming**: `PascalCase` classes, `snake_case` functions/variables, `UPPER_SNAKE_CASE` constants
+- **Imports**: Absolute imports from `src.*`, alphabetized within groups
+- **Pydantic V2**: `BaseModel` with `ConfigDict(alias_generator=to_camel)` for MassTransit compatibility
+- **Async**: All I/O must be async; CPU-bound geometry work uses `ProcessPoolExecutor`
 
-### 2. Import Conventions
+### Import Conventions
 - **Order**:
   1. Standard library imports
   2. Third-party library imports
@@ -52,18 +59,12 @@ This project uses **Poetry** for dependency management and **Pytest** for testin
 - **Formatting**: Use absolute imports (e.g., `from src.core.config import settings`). Avoid relative imports.
 - **Cleanliness**: Alphabetize imports within each group.
 
-### 3. Naming Conventions
-- **Classes**: `PascalCase` (e.g., `GeometryProcessor`).
-- **Functions/Methods**: `snake_case` (e.g., `process_file`).
-- **Variables/Constants**: `snake_case` for variables, `UPPER_SNAKE_CASE` for constants.
-- **Private Members**: Prefix with a single underscore (e.g., `_calculate_volume`).
-
-### 4. Async/Await & Concurrency
+### Async/Await & Concurrency
 - **I/O Bound**: Always use `async`/`await` for network (RabbitMQ, HTTP) and filesystem operations.
 - **CPU Bound**: Geometry analysis (Trimesh/GMSH) is CPU-heavy. Offload these tasks to `ProcessPoolExecutor` using `loop.run_in_executor` to avoid blocking the event loop.
 - **Lifespan**: Use FastAPI's `lifespan` context manager for managing background tasks and resource cleanup.
 
-### 5. Error Handling
+### Error Handling
 - **Specific Exceptions**: Avoid bare `except:`. Catch specific errors like `ValueError`, `aio_pika.exceptions.AMQPError`, etc.
 - **Error Codes**: When raising exceptions for analysis failures, use standard error codes:
   - `FILE_CORRUPT`: File cannot be parsed.
@@ -71,13 +72,13 @@ This project uses **Poetry** for dependency management and **Pytest** for testin
   - `SIZE_LIMIT_EXCEEDED`: File exceeds `MAX_FILE_SIZE_MB`.
   - `SYSTEM_ERROR`: Unexpected infrastructure failure.
 
-### 6. Logging & Observability
+### Logging & Observability
 - **Logger**: Initialize via `logger = logging.getLogger(__name__)`.
 - **Structured Logging**: Include context in `extra` dictionary for easier querying in log aggregators.
   - Example: `logger.info("Processing file", extra={"file_id": id, "extension": ext})`.
 - **Tracing**: Wrap critical logical blocks with OpenTelemetry spans using the `tracer` from `src.core.observability`.
 
-### 7. Pydantic & Data Models
+### Pydantic & Data Models
 - **V2 Syntax**: Use Pydantic V2 features (`BaseModel`, `model_validator`, `Field`).
 - **CamelCase Compatibility**: Integration with .NET/MassTransit requires CamelCase JSON.
   - Models should use `ConfigDict(alias_generator=to_camel, populate_by_name=True)`.
@@ -86,7 +87,46 @@ This project uses **Poetry** for dependency management and **Pytest** for testin
 
 ---
 
-## 🏗 Architecture & Messaging
+## Banned Libraries (Build Will Fail)
+
+| Banned | Use Instead |
+|--------|-------------|
+| AutoMapper | Manual mapping extensions |
+| FluentValidation | DataAnnotations or manual validation |
+| FluentAssertions | Standard xUnit `Assert.*` |
+| Swashbuckle/Swagger | Scalar (at `/{service}/scalar`) |
+| InMemoryDatabase (EF Core) | Testcontainers with real PostgreSQL |
+
+---
+
+## Testing Rules
+
+- **Framework**: xUnit with standard `Assert` (`Assert.Equal`, `Assert.NotNull`, etc.)
+- **Naming**: `MethodName_StateUnderTest_ExpectedBehavior` or `HTTP_METHOD_Path_Scenario_ExpectedStatus`
+- **Coverage**: Minimum 80% per service
+- **Integration tests**: `BaseIntegrationTestFactory<TProgram, TDbContext>` with Testcontainers (PostgreSQL, Redis, RabbitMQ). Never InMemoryDatabase
+- **System tests** (Tier 3): `AspireTestFixture` with `[Collection("AspireDomainTests")]` — shared AppHost, never one per class
+- **Eventual consistency**: Use `TestHelpers.WaitForAsync`. Never `Task.Delay`
+- **MassTransit consumers**: Must have consumer tests using `AddMassTransitTestHarness()`
+
+---
+
+## Mandatory Rules
+
+- **`TreatWarningsAsErrors = true`**: Zero warnings allowed. No suppression
+- **`[RequirePermission("domain.resources.action")]`**: On all endpoints, not plain `[Authorize]`
+- **API versioning**: All routes versioned (`v1/`)
+- **Service prefix**: Routes prefixed with service domain (e.g., `/auth`, `/customer`, `/job`)
+- **Scalar docs**: Configured at `/{service}/scalar`
+- **Secrets**: Never hardcoded. Use GCP Secret Manager or environment variables
+- **Async/await**: All the way down. Pass `CancellationToken`
+- **EF Core Design package**: Only in Infrastructure project, never in Api
+- **PostgreSQL xmin**: Shadow property only — `entity.Property<uint>("xmin").HasColumnType("xid").IsRowVersion()`. Never add entity property
+- **Temporary files**: Generate in `/temp` folder, clean up afterwards
+
+---
+
+## Architecture & Messaging
 
 ### Data Flow
 1. **Trigger**: Consumes `FileUploadedEvent` from `maliev.uploadservice.v1.upload.completed`.
@@ -109,51 +149,7 @@ This project uses **Poetry** for dependency management and **Pytest** for testin
 
 ---
 
-## 🚦 Verification Checklist
-- [ ] Code is formatted with `ruff format`.
-- [ ] All linting issues resolved via `ruff check`.
-- [ ] Type checking passes: `poetry run mypy src`.
-- [ ] All tests pass: `poetry run pytest`.
-- [ ] No hardcoded secrets (use `src.core.config.settings`).
-- [ ] RabbitMQ event keys match expected CamelCase aliases.
-
-
-## Git & Version Control — Mandatory Rules
-
-### 🚨 CRITICAL: Always Commit Code Changes (Non-Negotiable)
-- **You MUST commit your changes to the local repository after completing any meaningful unit of work.**
-- **Never accumulate uncommitted changes.** Do not wait until end of session or until something breaks.
-- **Commit early and often** — if a change is meaningful (even a small fix or refactor), commit it.
-- **You do NOT need to push to remote** — local commits are sufficient to protect against accidental loss.
-- **If you are unsure whether to commit, commit anyway.** Extra commits are harmless; lost work is irreversible.
-- This rule applies even if you are just "testing" or "exploring" — use git branches to isolate experimental work and commit those changes too.
-
-### 🚨 CRITICAL: Never Use `git checkout` to Restore Broken Files
-- **NEVER use `git checkout` to restore or recover files.** This operation discards uncommitted changes permanently and will result in data loss.
-- **To undo/recover from broken files: first commit your current changes, then use `git revert` or `git reset --soft` to safely undo.**
-
-## Database & EF Core — Mandatory Rules
-
-### EF Core Design Package
-- ❌ `Microsoft.EntityFrameworkCore.Design` MUST NOT be in Api projects
-- ✅ It belongs ONLY in the Infrastructure (or Data) project where migrations live
-- Migration commands must target Infrastructure as both project and startup-project (since EF Core Design package is in Infrastructure):
-  ```
-  dotnet ef migrations add <Name> --project Maliev.<Domain>Service.Infrastructure --startup-project Maliev.<Domain>Service.Infrastructure
-  ```
-
-### PostgreSQL xmin Concurrency — Mandatory Pattern
-Use shadow property ONLY. Never add a Xmin/xmin property to domain entities.
-```csharp
-entity.Property<uint>("xmin").HasColumnType("xid").IsRowVersion();
-```
-- ❌ Never use `UseXminAsConcurrencyToken()` (removed in Npgsql EF v7)
-- ❌ Never use entity property `public uint Xmin { get; set; }` or `public uint xmin { get; set; }`
-- ❌ Never use `.Ignore(e => e.Xmin)` — remove the entity property instead
-
----
-
-## 🎨 Generating Preview Images for Review
+## Preview Image Generation
 
 Preview images are 6-sided renders of 3D geometry (front, back, left, right, top, bottom) generated using PyVista with OSMesa for headless rendering.
 
@@ -179,11 +175,9 @@ Both scripts:
 If you prefer to run manually:
 
 ```bash
-# Build and run the test container
 docker-compose -f docker-compose.test.yml build test
 docker-compose -f docker-compose.test.yml run --rm test
 
-# Copy output to accessible folder
 mkdir -p previews
 cp -r test_output/* previews/
 # or on Windows:
@@ -207,3 +201,22 @@ The preview renderer uses Shapr3D/Onshape-style CAD rendering:
 ### Test STL Model
 
 The reference test model is `tests/assets/dice.stl` — a die with rounded corners and indentations for the dots. This model is used to validate the rendering quality.
+
+---
+
+## Verification Checklist
+- [ ] Code is formatted with `ruff format`.
+- [ ] All linting issues resolved via `ruff check`.
+- [ ] Type checking passes: `poetry run mypy src`.
+- [ ] All tests pass: `poetry run pytest`.
+- [ ] No hardcoded secrets (use `src.core.config.settings`).
+- [ ] RabbitMQ event keys match expected CamelCase aliases.
+
+---
+
+## Git Rules
+
+- Each `Maliev.*` folder is an independent git repo. `cd` into it before git commands
+- **Commit early and often** after every meaningful unit of work. Do not accumulate changes
+- **Never use `git checkout` to restore files** — commit first, then `git revert` or `git reset --soft`
+- Feature branches merged to `develop` via PR. Do not push without being asked
