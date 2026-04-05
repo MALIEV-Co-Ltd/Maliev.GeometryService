@@ -25,6 +25,7 @@ from src.core.geometry import (
     _compute_dfm_worker,
     _compute_metrics_worker,
     _export_glb_worker,
+    _generate_overlays_worker,
     _render_large_preview_worker,
     _render_small_thumbnail_worker,
     compute_metrics_trimesh_only,
@@ -342,9 +343,15 @@ class UploadConsumer:
                                     thumb_path = (
                                         f"{inner_msg.storage_path}_thumbnail_small.webp"
                                     )
-                                    await self.upload_artifact(
+                                    thumb_uploaded = await self.upload_artifact(
                                         thumb, thumb_path, "image/webp", upload_id
                                     )
+                                    if not thumb_uploaded:
+                                        logger.warning(
+                                            "Small thumbnail upload failed — skipping SmallThumbnailReadyEvent",
+                                            extra={"file_id": str(file_id)},
+                                        )
+                                        return
                                     _now = datetime.now(timezone.utc)
                                     thumb_event = SmallThumbnailReadyEvent(
                                         messageId=uuid4(),
@@ -404,9 +411,16 @@ class UploadConsumer:
                                     if not glb:
                                         return
                                     glb_path = f"{inner_msg.storage_path}_viewer.glb"
-                                    await self.upload_artifact(
+                                    uploaded = await self.upload_artifact(
                                         glb, glb_path, "model/gltf-binary", upload_id
                                     )
+                                    if not uploaded:
+                                        logger.warning(
+                                            "GLB upload failed — skipping FileAnalyzedEvent "
+                                            "to avoid publishing a 404 signed URL",
+                                            extra={"file_id": str(file_id), "glb_path": glb_path},
+                                        )
+                                        return
                                     _now = datetime.now(timezone.utc)
                                     glb_event = FileAnalyzedEvent(
                                         messageId=uuid4(),
@@ -458,14 +472,84 @@ class UploadConsumer:
 
                             async def _run_dfm() -> None:
                                 try:
+                                    # Pass original CAD bytes for OCC B-Rep analysis
+                                    cad_ext = file_ext.strip(".")
+                                    cad_bytes_for_dfm: bytes | None = (
+                                        data
+                                        if cad_ext in ("step", "stp", "igs", "iges")
+                                        else None
+                                    )
                                     reports = await asyncio.wait_for(
                                         loop.run_in_executor(
                                             executor,
                                             _compute_dfm_worker,
                                             mesh_stl_bytes,
+                                            cad_bytes_for_dfm,
+                                            cad_ext if cad_bytes_for_dfm else None,
                                         ),
                                         timeout=300,
                                     )
+
+                                    # Generate overlay GLBs in a separate worker process,
+                                    # then upload them all concurrently.
+                                    overlay_paths: dict[str, str] = {}
+                                    if reports and mesh_stl_bytes:
+                                        try:
+                                            overlay_glbs: dict[str, bytes] = (
+                                                await asyncio.wait_for(
+                                                    loop.run_in_executor(
+                                                        executor,
+                                                        _generate_overlays_worker,
+                                                        mesh_stl_bytes,
+                                                        reports,
+                                                    ),
+                                                    timeout=120,
+                                                )
+                                            )
+                                            overlay_items = [
+                                                (
+                                                    ov_key,
+                                                    f"{inner_msg.storage_path}_dfm_{ov_key.lower()}.glb",
+                                                    glb_bytes,
+                                                )
+                                                for ov_key, glb_bytes in overlay_glbs.items()
+                                            ]
+                                            if overlay_items:
+                                                upload_results = await asyncio.gather(
+                                                    *(
+                                                        self.upload_artifact(
+                                                            glb_bytes,
+                                                            ov_path,
+                                                            "model/gltf-binary",
+                                                            upload_id,
+                                                        )
+                                                        for _, ov_path, glb_bytes in overlay_items
+                                                    ),
+                                                    return_exceptions=True,
+                                                )
+                                                for (ov_key, ov_path, _), result in zip(
+                                                    overlay_items, upload_results
+                                                ):
+                                                    if result is True:
+                                                        overlay_paths[ov_key] = ov_path
+                                            logger.info(
+                                                "Overlay GLBs uploaded",
+                                                extra={
+                                                    "event": "overlay_glbs_uploaded",
+                                                    "file_id": str(file_id),
+                                                    "count": len(overlay_paths),
+                                                },
+                                            )
+                                        except Exception as _ov_err:
+                                            logger.warning(
+                                                "Overlay generation failed (non-fatal): %s",
+                                                _ov_err,
+                                                extra={
+                                                    "event": "overlay_error",
+                                                    "file_id": str(file_id),
+                                                },
+                                            )
+
                                     _now = datetime.now(timezone.utc)
                                     fdm_raw = reports.get("FDM")
                                     sla_raw = reports.get("SLA")
@@ -506,6 +590,7 @@ class UploadConsumer:
                                                 if cnc_raw
                                                 else None,
                                                 analyzedAt=_now,
+                                                overlayPaths=overlay_paths or None,
                                             ),
                                         ),
                                     )
@@ -521,12 +606,55 @@ class UploadConsumer:
                                     )
                                 except Exception as e:
                                     logger.warning(
-                                        f"DFM task failed (non-fatal): {e}",
+                                        "DFM task failed (non-fatal): %s",
+                                        e,
+                                        exc_info=True,
                                         extra={
                                             "event": "dfm_error",
                                             "file_id": str(file_id),
                                         },
                                     )
+                                    # Publish an empty DfmAnalysisReadyEvent so the client
+                                    # overlay resolves immediately instead of spinning for 60 s.
+                                    try:
+                                        _now = datetime.now(timezone.utc)
+                                        empty_dfm_event = DfmAnalysisReadyEvent(
+                                            messageId=uuid4(),
+                                            correlationId=correlation_id,
+                                            messageType=[
+                                                "urn:message:Maliev.MessagingContracts.Contracts.Geometry:DfmAnalysisReadyEvent"
+                                            ],
+                                            message=DfmAnalysisReadyMessageBody(
+                                                messageId=uuid4(),
+                                                messageName="DfmAnalysisReadyEvent",
+                                                messageType=MessageTypeEnum.Event,
+                                                messageVersion="1.0.0",
+                                                publishedBy="GeometryService",
+                                                consumedBy=["IntranetBff"],
+                                                correlationId=correlation_id,
+                                                causationId=None,
+                                                occurredAtUtc=_now,
+                                                isPublic=False,
+                                                payload=DfmAnalysisReadyPayload(
+                                                    fileId=file_id,
+                                                    storagePath=inner_msg.storage_path,
+                                                    fdmReport=None,
+                                                    slaReport=None,
+                                                    cncReport=None,
+                                                    analyzedAt=_now,
+                                                ),
+                                            ),
+                                        )
+                                        await self.publish_event(
+                                            empty_dfm_event,
+                                            "maliev.geometryservice.v1.dfm.ready",
+                                        )
+                                    except Exception as pub_err:
+                                        logger.warning(
+                                            "Failed to publish empty DFM event after failure: %s",
+                                            pub_err,
+                                            extra={"event": "dfm_empty_publish_error", "file_id": str(file_id)},
+                                        )
 
                             async def _run_previews() -> None:
                                 try:
@@ -550,25 +678,28 @@ class UploadConsumer:
                                             continue
                                         if image_bytes:
                                             preview_path = f"{inner_msg.storage_path}_preview_{side}.webp"
-                                            await self.upload_artifact(
+                                            ok = await self.upload_artifact(
                                                 image_bytes,
                                                 preview_path,
                                                 "image/webp",
                                                 upload_id,
                                             )
-                                            preview_paths[side] = preview_path
+                                            if ok:
+                                                preview_paths[side] = preview_path
 
                                     thumbnail_large_bytes = preview_images.get(
                                         "thumbnail_large"
                                     )
                                     if thumbnail_large_bytes:
                                         thumbnail_large_path = f"{inner_msg.storage_path}_thumbnail_large.webp"
-                                        await self.upload_artifact(
+                                        large_ok = await self.upload_artifact(
                                             thumbnail_large_bytes,
                                             thumbnail_large_path,
                                             "image/webp",
                                             upload_id,
                                         )
+                                        if not large_ok:
+                                            thumbnail_large_path = None
 
                                     _now = datetime.now(timezone.utc)
                                     preview_event = PreviewImagesGeneratedEvent(
@@ -676,12 +807,12 @@ class UploadConsumer:
                         error_code = "FILE_CORRUPT"
 
                     await self.publish_failure(
-                        correlation_id, file_id, error_code, str(e)
+                        correlation_id, file_id, error_code, str(e), inner_msg.storage_path
                     )
                 except Exception as e:
                     logger.error(f"Error processing {file_id}: {e}")
                     await self.publish_failure(
-                        correlation_id, file_id, "SYSTEM_ERROR", str(e)
+                        correlation_id, file_id, "SYSTEM_ERROR", str(e), inner_msg.storage_path
                     )
 
     async def download_with_retry(self, url: str, attempts: int = 3) -> io.BytesIO:
@@ -707,8 +838,14 @@ class UploadConsumer:
 
     async def upload_artifact(
         self, data: bytes, path: str, content_type: str, parent_upload_id: str = ""
-    ) -> None:
-        """Uploads an artifact (GLB/PNG) to GCS via UploadService HTTP endpoint."""
+    ) -> bool:
+        """Uploads an artifact (GLB/PNG) to GCS via UploadService HTTP endpoint.
+
+        Returns True if the upload succeeded, False otherwise.
+        Callers that intend to publish a signed-URL event MUST check the return value
+        and skip publishing when False — otherwise the frontend receives a URL that
+        resolves to a non-existent GCS object (404).
+        """
         try:
             upload_service_url = settings.UPLOAD_SERVICE_URL
             artifact_id = str(uuid4())
@@ -733,18 +870,19 @@ class UploadConsumer:
                 logger.info(
                     f"Artifact uploaded successfully: {result.get('storagePath')}"
                 )
+                return True
 
         except httpx.HTTPStatusError as e:
             logger.error(
                 f"Failed to upload artifact {path}: HTTP {e.response.status_code} - {e}"
             )
-            logger.warning(f"Proceeding without artifact {path}")
+            return False
         except httpx.RequestError as e:
             logger.error(f"Failed to upload artifact {path}: {e}")
-            logger.warning(f"Proceeding without artifact {path}")
+            return False
 
     async def publish_failure(
-        self, correlation_id: UUID | None, file_id: str, error_code: str, details: str
+        self, correlation_id: UUID | None, file_id: str, error_code: str, details: str, storage_path: str
     ) -> None:
         _now = datetime.now(timezone.utc)
         failure_event = FileAnalysisFailedEvent(
@@ -765,7 +903,7 @@ class UploadConsumer:
                 occurredAtUtc=_now,
                 isPublic=False,
                 payload=FileAnalysisFailedPayload(
-                    fileId=file_id, errorCode=error_code, details=details
+                    fileId=file_id, storagePath=storage_path, errorCode=error_code, details=details
                 ),
             ),
         )

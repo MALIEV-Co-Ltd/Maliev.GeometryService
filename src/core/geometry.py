@@ -54,6 +54,23 @@ class GeometryMetrics(BaseModel):
     euler_number: int = Field(alias="eulerNumber")
 
 
+class DfmIssueItem(BaseModel):
+    """A single DFM issue with human-readable description and threshold context.
+
+    Included in each DFM report payload so the frontend can display backend-generated
+    descriptions without duplicating threshold values.
+    """
+
+    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
+
+    category: str
+    severity: str = "warning"
+    title: str
+    description: str
+    value: float | None = None
+    threshold: float | None = None
+
+
 class FdmDfmReport(BaseModel):
     """DFM analysis results specific to FDM 3D printing."""
 
@@ -70,6 +87,7 @@ class FdmDfmReport(BaseModel):
         default=None, alias="estimatedSupportVolumeCm3"
     )
     small_detail_count: int = Field(default=0, alias="smallDetailCount")
+    issues: list[DfmIssueItem] = Field(default_factory=list)
 
 
 class SlaDfmReport(BaseModel):
@@ -88,6 +106,7 @@ class SlaDfmReport(BaseModel):
     suction_risk: bool = Field(alias="suctionRisk")
     suction_regions: list[list[float]] = Field(alias="suctionRegions")
     hollow_regions: list[list[float]] = Field(alias="hollowRegions")
+    issues: list[DfmIssueItem] = Field(default_factory=list)
 
 
 class CncDfmReport(BaseModel):
@@ -105,12 +124,13 @@ class CncDfmReport(BaseModel):
     requires_edm: bool = Field(default=False, alias="requiresEdm")
     requires_grinding: bool = Field(default=False, alias="requiresGrinding")
     minimum_feature_size_mm: float = Field(default=1.0, alias="minimumFeatureSizeMm")
+    issues: list[DfmIssueItem] = Field(default_factory=list)
 
 
 def _compute_thin_wall_analysis(mesh: trimesh.Trimesh) -> tuple[int, list[list[float]]]:
     """
     Detect thin-wall regions where wall thickness is below threshold.
-    Uses mesh face adjacencies to estimate local wall thickness.
+    Uses mesh unique edges to estimate local wall thickness.
     Returns (thin_wall_count, thin_wall_centroids).
     """
     thin_wall_count = 0
@@ -120,44 +140,36 @@ def _compute_thin_wall_analysis(mesh: trimesh.Trimesh) -> tuple[int, list[list[f
         if len(mesh.faces) < 3:
             return 0, []
 
-        face_adjacency = mesh.face_adjacency
-        unique_edges: set[tuple[int, int]] = set()
-
-        for i, j in face_adjacency:
-            fi = mesh.faces[i]
-            fj = mesh.faces[j]
-            for vi in fi:
-                for vj in fj:
-                    if vi != vj:
-                        edge = tuple(sorted([int(vi), int(vj)]))
-                        unique_edges.add(edge)
+        vertices = mesh.vertices
+        unique_edges = mesh.edges_unique
 
         edge_lengths: list[tuple[float, tuple[int, int], np.ndarray]] = []
-        vertices = mesh.vertices
-
         for edge in unique_edges:
             v0, v1 = vertices[edge[0]], vertices[edge[1]]
             length = float(np.linalg.norm(v1 - v0))
-            mid = (v0 + v1) / 2
-            edge_lengths.append((length, edge, mid))
+            if length < THIN_WALL_THRESHOLD_MM:
+                mid = (v0 + v1) / 2
+                edge_lengths.append((length, (int(edge[0]), int(edge[1])), mid))
 
-        edge_lengths.sort(key=lambda x: x[0])
-
-        thin_edges = [e for e in edge_lengths if e[0] < THIN_WALL_THRESHOLD_MM]
-
-        if not thin_edges:
+        if not edge_lengths:
             return 0, []
 
+        # Build edge → face index in O(faces) so thin-edge lookup is O(1)
+        edge_to_faces: dict[tuple[int, int], list[int]] = {}
+        for idx, face in enumerate(mesh.faces):
+            for k in range(3):
+                key = (int(face[k]), int(face[(k + 1) % 3]))
+                key = (min(key), max(key))
+                edge_to_faces.setdefault(key, []).append(idx)
+
         processed_faces: set[int] = set()
-        for length, edge, mid in thin_edges:
-            for idx, face in enumerate(mesh.faces):
-                edge_verts = set(int(v) for v in face)
-                if int(edge[0]) in edge_verts and int(edge[1]) in edge_verts:
-                    if idx not in processed_faces:
-                        processed_faces.add(idx)
-                        thin_wall_centroids.append(
-                            [float(mid[0]), float(mid[1]), float(mid[2])]
-                        )
+        for _length, edge, mid in edge_lengths:
+            for idx in edge_to_faces.get(edge, []):
+                if idx not in processed_faces:
+                    processed_faces.add(idx)
+                    thin_wall_centroids.append(
+                        [float(mid[0]), float(mid[1]), float(mid[2])]
+                    )
 
         thin_wall_count = len(processed_faces)
 
@@ -697,8 +709,8 @@ def _load_cad_with_cascadio(
             ret = cascadio.step_to_glb(
                 file_path,
                 glb_path,
-                tol_linear=0.1,
-                tol_angular=0.5,
+                tol_linear=0.05,
+                tol_angular=0.1,
             )
             if ret != 0:
                 raise ValueError(
@@ -1287,72 +1299,639 @@ def _export_glb_worker(
         return None
 
 
-def _compute_dfm_worker(stl_bytes: bytes) -> dict[str, Any]:
-    """Phase 2 worker: runs DFM analysis on the mesh. Runs in a separate process."""
+def _compute_dfm_worker(
+    stl_bytes: bytes,
+    cad_bytes: bytes | None = None,
+    cad_extension: str | None = None,
+) -> dict[str, Any]:
+    """Phase 3 worker: runs DFM analysis for all manufacturing processes.
+
+    Returns a dict keyed by process code ("FDM", "SLA", "SLS", "MJF", "MJ",
+    "BJ", "DMLS", "CNC_MILL", "CNC_TURN", plus legacy "CNC").
+    Each value contains:
+      - ``issues``: list of DfmIssue-style dicts with ``faceIndices`` for overlay
+        GLB generation.
+      - Legacy summary fields for backward-compat with existing C# consumers.
+
+    Runs in a separate process via ProcessPoolExecutor.
+    """
+    try:
+        from core.dfm_thresholds import (
+            MILLING_RULES,
+            PRINTING_RULES,
+            TURNING_RULES,
+            get_tool_for_radius,
+        )
+        from core.mesh_analyzers import (
+            compute_overhang_analysis,
+            compute_thin_wall_analysis,
+            compute_unsupported_wall_analysis,
+            detect_bridges,
+            detect_connecting_clearance,
+            detect_embossed_engraved,
+            detect_escape_hole_risk,
+            detect_holes_mesh,
+            detect_hollow_regions,
+            detect_small_features,
+            detect_thin_pins,
+        )
+        from core.cnc_analyzers import (
+            compute_sharp_corner_analysis,
+            detect_axial_symmetry,
+            detect_cavities,
+            detect_chatter_risk,
+            detect_deep_narrow_cavities,
+            detect_grooves,
+            detect_internal_radii,
+            detect_tool_access,
+        )
+        from core.occ_analyzer import analyze_step_brep
+    except ImportError as _imp_err:
+        logger.warning("DFM analysis modules unavailable: %s", _imp_err)
+        return {}
+
     try:
         mesh = trimesh.load(io.BytesIO(stl_bytes), file_type="stl", force="mesh")
         if not isinstance(mesh, trimesh.Trimesh):
             return {}
 
-        extents = mesh.extents if mesh.extents is not None else [0.0, 0.0, 0.0]
+        extents = mesh.extents if mesh.extents is not None else np.array([0.0, 0.0, 0.0])
         vol_bbox = float(extents[0]) * float(extents[1]) * float(extents[2])
         volume_mm3 = float(mesh.volume) if mesh.is_watertight else 0.0
         support_mm3 = max(0.0, vol_bbox - volume_mm3)
 
-        thin_wall_count, thin_wall_centroids = _compute_thin_wall_analysis(mesh)
-        overhang_face_count, overhang_area_cm2, overhang_centroids = (
-            _compute_overhang_analysis(mesh)
-        )
-        sharp_corner_count, sharp_corner_centroids = _compute_sharp_corner_analysis(
-            mesh
-        )
-        hollow_centroids = _compute_hollow_analysis(mesh)
+        # ── OCC B-Rep analysis (STEP/IGES only) ─────────────────────────────
+        occ_features: list[Any] = []
+        occ_face_tag_to_tri: dict[int, list[int]] = {}
+        if cad_bytes and cad_extension in ("step", "stp", "igs", "iges"):
+            try:
+                occ_features, occ_face_tag_to_tri = analyze_step_brep(
+                    cad_bytes, cad_extension
+                )
+            except Exception as _occ_err:
+                logger.warning(
+                    "OCC analysis failed — using mesh-only path: %s", _occ_err
+                )
 
-        return {
-            "FDM": {
-                "reportType": "FDM",
-                "thinWallCount": thin_wall_count,
-                "thinWallRegions": thin_wall_centroids,
-                "overhangFaceCount": overhang_face_count,
-                "overhangAreaCm2": overhang_area_cm2,
-                "overhangRegions": overhang_centroids,
-                "supportRequired": overhang_face_count > 0 or thin_wall_count > 0,
-                "estimatedSupportVolumeCm3": support_mm3 / 1000.0
-                if overhang_face_count > 0
-                else None,
-                "smallDetailCount": 0,
-            },
-            "SLA": {
-                "reportType": "SLA",
-                "thinWallCount": thin_wall_count,
-                "thinWallRegions": thin_wall_centroids,
-                "overhangFaceCount": overhang_face_count,
-                "overhangAreaCm2": overhang_area_cm2,
-                "overhangRegions": overhang_centroids,
-                "resinTrappingRisk": len(hollow_centroids) > 0,
-                "resinTrappingRegions": hollow_centroids,
-                "suctionRisk": overhang_face_count > 0 and len(mesh.faces) > 1000,
-                "suctionRegions": overhang_centroids[:10]
-                if overhang_face_count > 0
-                else [],
-                "hollowRegions": hollow_centroids,
-            },
-            "CNC": {
-                "reportType": "CNC",
-                "sharpCornerCount": sharp_corner_count,
-                "sharpCornerRegions": sharp_corner_centroids,
-                "hasUndercuts": False,
-                "undercutRegions": [],
-                "hasDrillHoles": False,
-                "drillHoleCount": 0,
-                "requiresEdm": sharp_corner_count > 20,
-                "requiresGrinding": False,
-                "minimumFeatureSizeMm": 1.0,
-            },
+        # ── Pre-compute shared data ─────────────────────────────────────────
+        hollow_centroids, _hollow_face_idx = detect_hollow_regions(mesh)
+        all_holes = detect_holes_mesh(mesh, min_diameter_mm=1.0)
+
+        reports: dict[str, Any] = {}
+
+        # ── 3D Printing processes ─────────────────────────────────────────────
+        for process_code, rules in PRINTING_RULES.items():
+            issues: list[dict[str, Any]] = []
+
+            # Thin wall (supported)
+            tw_count, tw_centroids, tw_face_idx = compute_thin_wall_analysis(
+                mesh, rules.supported_wall_mm
+            )
+            if tw_count > 0:
+                issues.append({
+                    "category": "thin_wall",
+                    "severity": "warning",
+                    "title": f"Thin Walls ({tw_count} regions)",
+                    "description": (
+                        f"{tw_count} wall region(s) below the {process_code} minimum"
+                        f" of {rules.supported_wall_mm}mm."
+                    ),
+                    "value": float(tw_count),
+                    "threshold": float(rules.supported_wall_mm),
+                    "faceIndices": tw_face_idx,
+                    "centroid": tw_centroids[0] if tw_centroids else [0.0, 0.0, 0.0],
+                    "metadata": {},
+                })
+
+            # Unsupported wall (not applicable for powder-bed processes)
+            uw_count, uw_centroids, uw_face_idx = 0, [], []
+            if rules.unsupported_wall_mm is not None:
+                uw_count, uw_centroids, uw_face_idx = compute_unsupported_wall_analysis(
+                    mesh, rules.unsupported_wall_mm
+                )
+                if uw_count > 0:
+                    issues.append({
+                        "category": "unsupported_wall",
+                        "severity": "warning",
+                        "title": f"Unsupported Walls ({uw_count} regions)",
+                        "description": (
+                            f"{uw_count} unsupported wall(s) below"
+                            f" {rules.unsupported_wall_mm}mm."
+                        ),
+                        "value": float(uw_count),
+                        "threshold": float(rules.unsupported_wall_mm),
+                        "faceIndices": uw_face_idx,
+                        "centroid": uw_centroids[0] if uw_centroids else [0.0, 0.0, 0.0],
+                        "metadata": {},
+                    })
+
+            # Overhang (not applicable for powder-bed processes)
+            oh_count, oh_area_cm2, oh_centroids, oh_face_idx = 0, 0.0, [], []
+            if rules.max_overhang_deg is not None:
+                oh_count, oh_area_cm2, oh_centroids, oh_face_idx = (
+                    compute_overhang_analysis(mesh, rules.max_overhang_deg)
+                )
+                if oh_count > 0:
+                    issues.append({
+                        "category": "overhang",
+                        "severity": "warning",
+                        "title": (
+                            f"Overhangs ({oh_count} faces,"
+                            f" {oh_area_cm2:.1f}\u00a0cm\u00b2)"
+                        ),
+                        "description": (
+                            f"{oh_count} face(s) exceed the {rules.max_overhang_deg}°"
+                            f" overhang limit ({oh_area_cm2:.1f} cm² total area)."
+                        ),
+                        "value": float(oh_area_cm2),
+                        "threshold": float(rules.max_overhang_deg),
+                        "faceIndices": oh_face_idx,
+                        "centroid": oh_centroids[0] if oh_centroids else [0.0, 0.0, 0.0],
+                        "metadata": {
+                            "areaCm2": float(oh_area_cm2),
+                            "faceCount": oh_count,
+                        },
+                    })
+
+            # Holes below process minimum diameter
+            small_holes = [
+                h for h in all_holes if h.diameter_mm < rules.min_hole_diameter_mm
+            ]
+            if small_holes:
+                hole_face_idx: list[int] = []
+                for h in small_holes:
+                    hole_face_idx.extend(h.face_indices)
+                min_diam = min(h.diameter_mm for h in small_holes)
+                issues.append({
+                    "category": "hole",
+                    "severity": "warning",
+                    "title": f"Small Holes ({len(small_holes)} features)",
+                    "description": (
+                        f"{len(small_holes)} hole(s) below the {process_code} minimum"
+                        f" diameter of {rules.min_hole_diameter_mm}mm."
+                        f" Smallest: Ø{min_diam:.2f}mm."
+                    ),
+                    "value": float(min_diam),
+                    "threshold": float(rules.min_hole_diameter_mm),
+                    "faceIndices": hole_face_idx[:2000],
+                    "centroid": small_holes[0].center,
+                    "metadata": {"holeCount": len(small_holes)},
+                })
+
+            # Bridges (only for processes where a span limit is defined)
+            if rules.bridge_span_mm is not None:
+                br_count, br_centroids, br_face_idx = detect_bridges(
+                    mesh, rules.bridge_span_mm
+                )
+                if br_count > 0:
+                    issues.append({
+                        "category": "bridge",
+                        "severity": "warning",
+                        "title": f"Long Bridges ({br_count} spans)",
+                        "description": (
+                            f"{br_count} bridge span(s) exceed the {rules.bridge_span_mm}mm"
+                            f" limit for {process_code}."
+                        ),
+                        "value": float(br_count),
+                        "threshold": float(rules.bridge_span_mm),
+                        "faceIndices": br_face_idx,
+                        "centroid": br_centroids[0] if br_centroids else [0.0, 0.0, 0.0],
+                        "metadata": {},
+                    })
+
+            # Small features
+            sf_count, sf_centroids, sf_face_idx = detect_small_features(
+                mesh, rules.min_feature_mm
+            )
+            if sf_count > 0:
+                issues.append({
+                    "category": "small_feature",
+                    "severity": "warning",
+                    "title": f"Small Features ({sf_count})",
+                    "description": (
+                        f"{sf_count} feature(s) smaller than the {process_code} minimum"
+                        f" of {rules.min_feature_mm}mm."
+                    ),
+                    "value": float(sf_count),
+                    "threshold": float(rules.min_feature_mm),
+                    "faceIndices": sf_face_idx,
+                    "centroid": sf_centroids[0] if sf_centroids else [0.0, 0.0, 0.0],
+                    "metadata": {},
+                })
+
+            # Thin pins / columns
+            pin_count, pin_centroids, pin_face_idx = detect_thin_pins(
+                mesh, rules.pin_diameter_mm
+            )
+            if pin_count > 0:
+                issues.append({
+                    "category": "pin",
+                    "severity": "warning",
+                    "title": f"Thin Pins ({pin_count})",
+                    "description": (
+                        f"{pin_count} pin/column feature(s) below minimum diameter"
+                        f" {rules.pin_diameter_mm}mm for {process_code}."
+                    ),
+                    "value": float(pin_count),
+                    "threshold": float(rules.pin_diameter_mm),
+                    "faceIndices": pin_face_idx,
+                    "centroid": pin_centroids[0] if pin_centroids else [0.0, 0.0, 0.0],
+                    "metadata": {},
+                })
+
+            # Escape holes (enclosed volumes without drainage)
+            if rules.escape_hole_diameter_mm is not None:
+                esc_has_risk, esc_centroids, esc_face_idx = detect_escape_hole_risk(
+                    mesh, rules.escape_hole_diameter_mm
+                )
+                if esc_has_risk:
+                    issues.append({
+                        "category": "escape_hole",
+                        "severity": "error",
+                        "title": "Missing Escape Holes",
+                        "description": (
+                            f"Enclosed volume(s) detected without drainage holes"
+                            f" ≥ {rules.escape_hole_diameter_mm}mm"
+                            f" (required for {process_code} powder/resin evacuation)."
+                        ),
+                        "value": 0.0,
+                        "threshold": float(rules.escape_hole_diameter_mm),
+                        "faceIndices": esc_face_idx,
+                        "centroid": esc_centroids[0] if esc_centroids else [0.0, 0.0, 0.0],
+                        "metadata": {},
+                    })
+
+            # Connecting clearance (multi-body assemblies)
+            if rules.connecting_clearance_mm is not None:
+                cl_count, cl_centroids, cl_face_idx = detect_connecting_clearance(
+                    mesh, rules.connecting_clearance_mm
+                )
+                if cl_count > 0:
+                    issues.append({
+                        "category": "clearance",
+                        "severity": "warning",
+                        "title": f"Insufficient Clearance ({cl_count} body pairs)",
+                        "description": (
+                            f"{cl_count} pair(s) of bodies have clearance below"
+                            f" {rules.connecting_clearance_mm}mm for {process_code}."
+                        ),
+                        "value": float(cl_count),
+                        "threshold": float(rules.connecting_clearance_mm),
+                        "faceIndices": cl_face_idx,
+                        "centroid": cl_centroids[0] if cl_centroids else [0.0, 0.0, 0.0],
+                        "metadata": {},
+                    })
+
+            # Embossed / engraved features
+            emb_count, emb_centroids, emb_face_idx = detect_embossed_engraved(
+                mesh, rules.embossed_width_mm, rules.embossed_height_mm
+            )
+            if emb_count > 0:
+                issues.append({
+                    "category": "small_feature",
+                    "severity": "warning",
+                    "title": f"Small Embossed/Engraved Details ({emb_count})",
+                    "description": (
+                        f"{emb_count} raised/recessed detail(s) below minimum size"
+                        f" (w≥{rules.embossed_width_mm}mm, h≥{rules.embossed_height_mm}mm)"
+                        f" for {process_code}."
+                    ),
+                    "value": float(emb_count),
+                    "threshold": float(rules.embossed_width_mm),
+                    "faceIndices": emb_face_idx,
+                    "centroid": emb_centroids[0] if emb_centroids else [0.0, 0.0, 0.0],
+                    "metadata": {
+                        "minWidthMm": rules.embossed_width_mm,
+                        "minHeightMm": rules.embossed_height_mm,
+                    },
+                })
+
+            report: dict[str, Any] = {
+                "reportType": process_code,
+                "issues": issues,
+                # Legacy summary fields (backward compat with existing C# consumers)
+                "thinWallCount": tw_count,
+                "thinWallRegions": tw_centroids[:100],
+                "overhangFaceCount": oh_count,
+                "overhangAreaCm2": oh_area_cm2,
+                "overhangRegions": oh_centroids[:100],
+                "supportRequired": oh_count > 0 or tw_count > 0 or uw_count > 0,
+                "estimatedSupportVolumeCm3": (
+                    support_mm3 / 1000.0 if oh_count > 0 else None
+                ),
+                "smallDetailCount": sf_count,
+            }
+            if process_code in ("SLA", "SLA_DLP"):
+                report["resinTrappingRisk"] = len(hollow_centroids) > 0
+                report["resinTrappingRegions"] = hollow_centroids
+                report["suctionRisk"] = oh_count > 0 and len(mesh.faces) > 1000
+                report["suctionRegions"] = oh_centroids[:10]
+                report["hollowRegions"] = hollow_centroids
+
+            reports[process_code] = report
+
+        # ── CNC Milling ───────────────────────────────────────────────────────
+        mill_issues: list[dict[str, Any]] = []
+
+        internal_radii = detect_internal_radii(mesh)
+        small_radii = [
+            r for r in internal_radii
+            if 0.0 < r.radius_mm < MILLING_RULES.min_internal_radius_mm
+        ]
+        if small_radii:
+            mill_ir_face_idx: list[int] = []
+            for r in small_radii:
+                mill_ir_face_idx.extend(r.face_indices)
+            min_r = min(r.radius_mm for r in small_radii)
+            tool = get_tool_for_radius(min_r)
+            tool_str = (
+                f"Requires Ø{tool[0]}mm endmill." if tool
+                else "No standard tool achieves this radius."
+            )
+            mill_issues.append({
+                "category": "internal_radius",
+                "severity": "warning",
+                "title": f"Small Internal Radii ({len(small_radii)} corners)",
+                "description": (
+                    f"{len(small_radii)} internal corner(s) with radius below"
+                    f" {MILLING_RULES.min_internal_radius_mm}mm."
+                    f" Smallest: R{min_r:.2f}mm. {tool_str}"
+                ),
+                "value": float(min_r),
+                "threshold": float(MILLING_RULES.min_internal_radius_mm),
+                "faceIndices": mill_ir_face_idx[:2000],
+                "centroid": small_radii[0].centroid,
+                "metadata": {"toolDiameterMm": tool[0] if tool else None},
+            })
+
+        cavities = detect_cavities(mesh)
+        dc_count, dc_centroids, dc_face_idx = detect_deep_narrow_cavities(cavities)
+        if dc_count > 0:
+            max_dr = max(
+                (c.depth_ratio for c in cavities
+                 if c.depth_ratio > MILLING_RULES.cavity_depth_ratio),
+                default=float(MILLING_RULES.cavity_depth_ratio),
+            )
+            mill_issues.append({
+                "category": "cavity_depth",
+                "severity": "error" if max_dr > 8.0 else "warning",
+                "title": f"Deep Cavities ({dc_count})",
+                "description": (
+                    f"{dc_count} cavity/cavities exceed the {MILLING_RULES.cavity_depth_ratio}:1"
+                    f" depth/width limit. Worst: {max_dr:.1f}:1."
+                ),
+                "value": float(max_dr),
+                "threshold": float(MILLING_RULES.cavity_depth_ratio),
+                "faceIndices": dc_face_idx[:2000],
+                "centroid": dc_centroids[0] if dc_centroids else [0.0, 0.0, 0.0],
+                "metadata": {"maxDepthRatio": float(max_dr)},
+            })
+
+        tool_access = detect_tool_access(mesh)
+        if tool_access.minimum_axes > 3:
+            mill_issues.append({
+                "category": "tool_access",
+                "severity": "info",
+                "title": f"{tool_access.minimum_axes}-Axis Machining Required",
+                "description": tool_access.details,
+                "value": float(tool_access.minimum_axes),
+                "threshold": 3.0,
+                "faceIndices": tool_access.inaccessible_face_indices[:2000],
+                "centroid": [0.0, 0.0, 0.0],
+                "metadata": {
+                    "inaccessibleFaces": tool_access.inaccessible_face_count,
+                },
+            })
+
+        ch_count, ch_centroids, ch_face_idx = detect_chatter_risk(mesh)
+        if ch_count > 0:
+            mill_issues.append({
+                "category": "chatter_risk",
+                "severity": "warning",
+                "title": f"Chatter Risk ({ch_count} faces)",
+                "description": (
+                    f"{ch_count} large flat face(s) with thin support may vibrate"
+                    f" during milling (chatter)."
+                ),
+                "value": float(ch_count),
+                "threshold": 1.0,
+                "faceIndices": ch_face_idx,
+                "centroid": ch_centroids[0] if ch_centroids else [0.0, 0.0, 0.0],
+                "metadata": {},
+            })
+
+        sc_count, sc_centroids, sc_face_idx = compute_sharp_corner_analysis(mesh, 45.0)
+        if sc_count > 0:
+            mill_issues.append({
+                "category": "sharp_corner",
+                "severity": "warning",
+                "title": f"Sharp Internal Corners ({sc_count})",
+                "description": (
+                    f"{sc_count} sharp corner(s) may require EDM or are inaccessible"
+                    f" to standard endmills."
+                ),
+                "value": float(sc_count),
+                "threshold": 45.0,
+                "faceIndices": sc_face_idx[:2000],
+                "centroid": sc_centroids[0] if sc_centroids else [0.0, 0.0, 0.0],
+                "metadata": {},
+            })
+
+        cnc_holes = detect_holes_mesh(mesh, MILLING_RULES.min_hole_diameter_mm)
+        deep_drill_holes = []
+        for h in cnc_holes:
+            if h.depth_mm > 0 and h.diameter_mm > 0:
+                dr = h.depth_mm / h.diameter_mm
+                if dr > MILLING_RULES.hole_depth_typical_ratio:
+                    deep_drill_holes.append((h, dr))
+        if deep_drill_holes:
+            ddh_face_idx: list[int] = []
+            for h, _ in deep_drill_holes:
+                ddh_face_idx.extend(h.face_indices)
+            worst_dr = max(r for _, r in deep_drill_holes)
+            mill_issues.append({
+                "category": "hole",
+                "severity": (
+                    "error"
+                    if worst_dr > MILLING_RULES.hole_depth_feasible_ratio
+                    else "warning"
+                ),
+                "title": f"Deep Drill Holes ({len(deep_drill_holes)})",
+                "description": (
+                    f"{len(deep_drill_holes)} hole(s) exceed the"
+                    f" {MILLING_RULES.hole_depth_typical_ratio}× depth/diameter limit."
+                    f" Deepest: {worst_dr:.1f}×."
+                ),
+                "value": float(worst_dr),
+                "threshold": float(MILLING_RULES.hole_depth_typical_ratio),
+                "faceIndices": ddh_face_idx[:2000],
+                "centroid": deep_drill_holes[0][0].center,
+                "metadata": {"maxDepthRatio": float(worst_dr)},
+            })
+
+        reports["CNC_MILL"] = {
+            "reportType": "CNC_MILL",
+            "issues": mill_issues,
+            # Legacy CNC summary fields (backward compat)
+            "sharpCornerCount": sc_count,
+            "sharpCornerRegions": sc_centroids[:50],
+            "hasUndercuts": False,
+            "undercutRegions": [],
+            "hasDrillHoles": len(cnc_holes) > 0,
+            "drillHoleCount": len(cnc_holes),
+            "requiresEdm": sc_count > 20,
+            "requiresGrinding": False,
+            "minimumFeatureSizeMm": MILLING_RULES.min_internal_radius_mm * 2.0,
+            "internalRadiusIssues": len(small_radii),
+            "cavityDepthIssues": dc_count,
+            "toolAccessAxes": tool_access.minimum_axes,
+            "chatterRiskCount": ch_count,
         }
+        # Legacy "CNC" key — same data as CNC_MILL
+        reports["CNC"] = dict(reports["CNC_MILL"])
+        reports["CNC"]["reportType"] = "CNC"
+
+        # ── CNC Turning ───────────────────────────────────────────────────────
+        turn_issues: list[dict[str, Any]] = []
+        axis_report = detect_axial_symmetry(mesh)
+
+        if not axis_report.is_turnable:
+            turn_issues.append({
+                "category": "not_turnable",
+                "severity": "error",
+                "title": "Part Not Suitable for Turning",
+                "description": (
+                    f"Symmetry deviation {axis_report.symmetry_deviation:.3f} exceeds"
+                    f" turning threshold. Part likely requires milling."
+                ),
+                "value": float(axis_report.symmetry_deviation),
+                "threshold": 0.15,
+                "faceIndices": [],
+                "centroid": [0.0, 0.0, 0.0],
+                "metadata": {},
+            })
+        else:
+            ld_ratio = axis_report.length_diameter_ratio or 0.0
+            if ld_ratio > TURNING_RULES.max_length_diameter_ratio:
+                turn_issues.append({
+                    "category": "ld_ratio",
+                    "severity": "warning",
+                    "title": f"High L/D Ratio ({ld_ratio:.1f}:1)",
+                    "description": (
+                        f"Length/diameter ratio {ld_ratio:.1f} exceeds the recommended"
+                        f" {TURNING_RULES.max_length_diameter_ratio}:1 limit."
+                        f" Steady rest or tailstock support required."
+                    ),
+                    "value": float(ld_ratio),
+                    "threshold": float(TURNING_RULES.max_length_diameter_ratio),
+                    "faceIndices": [],
+                    "centroid": [0.0, 0.0, 0.0],
+                    "metadata": {},
+                })
+
+            grooves = detect_grooves(mesh)
+            narrow_grooves = [
+                g for g in grooves if g.width_mm < TURNING_RULES.min_groove_width_mm
+            ]
+            if narrow_grooves:
+                ng_face_idx: list[int] = []
+                for g in narrow_grooves:
+                    ng_face_idx.extend(g.face_indices)
+                min_gw = min(g.width_mm for g in narrow_grooves)
+                turn_issues.append({
+                    "category": "groove",
+                    "severity": "warning",
+                    "title": f"Narrow Grooves ({len(narrow_grooves)})",
+                    "description": (
+                        f"{len(narrow_grooves)} groove(s) narrower than"
+                        f" {TURNING_RULES.min_groove_width_mm}mm minimum grooving"
+                        f" tool width. Narrowest: {min_gw:.2f}mm."
+                    ),
+                    "value": float(min_gw),
+                    "threshold": float(TURNING_RULES.min_groove_width_mm),
+                    "faceIndices": ng_face_idx[:2000],
+                    "centroid": narrow_grooves[0].centroid,
+                    "metadata": {"grooveCount": len(grooves)},
+                })
+
+        reports["CNC_TURN"] = {
+            "reportType": "CNC_TURN",
+            "issues": turn_issues,
+            "isTurnable": axis_report.is_turnable,
+            "primaryAxis": axis_report.primary_axis,
+            "lengthDiameterRatio": axis_report.length_diameter_ratio,
+            "symmetryDeviation": float(axis_report.symmetry_deviation),
+        }
+
+        return reports
+
     except Exception as e:
-        logger.warning(f"_compute_dfm_worker failed: {e}")
+        logger.warning("_compute_dfm_worker failed: %s", e)
         return {}
+
+
+def _generate_overlays_worker(
+    stl_bytes: bytes,
+    reports: dict[str, Any],
+) -> dict[str, bytes]:
+    """Phase 3 worker: generate overlay GLB bytes for each process+category.
+
+    Returns a dict keyed by ``"{PROCESS}__{category}"`` (double-underscore avoids
+    collisions with process codes like ``CNC_MILL``) mapping to GLB bytes.
+
+    Runs in a separate process via ProcessPoolExecutor.
+    """
+    try:
+        from core.overlay_generator import generate_overlay_glb
+    except ImportError:
+        return {}
+
+    result: dict[str, bytes] = {}
+
+    try:
+        mesh = trimesh.load(io.BytesIO(stl_bytes), file_type="stl", force="mesh")
+        if not isinstance(mesh, trimesh.Trimesh) or len(mesh.vertices) == 0:
+            return result
+
+        center = mesh.center_mass
+
+        for process_code, report in reports.items():
+            if process_code == "CNC":
+                continue  # skip legacy duplicate — CNC_MILL covers it
+            issues = report.get("issues", [])
+            seen_keys: set[str] = set()
+            for issue in issues:
+                category: str = issue.get("category", "")
+                face_indices: list[int] = issue.get("faceIndices", [])
+                if not face_indices or not category:
+                    continue
+                key = f"{process_code}__{category}"
+                if key in seen_keys:
+                    continue  # one overlay per process+category
+                seen_keys.add(key)
+
+                severity_per_face: dict[int, float] | None = None
+                if category == "thin_wall":
+                    # Uniform mid-severity gradient (exact per-face values require
+                    # ray-cast thickness not yet available here).
+                    severity_per_face = {fi: 0.5 for fi in face_indices}
+
+                try:
+                    glb = generate_overlay_glb(
+                        mesh, face_indices, category, center, severity_per_face
+                    )
+                    if glb:
+                        result[key] = glb
+                except Exception as _glb_err:
+                    logger.debug(
+                        "Overlay GLB failed for %s/%s: %s",
+                        process_code, category, _glb_err,
+                    )
+
+    except Exception as exc:
+        logger.warning("_generate_overlays_worker failed: %s", exc)
+
+    return result
 
 
 def _render_large_preview_worker(stl_bytes: bytes) -> dict[str, bytes | None]:

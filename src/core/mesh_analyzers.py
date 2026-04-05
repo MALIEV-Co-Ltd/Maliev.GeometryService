@@ -1,0 +1,759 @@
+"""
+Mesh-based DFM analysis functions for all additive manufacturing processes.
+
+These functions operate on a ``trimesh.Trimesh`` object (tessellated mesh)
+and return structured findings including the affected face indices needed to
+generate overlay GLBs.
+
+All length values are in mm (matching the geometry pipeline convention).
+"""
+
+from __future__ import annotations
+
+import logging
+import math
+from typing import TYPE_CHECKING
+
+import numpy as np
+
+from .dfm_models import HoleFeature
+
+if TYPE_CHECKING:
+    import trimesh
+
+logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Wall analysis
+# ---------------------------------------------------------------------------
+
+
+def compute_thin_wall_analysis(
+    mesh: "trimesh.Trimesh",
+    threshold_mm: float,
+) -> tuple[int, list[list[float]], list[int]]:
+    """Detect thin-wall regions (supported walls below threshold).
+
+    Uses unique mesh edges as a proxy for local wall thickness.
+    Edges shorter than ``threshold_mm`` indicate potential thin-wall areas.
+
+    Returns:
+        (thin_wall_count, centroids, face_indices)
+    """
+    import trimesh
+
+    thin_wall_count = 0
+    thin_wall_centroids: list[list[float]] = []
+    face_indices: list[int] = []
+
+    try:
+        if not isinstance(mesh, trimesh.Trimesh) or len(mesh.faces) < 3:
+            return 0, [], []
+
+        vertices = mesh.vertices
+        unique_edges = mesh.edges_unique
+
+        short_edges: list[tuple[float, tuple[int, int], np.ndarray]] = []
+        for edge in unique_edges:
+            v0, v1 = vertices[edge[0]], vertices[edge[1]]
+            length = float(np.linalg.norm(v1 - v0))
+            if length < threshold_mm:
+                mid = (v0 + v1) / 2.0
+                short_edges.append((length, (int(edge[0]), int(edge[1])), mid))
+
+        if not short_edges:
+            return 0, [], []
+
+        # Build edge → face index (O(faces)) so lookup is O(1) per thin edge
+        edge_to_faces: dict[tuple[int, int], list[int]] = {}
+        for idx, face in enumerate(mesh.faces):
+            for k in range(3):
+                key = (int(face[k]), int(face[(k + 1) % 3]))
+                key = (min(key), max(key))
+                edge_to_faces.setdefault(key, []).append(idx)
+
+        processed: set[int] = set()
+        for _length, edge, mid in short_edges:
+            for fidx in edge_to_faces.get(edge, []):
+                if fidx not in processed:
+                    processed.add(fidx)
+                    thin_wall_centroids.append(
+                        [float(mid[0]), float(mid[1]), float(mid[2])]
+                    )
+                    face_indices.append(fidx)
+
+        thin_wall_count = len(processed)
+
+    except Exception as exc:
+        logger.warning("thin wall analysis failed: %s", exc)
+
+    return thin_wall_count, thin_wall_centroids[:200], face_indices[:200]
+
+
+def compute_unsupported_wall_analysis(
+    mesh: "trimesh.Trimesh",
+    threshold_mm: float,
+) -> tuple[int, list[list[float]], list[int]]:
+    """Detect unsupported wall regions (walls connected on <2 sides).
+
+    Strategy: identify boundary edges (edges adjacent to only one face).
+    Faces that have ≥2 boundary edges and a short bounding box in at least
+    one dimension are candidate unsupported walls.
+
+    Returns:
+        (count, centroids, face_indices)
+    """
+    import trimesh
+
+    count = 0
+    centroids: list[list[float]] = []
+    face_indices: list[int] = []
+
+    try:
+        if not isinstance(mesh, trimesh.Trimesh) or len(mesh.faces) < 3:
+            return 0, [], []
+
+        # Boundary edges: appear in exactly one face
+        edge_face_count: dict[tuple[int, int], int] = {}
+        for idx, face in enumerate(mesh.faces):
+            for k in range(3):
+                key = (min(int(face[k]), int(face[(k + 1) % 3])),
+                       max(int(face[k]), int(face[(k + 1) % 3])))
+                edge_face_count[key] = edge_face_count.get(key, 0) + 1
+
+        boundary_edges: set[tuple[int, int]] = {
+            e for e, c in edge_face_count.items() if c == 1
+        }
+
+        # Faces that have ≥2 boundary edges are "unsupported"
+        face_boundary_count: dict[int, int] = {}
+        for idx, face in enumerate(mesh.faces):
+            for k in range(3):
+                key = (min(int(face[k]), int(face[(k + 1) % 3])),
+                       max(int(face[k]), int(face[(k + 1) % 3])))
+                if key in boundary_edges:
+                    face_boundary_count[idx] = face_boundary_count.get(idx, 0) + 1
+
+        face_centroids = mesh.triangles_center
+        for fidx, bc in face_boundary_count.items():
+            if bc >= 2:
+                # Check if this face is thin (bounding box in one dim < threshold)
+                tri = mesh.vertices[mesh.faces[fidx]]
+                extents = tri.max(axis=0) - tri.min(axis=0)
+                if float(extents.min()) < threshold_mm:
+                    centroid = face_centroids[fidx]
+                    centroids.append([float(centroid[0]), float(centroid[1]),
+                                      float(centroid[2])])
+                    face_indices.append(fidx)
+                    count += 1
+
+    except Exception as exc:
+        logger.warning("unsupported wall analysis failed: %s", exc)
+
+    return count, centroids[:200], face_indices[:200]
+
+
+# ---------------------------------------------------------------------------
+# Overhang analysis
+# ---------------------------------------------------------------------------
+
+
+def compute_overhang_analysis(
+    mesh: "trimesh.Trimesh",
+    threshold_deg: float,
+) -> tuple[int, float, list[list[float]], list[int]]:
+    """Detect faces that overhang beyond the threshold angle.
+
+    The overhang angle is measured from the vertical (Z axis).
+    A face with normal pointing straight down (Z = -1) is 180° from vertical
+    and always requires support. threshold_deg=45 matches FDM best-practice.
+
+    Returns:
+        (overhang_face_count, overhang_area_cm2, centroids, face_indices)
+    """
+    import trimesh
+
+    overhang_face_count = 0
+    overhang_area_cm2 = 0.0
+    overhang_centroids: list[list[float]] = []
+    face_indices: list[int] = []
+
+    try:
+        if not isinstance(mesh, trimesh.Trimesh) or len(mesh.faces) < 3:
+            return 0, 0.0, [], []
+
+        face_normals = mesh.face_normals
+        z_axis = np.array([0.0, 0.0, 1.0])
+        threshold_cos = math.cos(math.radians(threshold_deg))
+
+        face_areas = mesh.area_faces
+        face_centroids = mesh.triangles_center
+
+        for i, normal in enumerate(face_normals):
+            norm = float(np.linalg.norm(normal))
+            if norm < 1e-10:
+                continue
+            normal_unit = normal / norm
+            dot = float(np.dot(normal_unit, z_axis))
+            if dot < threshold_cos:
+                overhang_face_count += 1
+                overhang_area_cm2 += float(face_areas[i]) / 100.0
+                c = face_centroids[i]
+                overhang_centroids.append([float(c[0]), float(c[1]), float(c[2])])
+                face_indices.append(i)
+
+    except Exception as exc:
+        logger.warning("overhang analysis failed: %s", exc)
+
+    return (overhang_face_count, overhang_area_cm2,
+            overhang_centroids[:200], face_indices[:200])
+
+
+# ---------------------------------------------------------------------------
+# Hole detection (mesh-based, approximate)
+# ---------------------------------------------------------------------------
+
+
+def detect_holes_mesh(
+    mesh: "trimesh.Trimesh",
+    min_diameter_mm: float = 0.5,
+) -> list[HoleFeature]:
+    """Detect approximately cylindrical holes by analysing boundary loops.
+
+    Strategy:
+    1. Find boundary edges (open edges on the mesh surface).
+    2. Group boundary edges into connected loops.
+    3. Fit a circle to each loop — if the fit is good it's a hole.
+    4. Track pairs of matching circles at different Z positions as cylinders.
+
+    Returns a list of HoleFeature objects.
+    """
+    import trimesh
+
+    holes: list[HoleFeature] = []
+
+    try:
+        if not isinstance(mesh, trimesh.Trimesh) or len(mesh.faces) < 3:
+            return holes
+
+        # Get boundary edges (each appears in exactly one face)
+        edges = mesh.edges
+        edge_count: dict[tuple[int, int], int] = {}
+        for e in edges:
+            key = (min(int(e[0]), int(e[1])), max(int(e[0]), int(e[1])))
+            edge_count[key] = edge_count.get(key, 0) + 1
+
+        boundary = {e for e, c in edge_count.items() if c == 1}
+        if not boundary:
+            return holes
+
+        # Build adjacency for boundary edges
+        adj: dict[int, list[int]] = {}
+        for v0, v1 in boundary:
+            adj.setdefault(v0, []).append(v1)
+            adj.setdefault(v1, []).append(v0)
+
+        # Extract loops
+        loops: list[list[int]] = []
+        visited: set[int] = set()
+        for start in list(adj.keys()):
+            if start in visited:
+                continue
+            loop: list[int] = []
+            current = start
+            prev = -1
+            while True:
+                visited.add(current)
+                loop.append(current)
+                neighbors = [n for n in adj.get(current, []) if n != prev]
+                if not neighbors or neighbors[0] in visited:
+                    break
+                prev = current
+                current = neighbors[0]
+            if len(loop) >= 6:
+                loops.append(loop)
+
+        vertices = mesh.vertices
+
+        for loop in loops:
+            pts = np.array([vertices[v] for v in loop])
+            # Compute centroid and check circularity in XY plane
+            centroid_2d = pts[:, :2].mean(axis=0)
+            radii = np.linalg.norm(pts[:, :2] - centroid_2d, axis=1)
+            mean_r = float(radii.mean())
+            std_r = float(radii.std())
+
+            if mean_r < 1e-6 or std_r / mean_r > 0.15:
+                # Not circular enough
+                continue
+
+            diameter = mean_r * 2.0
+            if diameter < min_diameter_mm:
+                continue
+
+            z_values = pts[:, 2]
+            centroid_z = float(z_values.mean())
+
+            # Find faces adjacent to this loop (approximate)
+            loop_set = set(loop)
+            fidxs = [
+                i for i, face in enumerate(mesh.faces)
+                if any(int(v) in loop_set for v in face)
+            ]
+
+            holes.append(HoleFeature(
+                center=[float(centroid_2d[0]), float(centroid_2d[1]), centroid_z],
+                axis=[0.0, 0.0, 1.0],
+                diameter_mm=diameter,
+                depth_mm=float(z_values.max() - z_values.min()),
+                face_indices=fidxs[:50],
+            ))
+
+    except Exception as exc:
+        logger.warning("hole detection failed: %s", exc)
+
+    return holes[:50]
+
+
+# ---------------------------------------------------------------------------
+# Bridge detection
+# ---------------------------------------------------------------------------
+
+
+def detect_bridges(
+    mesh: "trimesh.Trimesh",
+    max_span_mm: float,
+) -> tuple[int, list[list[float]], list[int]]:
+    """Detect horizontal unsupported spans (bridges) exceeding max_span_mm.
+
+    Strategy: find downward-facing faces (normal.z < 0) with no mesh geometry
+    directly below them within the bridge distance. Uses vertical ray casting.
+
+    Returns:
+        (bridge_count, centroids, face_indices)
+    """
+    import trimesh
+
+    bridge_count = 0
+    bridge_centroids: list[list[float]] = []
+    face_indices: list[int] = []
+
+    try:
+        if not isinstance(mesh, trimesh.Trimesh) or len(mesh.faces) < 3:
+            return 0, [], []
+
+        face_normals = mesh.face_normals
+        face_centroids_arr = mesh.triangles_center
+
+        # Only consider downward-facing faces (overhangs)
+        downward_mask = face_normals[:, 2] < -0.5
+
+        if not np.any(downward_mask):
+            return 0, [], []
+
+        downward_indices = np.where(downward_mask)[0]
+
+        # Cast rays downward from each candidate face centroid
+        ray_origins = face_centroids_arr[downward_indices]
+        ray_directions = np.tile([0.0, 0.0, -1.0], (len(ray_origins), 1))
+
+        try:
+            locations, ray_idx, _ = mesh.ray.intersects_location(
+                ray_origins, ray_directions, multiple_hits=False
+            )
+        except Exception:
+            return 0, [], []
+
+        # Map ray index → hit distance
+        hit_distances: dict[int, float] = {}
+        for loc, ridx in zip(locations, ray_idx):
+            origin = ray_origins[ridx]
+            dist = float(np.linalg.norm(loc - origin))
+            if dist > 1e-3:  # ignore self-intersections
+                existing = hit_distances.get(int(ridx))
+                if existing is None or dist < existing:
+                    hit_distances[int(ridx)] = dist
+
+        for i, didx in enumerate(downward_indices):
+            # If no hit below OR hit is farther than max_span_mm → bridge
+            dist = hit_distances.get(i)
+            is_bridge = dist is None or dist > max_span_mm
+            if is_bridge:
+                c = face_centroids_arr[didx]
+                bridge_centroids.append([float(c[0]), float(c[1]), float(c[2])])
+                face_indices.append(int(didx))
+                bridge_count += 1
+
+    except Exception as exc:
+        logger.warning("bridge detection failed: %s", exc)
+
+    return bridge_count, bridge_centroids[:200], face_indices[:200]
+
+
+# ---------------------------------------------------------------------------
+# Small feature detection
+# ---------------------------------------------------------------------------
+
+
+def detect_small_features(
+    mesh: "trimesh.Trimesh",
+    min_size_mm: float,
+) -> tuple[int, list[list[float]], list[int]]:
+    """Detect features smaller than min_size_mm.
+
+    Strategy: identify faces with all edge lengths shorter than min_size_mm,
+    then cluster adjacent such faces. Flag clusters whose bounding-box
+    diagonal is below min_size_mm.
+
+    Returns:
+        (count, centroids, face_indices)
+    """
+    import trimesh
+
+    count = 0
+    centroids: list[list[float]] = []
+    face_indices: list[int] = []
+
+    try:
+        if not isinstance(mesh, trimesh.Trimesh) or len(mesh.faces) < 3:
+            return 0, [], []
+
+        vertices = mesh.vertices
+        face_centroids_arr = mesh.triangles_center
+
+        # Faces where all three edges are short
+        small_face_set: set[int] = set()
+        for fidx, face in enumerate(mesh.faces):
+            verts = [vertices[int(v)] for v in face]
+            max_edge = max(
+                float(np.linalg.norm(verts[1] - verts[0])),
+                float(np.linalg.norm(verts[2] - verts[1])),
+                float(np.linalg.norm(verts[0] - verts[2])),
+            )
+            if max_edge < min_size_mm:
+                small_face_set.add(fidx)
+
+        if not small_face_set:
+            return 0, [], []
+
+        # Build face adjacency for clustering
+        face_adj: dict[int, list[int]] = {f: [] for f in small_face_set}
+        edge_to_face: dict[tuple[int, int], list[int]] = {}
+        for fidx in small_face_set:
+            face = mesh.faces[fidx]
+            for k in range(3):
+                key = (min(int(face[k]), int(face[(k + 1) % 3])),
+                       max(int(face[k]), int(face[(k + 1) % 3])))
+                edge_to_face.setdefault(key, []).append(fidx)
+
+        for neighbors in edge_to_face.values():
+            for i in range(len(neighbors)):
+                for j in range(i + 1, len(neighbors)):
+                    a, b = neighbors[i], neighbors[j]
+                    if a in face_adj and b in face_adj:
+                        face_adj[a].append(b)
+                        face_adj[b].append(a)
+
+        # BFS cluster
+        visited: set[int] = set()
+        for start in small_face_set:
+            if start in visited:
+                continue
+            cluster: list[int] = []
+            queue = [start]
+            while queue:
+                cur = queue.pop()
+                if cur in visited:
+                    continue
+                visited.add(cur)
+                cluster.append(cur)
+                queue.extend(n for n in face_adj.get(cur, []) if n not in visited)
+
+            if not cluster:
+                continue
+
+            cluster_verts = np.array([
+                vertices[v]
+                for f in cluster
+                for v in mesh.faces[f]
+            ])
+            extents = cluster_verts.max(axis=0) - cluster_verts.min(axis=0)
+            diag = float(np.linalg.norm(extents))
+            if diag < min_size_mm * 2:
+                centroid = cluster_verts.mean(axis=0)
+                centroids.append([float(centroid[0]), float(centroid[1]),
+                                  float(centroid[2])])
+                face_indices.extend(cluster)
+                count += 1
+
+    except Exception as exc:
+        logger.warning("small feature detection failed: %s", exc)
+
+    return count, centroids[:100], face_indices[:500]
+
+
+# ---------------------------------------------------------------------------
+# Escape hole analysis (powder/resin removal)
+# ---------------------------------------------------------------------------
+
+
+def detect_escape_hole_risk(
+    mesh: "trimesh.Trimesh",
+    min_hole_diameter_mm: float,
+) -> tuple[bool, list[list[float]], list[int]]:
+    """Flag enclosed hollow volumes that lack an adequately-sized escape hole.
+
+    Strategy:
+    1. Detect hollow regions via mesh splitting (existing approach).
+    2. For each hollow region, check if there are holes ≥ min_hole_diameter_mm
+       in the vicinity. If not, flag as risk.
+
+    Returns:
+        (has_risk, centroids_of_risky_regions, face_indices)
+    """
+    import trimesh
+
+    hollow_centroids: list[list[float]] = []
+    face_indices: list[int] = []
+
+    try:
+        if not isinstance(mesh, trimesh.Trimesh):
+            return False, [], []
+        if not mesh.is_watertight:
+            return False, [], []
+
+        split = mesh.split()
+        if isinstance(split, trimesh.Trimesh):
+            return False, [], []
+
+        if isinstance(split, trimesh.Scene):
+            bodies = list(split.geometry.values())
+            if len(bodies) <= 1:
+                return False, [], []
+
+            holes = detect_holes_mesh(mesh, min_diameter_mm=min_hole_diameter_mm)
+
+            for body in bodies:
+                if not isinstance(body, trimesh.Trimesh):
+                    continue
+                if body.is_watertight:
+                    centroid = body.centroid
+                    # Check if a hole passes through this region
+                    has_escape = any(
+                        abs(h.center[2] - float(centroid[2])) < h.depth_mm * 0.5
+                        and np.linalg.norm(
+                            np.array(h.center[:2]) - np.array(centroid[:2])
+                        ) < body.extents.max()
+                        for h in holes
+                    )
+                    if not has_escape:
+                        hollow_centroids.append([
+                            float(centroid[0]),
+                            float(centroid[1]),
+                            float(centroid[2]),
+                        ])
+
+    except Exception as exc:
+        logger.warning("escape hole analysis failed: %s", exc)
+
+    return len(hollow_centroids) > 0, hollow_centroids, face_indices
+
+
+# ---------------------------------------------------------------------------
+# Hollow detection (generic — for SLA resin trapping)
+# ---------------------------------------------------------------------------
+
+
+def detect_hollow_regions(
+    mesh: "trimesh.Trimesh",
+) -> tuple[list[list[float]], list[int]]:
+    """Detect enclosed hollow volumes (resin trapping risk for SLA/resin).
+
+    Returns:
+        (centroids, face_indices)
+    """
+    import trimesh
+
+    hollow_centroids: list[list[float]] = []
+    face_indices: list[int] = []
+
+    try:
+        if not isinstance(mesh, trimesh.Trimesh) or not mesh.is_watertight:
+            return [], []
+
+        split = mesh.split()
+        if isinstance(split, trimesh.Trimesh):
+            return [], []
+
+        if isinstance(split, trimesh.Scene):
+            for body in split.geometry.values():
+                if isinstance(body, trimesh.Trimesh) and body.is_watertight:
+                    c = body.centroid
+                    hollow_centroids.append([float(c[0]), float(c[1]), float(c[2])])
+
+    except Exception as exc:
+        logger.warning("hollow region detection failed: %s", exc)
+
+    return hollow_centroids[:50], face_indices
+
+
+# ---------------------------------------------------------------------------
+# Pin detection (approximate)
+# ---------------------------------------------------------------------------
+
+
+def detect_thin_pins(
+    mesh: "trimesh.Trimesh",
+    min_diameter_mm: float,
+) -> tuple[int, list[list[float]], list[int]]:
+    """Detect protruding pin-like features below minimum diameter.
+
+    Strategy: find upward-pointing clusters of faces forming cylinders
+    (reuse hole detection on the inverted mesh or detect narrow protrusions
+    via cross-section analysis).
+
+    Returns:
+        (count, centroids, face_indices)
+    """
+    # Use hole detection as a proxy: narrow upward cylinders look like holes
+    # in the inverted normal orientation. This is approximate.
+    holes = detect_holes_mesh(mesh, min_diameter_mm=0.1)
+    thin_pins = [h for h in holes if h.diameter_mm < min_diameter_mm]
+
+    count = len(thin_pins)
+    centroids = [h.center for h in thin_pins]
+    face_indices = [f for h in thin_pins for f in h.face_indices]
+    return count, centroids, face_indices
+
+
+# ---------------------------------------------------------------------------
+# Embossed / engraved detail detection (approximate)
+# ---------------------------------------------------------------------------
+
+
+def detect_embossed_engraved(
+    mesh: "trimesh.Trimesh",
+    min_width_mm: float,
+    min_height_mm: float,
+) -> tuple[int, list[list[float]], list[int]]:
+    """Detect raised or recessed surface details below dimensional thresholds.
+
+    Strategy:
+    - Project mesh onto the dominant face plane.
+    - Find small isolated face clusters above or below the mean surface.
+    - Measure their bounding-box width and height.
+
+    Returns:
+        (count, centroids, face_indices)
+    """
+    import trimesh
+
+    count = 0
+    centroids: list[list[float]] = []
+    face_indices: list[int] = []
+
+    try:
+        if not isinstance(mesh, trimesh.Trimesh) or len(mesh.faces) < 10:
+            return 0, [], []
+
+        face_centroids_arr = mesh.triangles_center
+        face_normals = mesh.face_normals
+
+        # Identify the dominant plane (most faces near a common normal)
+        # Use Z-axis as default up direction
+        z_axis = np.array([0.0, 0.0, 1.0])
+        up_mask = np.abs(face_normals[:, 2]) > 0.7
+
+        if not np.any(up_mask):
+            return 0, [], []
+
+        up_centroids = face_centroids_arr[up_mask]
+        up_indices = np.where(up_mask)[0]
+
+        mean_z = float(up_centroids[:, 2].mean())
+        std_z = float(up_centroids[:, 2].std())
+
+        if std_z < min_height_mm:
+            return 0, [], []  # No significant height variation
+
+        # Find faces that deviate from the mean surface
+        THRESH = min_height_mm * 0.8
+        emboss_mask = np.abs(up_centroids[:, 2] - mean_z) > THRESH
+
+        for i, is_emboss in enumerate(emboss_mask):
+            if not is_emboss:
+                continue
+            fidx = int(up_indices[i])
+            c = face_centroids_arr[fidx]
+            centroids.append([float(c[0]), float(c[1]), float(c[2])])
+            face_indices.append(fidx)
+            count += 1
+
+    except Exception as exc:
+        logger.warning("embossed/engraved detection failed: %s", exc)
+
+    return count, centroids[:100], face_indices[:100]
+
+
+# ---------------------------------------------------------------------------
+# Connecting parts clearance (multi-body assemblies)
+# ---------------------------------------------------------------------------
+
+
+def detect_connecting_clearance(
+    mesh: "trimesh.Trimesh",
+    min_clearance_mm: float,
+) -> tuple[int, list[list[float]], list[int]]:
+    """Detect insufficient clearance between separate mesh bodies.
+
+    Requires a multi-body mesh (e.g. an assembly uploaded as a single STL).
+    Uses scipy KD-tree to find the minimum distance between body pairs.
+
+    Returns:
+        (count_of_violations, centroids_at_violation, face_indices)
+    """
+    import trimesh
+
+    count = 0
+    centroids: list[list[float]] = []
+    face_indices: list[int] = []
+
+    try:
+        if not isinstance(mesh, trimesh.Trimesh):
+            return 0, [], []
+
+        split = mesh.split()
+        if isinstance(split, trimesh.Trimesh):
+            return 0, [], []
+
+        if not isinstance(split, trimesh.Scene):
+            return 0, [], []
+
+        bodies = [
+            b for b in split.geometry.values()
+            if isinstance(b, trimesh.Trimesh)
+        ]
+        if len(bodies) < 2:
+            return 0, [], []
+
+        from scipy.spatial import KDTree
+
+        for i in range(len(bodies)):
+            for j in range(i + 1, len(bodies)):
+                pts_a = bodies[i].vertices
+                pts_b = bodies[j].vertices
+                tree = KDTree(pts_b)
+                dists, _ = tree.query(pts_a, k=1)
+                min_dist = float(dists.min())
+                if min_dist < min_clearance_mm:
+                    # Find the closest point pair
+                    idx_a = int(np.argmin(dists))
+                    pt = pts_a[idx_a]
+                    centroids.append([float(pt[0]), float(pt[1]), float(pt[2])])
+                    count += 1
+
+    except Exception as exc:
+        logger.warning("connecting clearance detection failed: %s", exc)
+
+    return count, centroids, face_indices

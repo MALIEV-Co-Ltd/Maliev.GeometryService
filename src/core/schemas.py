@@ -180,6 +180,7 @@ class FileAnalysisFailedPayload(BaseModel):
 
     model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
     file_id: str = Field(alias="fileId")
+    storage_path: str = Field(alias="storagePath")
     error_code: str = Field(alias="errorCode")
     details: str | None = Field(default=None)
 
@@ -251,6 +252,9 @@ class DfmAnalysisReadyPayload(BaseModel):
     sla_report: SlaDfmReport | None = Field(alias="slaReport", default=None)
     cnc_report: CncDfmReport | None = Field(alias="cncReport", default=None)
     analyzed_at: datetime = Field(alias="analyzedAt")
+    # Overlay GLB storage paths keyed by "{PROCESS}__{category}" (e.g. "FDM__thin_wall").
+    # Frontend loads these on-demand when a DFM issue is clicked.
+    overlay_paths: dict[str, str] | None = Field(alias="overlayPaths", default=None)
 
 
 class DfmAnalysisReadyMessageBody(BaseMessageBody):
