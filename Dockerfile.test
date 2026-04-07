@@ -1,6 +1,6 @@
 # Dockerfile for running geometry tests with headless rendering
 # This runs tests inside a Linux container where EGL rendering works
-FROM python:3.11-slim
+FROM python:3.12-slim
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \

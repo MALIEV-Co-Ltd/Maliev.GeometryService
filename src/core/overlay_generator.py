@@ -81,6 +81,7 @@ def generate_overlay_glb(
     category: str,
     reference_center: "np.ndarray | None" = None,
     severity_per_face: dict[int, float] | None = None,
+    output_in_meters: bool = False,
 ) -> bytes | None:
     """Extract faces from *mesh* by index, apply vertex colours, export GLB.
 
@@ -141,6 +142,12 @@ def generate_overlay_glb(
 
         # Z-up → Y-up (same pre-rotation as _export_glb_worker)
         submesh.apply_transform(_Z_TO_YUP)
+
+        # For STEP/IGES files the main viewer GLB is in meters (cascadio output).
+        # Babylon applies scaleFactor ≈ 1000 to both the main model and overlays.
+        # Convert overlay from mm → meters so Babylon's rescaling yields the correct scale.
+        if output_in_meters:
+            submesh.apply_scale(0.001)
 
         glb_bytes: bytes = submesh.export(file_type="glb")
         return glb_bytes

@@ -4,11 +4,15 @@ import io
 import json
 import logging
 import os
+import sys
 from concurrent.futures.process import BrokenProcessPool
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, cast
 from uuid import UUID, uuid4
+
+# Fix PYTHONPATH for child processes spawned by ProcessPoolExecutor
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import aio_pika
 import aio_pika.abc
@@ -327,6 +331,9 @@ class UploadConsumer:
                             )
                         else:
                             upload_id = inner_msg.upload_id
+                            # Track whether a terminal event was published from Phase 2.
+                            # Used as a safety net after gather to ensure the client never hangs.
+                            _glb_published = [False]
 
                             async def _run_small_thumbnail() -> None:
                                 try:
@@ -418,7 +425,10 @@ class UploadConsumer:
                                         logger.warning(
                                             "GLB upload failed — skipping FileAnalyzedEvent "
                                             "to avoid publishing a 404 signed URL",
-                                            extra={"file_id": str(file_id), "glb_path": glb_path},
+                                            extra={
+                                                "file_id": str(file_id),
+                                                "glb_path": glb_path,
+                                            },
                                         )
                                         return
                                     _now = datetime.now(timezone.utc)
@@ -454,6 +464,7 @@ class UploadConsumer:
                                         glb_event,
                                         "maliev.geometryservice.v1.analysis.completed",
                                     )
+                                    _glb_published[0] = True
                                     logger.info(
                                         "GLB published",
                                         extra={
@@ -495,16 +506,17 @@ class UploadConsumer:
                                     overlay_paths: dict[str, str] = {}
                                     if reports and mesh_stl_bytes:
                                         try:
-                                            overlay_glbs: dict[str, bytes] = (
-                                                await asyncio.wait_for(
-                                                    loop.run_in_executor(
-                                                        executor,
-                                                        _generate_overlays_worker,
-                                                        mesh_stl_bytes,
-                                                        reports,
-                                                    ),
-                                                    timeout=120,
-                                                )
+                                            overlay_glbs: dict[
+                                                str, bytes
+                                            ] = await asyncio.wait_for(
+                                                loop.run_in_executor(
+                                                    executor,
+                                                    _generate_overlays_worker,
+                                                    mesh_stl_bytes,
+                                                    reports,
+                                                    cad_ext,
+                                                ),
+                                                timeout=120,
                                             )
                                             overlay_items = [
                                                 (
@@ -605,55 +617,44 @@ class UploadConsumer:
                                         },
                                     )
                                 except Exception as e:
+                                    error_code = (
+                                        "GEOMETRY_WORKER_CRASH"
+                                        if isinstance(e, BrokenProcessPool)
+                                        else "GEOMETRY_PHASE2_TIMEOUT"
+                                        if isinstance(e, asyncio.TimeoutError)
+                                        else "DFM_ANALYZER_FAILED"
+                                    )
                                     logger.warning(
-                                        "DFM task failed (non-fatal): %s",
+                                        "DFM task failed (%s): %s",
+                                        error_code,
                                         e,
                                         exc_info=True,
                                         extra={
                                             "event": "dfm_error",
                                             "file_id": str(file_id),
+                                            "error_code": error_code,
                                         },
                                     )
-                                    # Publish an empty DfmAnalysisReadyEvent so the client
-                                    # overlay resolves immediately instead of spinning for 60 s.
+                                    # Publish a failure event so the client unblocks immediately
+                                    # instead of waiting for its 600 s wall-clock timeout.
+                                    # (The previous empty-DfmAnalysisReadyEvent approach did not
+                                    # work because DfmReport stays null and Analyzing stays true.)
                                     try:
-                                        _now = datetime.now(timezone.utc)
-                                        empty_dfm_event = DfmAnalysisReadyEvent(
-                                            messageId=uuid4(),
-                                            correlationId=correlation_id,
-                                            messageType=[
-                                                "urn:message:Maliev.MessagingContracts.Contracts.Geometry:DfmAnalysisReadyEvent"
-                                            ],
-                                            message=DfmAnalysisReadyMessageBody(
-                                                messageId=uuid4(),
-                                                messageName="DfmAnalysisReadyEvent",
-                                                messageType=MessageTypeEnum.Event,
-                                                messageVersion="1.0.0",
-                                                publishedBy="GeometryService",
-                                                consumedBy=["IntranetBff"],
-                                                correlationId=correlation_id,
-                                                causationId=None,
-                                                occurredAtUtc=_now,
-                                                isPublic=False,
-                                                payload=DfmAnalysisReadyPayload(
-                                                    fileId=file_id,
-                                                    storagePath=inner_msg.storage_path,
-                                                    fdmReport=None,
-                                                    slaReport=None,
-                                                    cncReport=None,
-                                                    analyzedAt=_now,
-                                                ),
-                                            ),
-                                        )
-                                        await self.publish_event(
-                                            empty_dfm_event,
-                                            "maliev.geometryservice.v1.dfm.ready",
+                                        await self.publish_failure(
+                                            correlation_id,
+                                            file_id,
+                                            error_code,
+                                            repr(e),
+                                            inner_msg.storage_path,
                                         )
                                     except Exception as pub_err:
                                         logger.warning(
-                                            "Failed to publish empty DFM event after failure: %s",
+                                            "Failed to publish DFM failure event: %s",
                                             pub_err,
-                                            extra={"event": "dfm_empty_publish_error", "file_id": str(file_id)},
+                                            extra={
+                                                "event": "dfm_failure_publish_error",
+                                                "file_id": str(file_id),
+                                            },
                                         )
 
                             async def _run_previews() -> None:
@@ -781,6 +782,36 @@ class UploadConsumer:
                                     "file_id": str(file_id),
                                 },
                             )
+                            # Safety net: if no GLB (FileAnalyzedEvent) was published,
+                            # the client has no way to know something went wrong unless we
+                            # explicitly publish a failure. This covers silent crashes and
+                            # scenarios where _run_glb failed before _glb_published was set.
+                            if not _glb_published[0]:
+                                logger.warning(
+                                    "Phase 2 completed without publishing a GLB artifact — "
+                                    "publishing GEOMETRY_NO_RESULT failure event",
+                                    extra={
+                                        "event": "phase2_no_result",
+                                        "file_id": str(file_id),
+                                    },
+                                )
+                                try:
+                                    await self.publish_failure(
+                                        correlation_id,
+                                        file_id,
+                                        "GEOMETRY_NO_RESULT",
+                                        "Phase 2 did not produce a GLB artifact",
+                                        inner_msg.storage_path,
+                                    )
+                                except Exception as pub_err:
+                                    logger.warning(
+                                        "Failed to publish GEOMETRY_NO_RESULT: %s",
+                                        pub_err,
+                                        extra={
+                                            "event": "phase2_no_result_publish_error",
+                                            "file_id": str(file_id),
+                                        },
+                                    )
 
                         extra: dict[str, Any] = {
                             "file.id": str(file_id),
@@ -807,12 +838,20 @@ class UploadConsumer:
                         error_code = "FILE_CORRUPT"
 
                     await self.publish_failure(
-                        correlation_id, file_id, error_code, str(e), inner_msg.storage_path
+                        correlation_id,
+                        file_id,
+                        error_code,
+                        str(e),
+                        inner_msg.storage_path,
                     )
                 except Exception as e:
                     logger.error(f"Error processing {file_id}: {e}")
                     await self.publish_failure(
-                        correlation_id, file_id, "SYSTEM_ERROR", str(e), inner_msg.storage_path
+                        correlation_id,
+                        file_id,
+                        "SYSTEM_ERROR",
+                        str(e),
+                        inner_msg.storage_path,
                     )
 
     async def download_with_retry(self, url: str, attempts: int = 3) -> io.BytesIO:
@@ -882,7 +921,12 @@ class UploadConsumer:
             return False
 
     async def publish_failure(
-        self, correlation_id: UUID | None, file_id: str, error_code: str, details: str, storage_path: str
+        self,
+        correlation_id: UUID | None,
+        file_id: str,
+        error_code: str,
+        details: str,
+        storage_path: str,
     ) -> None:
         _now = datetime.now(timezone.utc)
         failure_event = FileAnalysisFailedEvent(
@@ -903,7 +947,10 @@ class UploadConsumer:
                 occurredAtUtc=_now,
                 isPublic=False,
                 payload=FileAnalysisFailedPayload(
-                    fileId=file_id, storagePath=storage_path, errorCode=error_code, details=details
+                    fileId=file_id,
+                    storagePath=storage_path,
+                    errorCode=error_code,
+                    details=details,
                 ),
             ),
         )

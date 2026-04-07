@@ -34,6 +34,11 @@ def setup_observability(app: FastAPI | None = None) -> None:
         resource = Resource.create(attributes={SERVICE_NAME: settings.SERVICE_NAME})
         otlp_endpoint = settings.OTEL_EXPORTER_OTLP_ENDPOINT
 
+        # Skip OpenTelemetry setup if no endpoint configured (e.g., local development)
+        if not otlp_endpoint:
+            _is_configured = True
+            return
+
         # --- 1. Setup Tracing ---
         tracer_provider = TracerProvider(resource=resource)
         trace.set_tracer_provider(tracer_provider)

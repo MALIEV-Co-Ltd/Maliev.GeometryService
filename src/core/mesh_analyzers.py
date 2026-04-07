@@ -33,62 +33,98 @@ def compute_thin_wall_analysis(
     mesh: "trimesh.Trimesh",
     threshold_mm: float,
 ) -> tuple[int, list[list[float]], list[int]]:
-    """Detect thin-wall regions (supported walls below threshold).
+    """Detect thin-wall regions by finding opposite-facing face pairs.
 
-    Uses unique mesh edges as a proxy for local wall thickness.
-    Edges shorter than ``threshold_mm`` indicate potential thin-wall areas.
+    For each face, finds nearby faces whose normals point in roughly the
+    opposite direction. If two such faces are within ``threshold_mm`` of each
+    other they form a thin wall. This avoids the edge-length proxy which fires
+    heavily on fine CAD tessellations regardless of actual wall thickness.
+
+    Only connected clusters of ≥ 4 such faces are reported.
 
     Returns:
         (thin_wall_count, centroids, face_indices)
     """
     import trimesh
+    from scipy.spatial import KDTree
 
     thin_wall_count = 0
     thin_wall_centroids: list[list[float]] = []
     face_indices: list[int] = []
 
     try:
-        if not isinstance(mesh, trimesh.Trimesh) or len(mesh.faces) < 3:
+        if not isinstance(mesh, trimesh.Trimesh) or len(mesh.faces) < 4:
             return 0, [], []
 
+        face_normals = mesh.face_normals      # (N, 3)
+        face_centroids = mesh.triangles_center  # (N, 3)
         vertices = mesh.vertices
-        unique_edges = mesh.edges_unique
 
-        short_edges: list[tuple[float, tuple[int, int], np.ndarray]] = []
-        for edge in unique_edges:
-            v0, v1 = vertices[edge[0]], vertices[edge[1]]
-            length = float(np.linalg.norm(v1 - v0))
-            if length < threshold_mm:
-                mid = (v0 + v1) / 2.0
-                short_edges.append((length, (int(edge[0]), int(edge[1])), mid))
+        tree = KDTree(face_centroids)
+        # query_pairs returns all pairs (i, j) with i<j whose centroids are
+        # within threshold_mm of each other.
+        pairs = tree.query_pairs(r=threshold_mm)
 
-        if not short_edges:
+        thin_face_set: set[int] = set()
+        for i, j in pairs:
+            dot = float(np.dot(face_normals[i], face_normals[j]))
+            if dot < -0.7:   # roughly anti-parallel → opposite sides of a wall
+                thin_face_set.add(i)
+                thin_face_set.add(j)
+
+        if not thin_face_set:
             return 0, [], []
 
-        # Build edge → face index (O(faces)) so lookup is O(1) per thin edge
+        # Build face adjacency for connected-component clustering
         edge_to_faces: dict[tuple[int, int], list[int]] = {}
-        for idx, face in enumerate(mesh.faces):
+        for fidx in thin_face_set:
+            face = mesh.faces[fidx]
             for k in range(3):
-                key = (int(face[k]), int(face[(k + 1) % 3]))
-                key = (min(key), max(key))
-                edge_to_faces.setdefault(key, []).append(idx)
+                key = (
+                    min(int(face[k]), int(face[(k + 1) % 3])),
+                    max(int(face[k]), int(face[(k + 1) % 3])),
+                )
+                edge_to_faces.setdefault(key, []).append(fidx)
 
-        processed: set[int] = set()
-        for _length, edge, mid in short_edges:
-            for fidx in edge_to_faces.get(edge, []):
-                if fidx not in processed:
-                    processed.add(fidx)
-                    thin_wall_centroids.append(
-                        [float(mid[0]), float(mid[1]), float(mid[2])]
-                    )
-                    face_indices.append(fidx)
+        face_adj: dict[int, list[int]] = {f: [] for f in thin_face_set}
+        for neighbors in edge_to_faces.values():
+            for a in neighbors:
+                for b in neighbors:
+                    if a != b and b in face_adj:
+                        face_adj[a].append(b)
 
-        thin_wall_count = len(processed)
+        visited: set[int] = set()
+        for start in thin_face_set:
+            if start in visited:
+                continue
+            cluster: list[int] = []
+            queue = [start]
+            while queue:
+                cur = queue.pop()
+                if cur in visited:
+                    continue
+                visited.add(cur)
+                cluster.append(cur)
+                for n in face_adj.get(cur, []):
+                    if n not in visited:
+                        queue.append(n)
+            if len(cluster) < 4:
+                continue
+
+            cluster_verts = np.array(
+                [vertices[v] for f in cluster for v in mesh.faces[f]]
+            )
+            centroid = cluster_verts.mean(axis=0)
+            thin_wall_centroids.append(
+                [float(centroid[0]), float(centroid[1]), float(centroid[2])]
+            )
+            face_indices.extend(cluster)
+            thin_wall_count += 1  # count regions, not individual faces
 
     except Exception as exc:
         logger.warning("thin wall analysis failed: %s", exc)
 
-    return thin_wall_count, thin_wall_centroids[:200], face_indices[:200]
+    return thin_wall_count, thin_wall_centroids[:500], face_indices[:10000]
 
 
 def compute_unsupported_wall_analysis(
@@ -118,8 +154,10 @@ def compute_unsupported_wall_analysis(
         edge_face_count: dict[tuple[int, int], int] = {}
         for idx, face in enumerate(mesh.faces):
             for k in range(3):
-                key = (min(int(face[k]), int(face[(k + 1) % 3])),
-                       max(int(face[k]), int(face[(k + 1) % 3])))
+                key = (
+                    min(int(face[k]), int(face[(k + 1) % 3])),
+                    max(int(face[k]), int(face[(k + 1) % 3])),
+                )
                 edge_face_count[key] = edge_face_count.get(key, 0) + 1
 
         boundary_edges: set[tuple[int, int]] = {
@@ -130,8 +168,10 @@ def compute_unsupported_wall_analysis(
         face_boundary_count: dict[int, int] = {}
         for idx, face in enumerate(mesh.faces):
             for k in range(3):
-                key = (min(int(face[k]), int(face[(k + 1) % 3])),
-                       max(int(face[k]), int(face[(k + 1) % 3])))
+                key = (
+                    min(int(face[k]), int(face[(k + 1) % 3])),
+                    max(int(face[k]), int(face[(k + 1) % 3])),
+                )
                 if key in boundary_edges:
                     face_boundary_count[idx] = face_boundary_count.get(idx, 0) + 1
 
@@ -143,8 +183,9 @@ def compute_unsupported_wall_analysis(
                 extents = tri.max(axis=0) - tri.min(axis=0)
                 if float(extents.min()) < threshold_mm:
                     centroid = face_centroids[fidx]
-                    centroids.append([float(centroid[0]), float(centroid[1]),
-                                      float(centroid[2])])
+                    centroids.append(
+                        [float(centroid[0]), float(centroid[1]), float(centroid[2])]
+                    )
                     face_indices.append(fidx)
                     count += 1
 
@@ -163,18 +204,20 @@ def compute_overhang_analysis(
     mesh: "trimesh.Trimesh",
     threshold_deg: float,
 ) -> tuple[int, float, list[list[float]], list[int]]:
-    """Detect faces that overhang beyond the threshold angle.
+    """Detect overhang regions that exceed the threshold angle.
 
-    The overhang angle is measured from the vertical (Z axis).
-    A face with normal pointing straight down (Z = -1) is 180° from vertical
-    and always requires support. threshold_deg=45 matches FDM best-practice.
+    Uses a 2° tolerance to avoid false-positives on faces designed to sit
+    exactly at the machine's self-supporting angle (e.g. wrench optimised for
+    45°).  Faces are clustered into connected regions via BFS; the build-plate
+    contact region (lowest Z faces) is excluded.  Returns the number of
+    distinct overhang *regions*, not individual faces.
 
     Returns:
-        (overhang_face_count, overhang_area_cm2, centroids, face_indices)
+        (overhang_region_count, overhang_area_cm2, centroids, face_indices)
     """
     import trimesh
 
-    overhang_face_count = 0
+    overhang_region_count = 0
     overhang_area_cm2 = 0.0
     overhang_centroids: list[list[float]] = []
     face_indices: list[int] = []
@@ -184,30 +227,104 @@ def compute_overhang_analysis(
             return 0, 0.0, [], []
 
         face_normals = mesh.face_normals
-        z_axis = np.array([0.0, 0.0, 1.0])
-        threshold_cos = math.cos(math.radians(threshold_deg))
-
         face_areas = mesh.area_faces
         face_centroids = mesh.triangles_center
 
+        # Add 2° tolerance so parts designed right at the angle boundary don't
+        # produce false positives (e.g. wrench at exactly 45°).
+        effective_thresh = threshold_deg + 2.0
+        overhang_z_thresh = -math.sin(math.radians(effective_thresh))
+
+        # Find all overhang faces
+        overhang_set: set[int] = set()
         for i, normal in enumerate(face_normals):
             norm = float(np.linalg.norm(normal))
             if norm < 1e-10:
                 continue
-            normal_unit = normal / norm
-            dot = float(np.dot(normal_unit, z_axis))
-            if dot < threshold_cos:
-                overhang_face_count += 1
-                overhang_area_cm2 += float(face_areas[i]) / 100.0
-                c = face_centroids[i]
-                overhang_centroids.append([float(c[0]), float(c[1]), float(c[2])])
-                face_indices.append(i)
+            if (normal / norm)[2] < overhang_z_thresh:
+                overhang_set.add(i)
+
+        if not overhang_set:
+            return 0, 0.0, [], []
+
+        # Determine the build-plate contact band: faces within 3% of part height
+        # (or 2 mm, whichever is larger) above the global Z minimum are excluded
+        # because they represent the bottom face resting on the build plate.
+        all_centroids = face_centroids
+        global_min_z = float(mesh.vertices[:, 2].min())
+        part_height = float(mesh.vertices[:, 2].max()) - global_min_z
+        build_plate_band = max(2.0, part_height * 0.03)
+
+        # Build face adjacency among overhang faces only
+        edge_to_faces: dict[tuple[int, int], list[int]] = {}
+        for fidx in overhang_set:
+            face = mesh.faces[fidx]
+            for k in range(3):
+                key = (
+                    min(int(face[k]), int(face[(k + 1) % 3])),
+                    max(int(face[k]), int(face[(k + 1) % 3])),
+                )
+                edge_to_faces.setdefault(key, []).append(fidx)
+
+        face_adj: dict[int, list[int]] = {f: [] for f in overhang_set}
+        for neighbors in edge_to_faces.values():
+            for a in neighbors:
+                for b in neighbors:
+                    if a != b:
+                        face_adj[a].append(b)
+
+        # BFS clustering
+        visited: set[int] = set()
+        for start in overhang_set:
+            if start in visited:
+                continue
+            cluster: list[int] = []
+            queue = [start]
+            while queue:
+                cur = queue.pop()
+                if cur in visited:
+                    continue
+                visited.add(cur)
+                cluster.append(cur)
+                for n in face_adj.get(cur, []):
+                    if n not in visited:
+                        queue.append(n)
+
+            # Ignore small stray patches that don't represent significant
+            # overhang regions requiring support.  Filter by area (mm²) so
+            # that the threshold is independent of mesh resolution.
+            region_area_check = sum(float(face_areas[f]) for f in cluster)
+            if region_area_check < 4.0:  # < 4 mm² → not a meaningful overhang
+                continue
+
+            # Exclude build-plate contact region
+            region_min_z = float(
+                min(all_centroids[f][2] for f in cluster)
+            )
+            if region_min_z < global_min_z + build_plate_band:
+                continue
+
+            region_area = sum(float(face_areas[f]) for f in cluster)
+            overhang_area_cm2 += region_area / 100.0
+
+            cluster_centroids = np.array([all_centroids[f] for f in cluster])
+            region_centroid = cluster_centroids.mean(axis=0)
+            overhang_centroids.append(
+                [float(region_centroid[0]), float(region_centroid[1]),
+                 float(region_centroid[2])]
+            )
+            face_indices.extend(cluster)
+            overhang_region_count += 1
 
     except Exception as exc:
         logger.warning("overhang analysis failed: %s", exc)
 
-    return (overhang_face_count, overhang_area_cm2,
-            overhang_centroids[:200], face_indices[:200])
+    return (
+        overhang_region_count,
+        overhang_area_cm2,
+        overhang_centroids[:500],
+        face_indices[:10000],
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -298,17 +415,20 @@ def detect_holes_mesh(
             # Find faces adjacent to this loop (approximate)
             loop_set = set(loop)
             fidxs = [
-                i for i, face in enumerate(mesh.faces)
+                i
+                for i, face in enumerate(mesh.faces)
                 if any(int(v) in loop_set for v in face)
             ]
 
-            holes.append(HoleFeature(
-                center=[float(centroid_2d[0]), float(centroid_2d[1]), centroid_z],
-                axis=[0.0, 0.0, 1.0],
-                diameter_mm=diameter,
-                depth_mm=float(z_values.max() - z_values.min()),
-                face_indices=fidxs[:50],
-            ))
+            holes.append(
+                HoleFeature(
+                    center=[float(centroid_2d[0]), float(centroid_2d[1]), centroid_z],
+                    axis=[0.0, 0.0, 1.0],
+                    diameter_mm=diameter,
+                    depth_mm=float(z_values.max() - z_values.min()),
+                    face_indices=fidxs[:50],
+                )
+            )
 
     except Exception as exc:
         logger.warning("hole detection failed: %s", exc)
@@ -443,8 +563,10 @@ def detect_small_features(
         for fidx in small_face_set:
             face = mesh.faces[fidx]
             for k in range(3):
-                key = (min(int(face[k]), int(face[(k + 1) % 3])),
-                       max(int(face[k]), int(face[(k + 1) % 3])))
+                key = (
+                    min(int(face[k]), int(face[(k + 1) % 3])),
+                    max(int(face[k]), int(face[(k + 1) % 3])),
+                )
                 edge_to_face.setdefault(key, []).append(fidx)
 
         for neighbors in edge_to_face.values():
@@ -473,17 +595,16 @@ def detect_small_features(
             if not cluster:
                 continue
 
-            cluster_verts = np.array([
-                vertices[v]
-                for f in cluster
-                for v in mesh.faces[f]
-            ])
+            cluster_verts = np.array(
+                [vertices[v] for f in cluster for v in mesh.faces[f]]
+            )
             extents = cluster_verts.max(axis=0) - cluster_verts.min(axis=0)
             diag = float(np.linalg.norm(extents))
             if diag < min_size_mm * 2:
                 centroid = cluster_verts.mean(axis=0)
-                centroids.append([float(centroid[0]), float(centroid[1]),
-                                  float(centroid[2])])
+                centroids.append(
+                    [float(centroid[0]), float(centroid[1]), float(centroid[2])]
+                )
                 face_indices.extend(cluster)
                 count += 1
 
@@ -544,15 +665,18 @@ def detect_escape_hole_risk(
                         abs(h.center[2] - float(centroid[2])) < h.depth_mm * 0.5
                         and np.linalg.norm(
                             np.array(h.center[:2]) - np.array(centroid[:2])
-                        ) < body.extents.max()
+                        )
+                        < body.extents.max()
                         for h in holes
                     )
                     if not has_escape:
-                        hollow_centroids.append([
-                            float(centroid[0]),
-                            float(centroid[1]),
-                            float(centroid[2]),
-                        ])
+                        hollow_centroids.append(
+                            [
+                                float(centroid[0]),
+                                float(centroid[1]),
+                                float(centroid[2]),
+                            ]
+                        )
 
     except Exception as exc:
         logger.warning("escape hole analysis failed: %s", exc)
@@ -730,10 +854,7 @@ def detect_connecting_clearance(
         if not isinstance(split, trimesh.Scene):
             return 0, [], []
 
-        bodies = [
-            b for b in split.geometry.values()
-            if isinstance(b, trimesh.Trimesh)
-        ]
+        bodies = [b for b in split.geometry.values() if isinstance(b, trimesh.Trimesh)]
         if len(bodies) < 2:
             return 0, [], []
 

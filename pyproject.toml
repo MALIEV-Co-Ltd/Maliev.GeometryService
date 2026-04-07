@@ -8,6 +8,7 @@ packages = [{include = "src"}]
 
 [tool.poetry.dependencies]
 python = "^3.10"
+cadquery = "^2.4"
 fastapi = "^0.115.14"
 uvicorn = {extras = ["standard"], version = "^0.34.3"}
 scalar-fastapi = "^1.5.0"

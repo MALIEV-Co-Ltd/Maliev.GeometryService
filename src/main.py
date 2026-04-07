@@ -1,8 +1,12 @@
 import asyncio
 import logging
+import os
 import sys
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager, suppress
+
+# Add src to path for imports
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from fastapi import APIRouter, FastAPI, responses
 from fastapi.responses import JSONResponse

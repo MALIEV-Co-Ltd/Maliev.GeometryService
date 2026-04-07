@@ -641,7 +641,12 @@ def compute_sharp_corner_analysis(
     mesh: "trimesh.Trimesh",  # type: ignore[name-defined]
     threshold_deg: float = 45.0,
 ) -> tuple[int, list[list[float]], list[int]]:
-    """Detect sharp internal corners (CNC milling — internal corner access).
+    """Detect sharp internal corners unsuitable for standard CNC endmills.
+
+    Finds concave edges where the interior angle between the two meeting faces
+    is less than threshold_deg. These corners require EDM or leave a tool-
+    radius fillet on the workpiece. Clusters nearby edges into distinct corner
+    features to avoid counting tessellation facets as separate corners.
 
     Returns:
         (sharp_corner_count, centroids, face_indices)
@@ -653,41 +658,72 @@ def compute_sharp_corner_analysis(
     face_indices: list[int] = []
 
     try:
-        if not isinstance(mesh, trimesh.Trimesh) or len(mesh.edges) < 3:
+        if not isinstance(mesh, trimesh.Trimesh) or len(mesh.faces) < 4:
             return 0, [], []
 
-        vertices = mesh.vertices
-        threshold_cos = math.cos(math.radians(threshold_deg))
-
-        edge_directions: dict[int, list[np.ndarray]] = {}
-        for edge in mesh.edges:
-            v0_idx, v1_idx = int(edge[0]), int(edge[1])
-            v0, v1 = vertices[v0_idx], vertices[v1_idx]
-            direction = (v1 - v0) / (float(np.linalg.norm(v1 - v0)) + 1e-10)
-            edge_directions.setdefault(v0_idx, []).append(direction)
-            edge_directions.setdefault(v1_idx, []).append(-direction)
-
-        # Build vertex → face index map
-        vertex_to_faces: dict[int, list[int]] = {}
+        # Build interior edge → [face0, face1] mapping
+        edge_to_faces: dict[tuple[int, int], list[int]] = {}
         for fidx, face in enumerate(mesh.faces):
-            for v in face:
-                vertex_to_faces.setdefault(int(v), []).append(fidx)
+            for k in range(3):
+                key = (
+                    min(int(face[k]), int(face[(k + 1) % 3])),
+                    max(int(face[k]), int(face[(k + 1) % 3])),
+                )
+                edge_to_faces.setdefault(key, []).append(fidx)
 
-        for vertex_idx, directions in edge_directions.items():
-            if len(directions) < 2:
+        face_normals = mesh.face_normals
+        face_centroids = mesh.triangles_center
+        vertices = mesh.vertices
+
+        # For two faces meeting at a concave corner with interior angle α,
+        # dot(n1, n2) = cos(α). Flag edges where α < threshold_deg.
+        cos_thresh = math.cos(math.radians(threshold_deg))
+
+        corner_mids: list[np.ndarray] = []
+        corner_faces: list[tuple[int, int]] = []
+
+        for (v0, v1), faces in edge_to_faces.items():
+            if len(faces) != 2:
                 continue
-            for i in range(len(directions)):
-                for j in range(i + 1, len(directions)):
-                    d1, d2 = directions[i], directions[j]
-                    dot = float(np.clip(np.dot(d1, d2), -1.0, 1.0))
-                    if dot < threshold_cos:
-                        vertex = vertices[vertex_idx]
-                        sharp_corners.append(
-                            [float(vertex[0]), float(vertex[1]), float(vertex[2])]
-                        )
-                        sharp_corner_count += 1
-                        face_indices.extend(vertex_to_faces.get(vertex_idx, [])[:3])
-                        break
+            fi, fj = faces[0], faces[1]
+            ni, nj = face_normals[fi], face_normals[fj]
+            ci, cj = face_centroids[fi], face_centroids[fj]
+
+            # Concavity: both normals point toward each other across the edge.
+            diff = cj - ci
+            if not (
+                float(np.dot(ni, diff)) < -0.05
+                and float(np.dot(nj, -diff)) < -0.05
+            ):
+                continue  # convex or boundary edge
+
+            dot_n = float(np.clip(np.dot(ni, nj), -1.0, 1.0))
+            if dot_n > cos_thresh:
+                edge_mid = (vertices[v0] + vertices[v1]) / 2.0
+                corner_mids.append(edge_mid)
+                corner_faces.append((fi, fj))
+
+        if not corner_mids:
+            return 0, [], []
+
+        # Cluster nearby corner edges so tessellation facets around the same
+        # physical corner are counted as one feature, not hundreds.
+        all_mids = np.array(corner_mids)
+        cluster_radius = max(3.0, float(mesh.extents.max()) * 0.03)
+        used: set[int] = set()
+
+        for i in range(len(corner_mids)):
+            if i in used:
+                continue
+            dists = np.linalg.norm(all_mids - corner_mids[i], axis=1)
+            for idx in np.where(dists < cluster_radius)[0]:
+                used.add(int(idx))
+
+            mid = corner_mids[i]
+            sharp_corners.append([float(mid[0]), float(mid[1]), float(mid[2])])
+            fi, fj = corner_faces[i]
+            face_indices.extend([fi, fj])
+            sharp_corner_count += 1
 
     except Exception as exc:
         logger.warning("sharp corner analysis failed: %s", exc)

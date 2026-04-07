@@ -79,13 +79,15 @@ def analyze_step_brep(
         from OCP.gp import gp_Dir, gp_Pnt
         from OCP.TopAbs import TopAbs_FACE, TopAbs_FORWARD, TopAbs_REVERSED
         from OCP.TopExp import TopExp_Explorer
-        from OCP.TopoDS import topods_Face
-        from OCP.BRepGProp import brepgprop_SurfaceProperties
+        from OCP.TopoDS import TopoDS
+        from OCP.BRepGProp import BRepGProp
         from OCP.GProp import GProp_GProps
-    except ImportError:
-        logger.info(
+    except ImportError as _import_err:
+        logger.warning(
             "cadquery / OCP not available — skipping OCC B-Rep analysis. "
-            "Install cadquery for full DFM analysis on STEP/IGES files."
+            "Install cadquery for full DFM analysis on STEP/IGES files. "
+            "Import error: %s",
+            _import_err,
         )
         return [], {}
 
@@ -124,7 +126,7 @@ def analyze_step_brep(
         tri_offset = 0
 
         while explorer.More():
-            face = topods_Face(explorer.Current())
+            face = TopoDS.Face_s(explorer.Current())
             explorer.Next()
             face_tag += 1
 
@@ -133,7 +135,7 @@ def analyze_step_brep(
 
             # Get surface area and centroid
             props = GProp_GProps()
-            brepgprop_SurfaceProperties(face, props)
+            BRepGProp.SurfaceProperties_s(face, props)
             area_mm2 = float(props.Mass())
             cog = props.CentreOfMass()
             centroid = [float(cog.X()), float(cog.Y()), float(cog.Z())]
@@ -142,7 +144,7 @@ def analyze_step_brep(
             is_reversed = face.Orientation() == TopAbs_REVERSED
 
             # Extract tessellation for this face and map to triangle indices
-            location = BRep_Tool.Location_s(face)
+            location = face.Location()
             triangulation = BRep_Tool.Triangulation_s(face, location)
             tri_indices: list[int] = []
             if triangulation is not None:

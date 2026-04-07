@@ -12,7 +12,8 @@ class Settings(BaseSettings):
     JWT_ISSUER: str = "https://api.maliev.com"
     JWT_AUDIENCE: str = "https://api.maliev.com"
 
-    OTEL_EXPORTER_OTLP_ENDPOINT: str = "http://localhost:4317"
+    # Set empty to disable OpenTelemetry (useful for local development)
+    OTEL_EXPORTER_OTLP_ENDPOINT: str = ""
     SERVICE_NAME: str = "maliev-geometryservice"
 
     MAX_FILE_SIZE_MB: int = 200
