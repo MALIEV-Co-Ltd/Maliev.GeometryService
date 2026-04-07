@@ -723,7 +723,7 @@ def _run_gmsh_with_timeout(file_path: str, timeout_seconds: int) -> trimesh.Trim
 
 def _load_cad_with_cascadio(
     file_path: str, timeout_seconds: int = 60
-) -> tuple[trimesh.Trimesh, bytes]:
+) -> tuple[trimesh.Trimesh, bytes, int]:
     """
     Load STEP/IGES file via cascadio (OpenCascade) with 0.1mm linear deviation
     and 0.5 rad angular deviation for smooth circles and fillets.
@@ -769,8 +769,10 @@ def _load_cad_with_cascadio(
                 meshes = list(loaded.geometry.values())
                 if not meshes:
                     raise ValueError(f"cascadio produced empty scene for {file_path}")
+                body_count = len(meshes)
                 mesh = trimesh.util.concatenate(meshes)
             elif isinstance(loaded, trimesh.Trimesh):
+                body_count = 1
                 mesh = loaded
             else:
                 raise ValueError(f"cascadio produced unexpected type: {type(loaded)}")
@@ -780,7 +782,7 @@ def _load_cad_with_cascadio(
             # metric computation (extents, volume, area) is consistent with STL/OBJ input.
             # cad_glb_bytes stays in meters — correct for BabylonJS rendering.
             mesh.apply_scale(1000.0)
-            return mesh, glb_bytes
+            return mesh, glb_bytes, body_count
 
     pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
     future = pool.submit(_do_load)
@@ -809,6 +811,7 @@ def _compute_metrics_worker(data: bytes, file_extension: str) -> dict[str, Any]:
 
         mesh: trimesh.Trimesh | None = None
         cad_glb_bytes: bytes | None = None
+        cad_body_count: int = 1
         if ext in ["igs", "iges", "step", "stp"]:
             try:
                 # Write to a temp file that cascadio will open.
@@ -825,7 +828,7 @@ def _compute_metrics_worker(data: bytes, file_extension: str) -> dict[str, Any]:
                         "tmp_path": tmp_path,
                     },
                 )
-                mesh, cad_glb_bytes = _load_cad_with_cascadio(
+                mesh, cad_glb_bytes, cad_body_count = _load_cad_with_cascadio(
                     tmp_path, timeout_seconds=60
                 )
                 logger.info(
@@ -853,6 +856,7 @@ def _compute_metrics_worker(data: bytes, file_extension: str) -> dict[str, Any]:
             if isinstance(mesh_data, trimesh.Scene):
                 if not mesh_data.geometry:
                     raise ValueError("EMPTY_FILE_ERROR")
+                cad_body_count = len(mesh_data.geometry)
                 # dump(concatenate=True) applies each body's scene-graph transform before
                 # merging, so relative positions between bodies are preserved.
                 dumped = mesh_data.dump(concatenate=True)
@@ -929,6 +933,7 @@ def _compute_metrics_worker(data: bytes, file_extension: str) -> dict[str, Any]:
             "is_manifold": is_manifold,
             "triangle_count": len(mesh.faces),
             "euler_number": euler_number,
+            "body_count": cad_body_count,
             "mesh_stl_bytes": mesh_stl_bytes,
             "cad_glb_bytes": cad_glb_bytes,
         }
@@ -944,8 +949,6 @@ def _compute_metrics_worker(data: bytes, file_extension: str) -> dict[str, Any]:
                 "traceback": traceback.format_exc(),
             },
         )
-        if "MULTI_BODY_ERROR" in str(e):
-            raise
         raise ValueError(f"FILE_CORRUPT: {str(e)}") from e
     finally:
         # Clean up temp file even on crash. Uses os._exit path for timeout crashes
@@ -976,12 +979,15 @@ def compute_metrics_trimesh_only(
     )
 
     mesh_data = trimesh.load(file_stream, file_type=ext, force="mesh")
+    fallback_body_count: int = 1
     if isinstance(mesh_data, trimesh.Scene):
-        if len(mesh_data.geometry) > 1:
-            raise ValueError("MULTI_BODY_ERROR")
         if not mesh_data.geometry:
             raise ValueError("EMPTY_FILE_ERROR")
-        mesh = cast(trimesh.Trimesh, list(mesh_data.geometry.values())[0])
+        fallback_body_count = len(mesh_data.geometry)
+        dumped = mesh_data.dump(concatenate=True)
+        if not isinstance(dumped, trimesh.Trimesh) or len(dumped.vertices) == 0:
+            raise ValueError("EMPTY_FILE_ERROR")
+        mesh = dumped
     else:
         mesh = cast(trimesh.Trimesh, mesh_data)
 
@@ -1092,6 +1098,7 @@ def compute_metrics_trimesh_only(
         "is_manifold": is_manifold,
         "triangle_count": len(mesh.faces),
         "euler_number": euler_number,
+        "body_count": fallback_body_count,
         "mesh_stl_bytes": mesh_stl_bytes,
         "dfmReports": {
             "FDM": fdm_dfm_report,
@@ -1147,11 +1154,12 @@ def _analyze_bytes_worker(data: bytes, file_extension: str) -> dict[str, Any]:
             else:
                 mesh_data = trimesh.load(file_stream, file_type=ext, force="mesh")
                 if isinstance(mesh_data, trimesh.Scene):
-                    if len(mesh_data.geometry) > 1:
-                        raise ValueError("MULTI_BODY_ERROR")
                     if not mesh_data.geometry:
                         raise ValueError("EMPTY_FILE_ERROR")
-                    mesh = cast(trimesh.Trimesh, list(mesh_data.geometry.values())[0])
+                    dumped_mesh = mesh_data.dump(concatenate=True)
+                    if not isinstance(dumped_mesh, trimesh.Trimesh) or len(dumped_mesh.vertices) == 0:
+                        raise ValueError("EMPTY_FILE_ERROR")
+                    mesh = dumped_mesh
                 else:
                     mesh = cast(trimesh.Trimesh, mesh_data)
             # glTF/GLB spec mandates meters — convert to mm so all downstream
@@ -1979,7 +1987,6 @@ def _compute_dfm_worker(
 def _generate_overlays_worker(
     stl_bytes: bytes,
     reports: dict[str, Any],
-    file_ext: str = "stl",
 ) -> dict[str, bytes]:
     """Phase 3 worker: generate overlay GLB bytes for each process+category.
 
@@ -1991,21 +1998,16 @@ def _generate_overlays_worker(
     Args:
         stl_bytes:  Tessellated mesh in STL format (Z-up, mm).
         reports:    DFM reports dict from ``_compute_dfm_worker``.
-        file_ext:   Original file extension (without dot, e.g. ``"step"``).
-                    Used to determine whether to output overlay in meters
-                    so Babylon's scale-correction factor aligns correctly.
     """
     try:
-        from core.overlay_generator import generate_overlay_glb
+        from core.overlay_generator import generate_multi_body_overlay_glb, generate_overlay_glb
     except ImportError:
         return {}
 
     result: dict[str, bytes] = {}
 
-    # STEP/IGES: viewer GLB is in meters (cascadio); Babylon applies scaleFactor≈1000
-    # to both main model and overlays.  Export overlay in meters so Babylon's
-    # rescaling yields the correct final scale and the overlay aligns with the model.
-    output_in_meters = file_ext.lower() in ("step", "stp", "iges", "igs")
+    # The viewer GLB is always in mm for all formats — _export_glb_worker converts
+    # cascadio's meter-scale output to mm before upload. No unit conversion needed here.
 
     try:
         mesh = trimesh.load(io.BytesIO(stl_bytes), file_type="stl", force="mesh")
@@ -2013,6 +2015,17 @@ def _generate_overlays_worker(
             return result
 
         center = mesh.center_mass
+
+        # Multi-body overlay: split the mesh into connected components and
+        # tint each body a distinct colour so the user can see the separation.
+        bodies = mesh.split(only_watertight=False)
+        if len(bodies) > 1:
+            try:
+                multi_body_glb = generate_multi_body_overlay_glb(bodies, center)
+                if multi_body_glb:
+                    result["GENERAL__multi_body"] = multi_body_glb
+            except Exception as _mb_err:
+                logger.debug("Multi-body overlay GLB failed: %s", _mb_err)
 
         for process_code, report in reports.items():
             if process_code == "CNC_TURN":
@@ -2042,7 +2055,6 @@ def _generate_overlays_worker(
                         category,
                         center,
                         severity_per_face,
-                        output_in_meters=output_in_meters,
                     )
                     if glb:
                         result[key] = glb
@@ -2140,11 +2152,12 @@ class GeometryProcessor:
             else:
                 mesh_data = trimesh.load(file_stream, file_type=ext, force="mesh")
                 if isinstance(mesh_data, trimesh.Scene):
-                    if len(mesh_data.geometry) > 1:
-                        raise ValueError("MULTI_BODY_ERROR")
                     if not mesh_data.geometry:
                         raise ValueError("EMPTY_FILE_ERROR")
-                    mesh = cast(trimesh.Trimesh, list(mesh_data.geometry.values())[0])
+                    dumped_mesh2 = mesh_data.dump(concatenate=True)
+                    if not isinstance(dumped_mesh2, trimesh.Trimesh) or len(dumped_mesh2.vertices) == 0:
+                        raise ValueError("EMPTY_FILE_ERROR")
+                    mesh = dumped_mesh2
                 else:
                     mesh = cast(trimesh.Trimesh, mesh_data)
 

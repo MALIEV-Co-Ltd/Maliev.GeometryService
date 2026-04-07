@@ -252,9 +252,11 @@ class DfmAnalysisReadyPayload(BaseModel):
     sla_report: SlaDfmReport | None = Field(alias="slaReport", default=None)
     cnc_report: CncDfmReport | None = Field(alias="cncReport", default=None)
     analyzed_at: datetime = Field(alias="analyzedAt")
-    # Overlay GLB storage paths keyed by "{PROCESS}__{category}" (e.g. "FDM__thin_wall").
+    # Overlay GLB storage paths keyed by "{PROCESS}__{category}" or "GENERAL__{category}".
     # Frontend loads these on-demand when a DFM issue is clicked.
     overlay_paths: dict[str, str] | None = Field(alias="overlayPaths", default=None)
+    # Number of distinct bodies/shells detected in the mesh. >1 means multi-body.
+    body_count: int | None = Field(alias="bodyCount", default=None)
 
 
 class DfmAnalysisReadyMessageBody(BaseMessageBody):

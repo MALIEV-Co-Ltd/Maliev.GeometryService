@@ -514,7 +514,6 @@ class UploadConsumer:
                                                     _generate_overlays_worker,
                                                     mesh_stl_bytes,
                                                     reports,
-                                                    cad_ext,
                                                 ),
                                                 timeout=120,
                                             )
@@ -603,6 +602,7 @@ class UploadConsumer:
                                                 else None,
                                                 analyzedAt=_now,
                                                 overlayPaths=overlay_paths or None,
+                                                bodyCount=metrics_result.get("body_count"),
                                             ),
                                         ),
                                     )

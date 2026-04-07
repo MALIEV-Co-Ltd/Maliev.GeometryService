@@ -6,8 +6,8 @@ These overlays are loaded on-demand in the BabylonJS viewer when a user clicks
 a DFM issue in the overlay panel.
 
 Coordinate conventions match _export_glb_worker in geometry.py:
-- Input mesh is in mm, Z-up
-- Output GLB is Y-up (glTF spec), mm
+- Input mesh is in mm, Z-up (all formats, including STEP/IGES via cascadio)
+- Output GLB is Y-up (glTF spec), mm, centered
 - Apply the same Z→Y pre-rotation so overlays align with the main GLB
 """
 
@@ -81,7 +81,6 @@ def generate_overlay_glb(
     category: str,
     reference_center: "np.ndarray | None" = None,
     severity_per_face: dict[int, float] | None = None,
-    output_in_meters: bool = False,
 ) -> bytes | None:
     """Extract faces from *mesh* by index, apply vertex colours, export GLB.
 
@@ -143,18 +142,76 @@ def generate_overlay_glb(
         # Z-up → Y-up (same pre-rotation as _export_glb_worker)
         submesh.apply_transform(_Z_TO_YUP)
 
-        # For STEP/IGES files the main viewer GLB is in meters (cascadio output).
-        # Babylon applies scaleFactor ≈ 1000 to both the main model and overlays.
-        # Convert overlay from mm → meters so Babylon's rescaling yields the correct scale.
-        if output_in_meters:
-            submesh.apply_scale(0.001)
-
         glb_bytes: bytes = submesh.export(file_type="glb")
         return glb_bytes
 
     except Exception as exc:
         logger.warning("overlay GLB generation failed for category=%s: %s",
                        category, exc)
+        return None
+
+
+def generate_multi_body_overlay_glb(
+    bodies: "list",  # list[trimesh.Trimesh]
+    reference_center: "np.ndarray | None" = None,
+) -> bytes | None:
+    """Build a single GLB where each body is tinted a distinct colour.
+
+    Bodies are coloured in sequence from a fixed palette (red, blue, green,
+    magenta, cyan, orange, yellow, purple) so viewers can tell them apart.
+    The GLB uses the same centering and Z→Y rotation as the main viewer GLB.
+
+    Args:
+        bodies:           List of trimesh.Trimesh objects in Z-up, mm.
+        reference_center: Centre-of-mass of the full concatenated mesh.
+                          Pass the same value used for the main GLB export.
+
+    Returns:
+        GLB bytes or None on failure.
+    """
+    import trimesh
+
+    _BODY_PALETTE: list[tuple[int, int, int, int]] = [
+        (220,  40,  40, 210),   # red
+        ( 40,  80, 220, 210),   # blue
+        ( 30, 160,  30, 210),   # green
+        (180,   0, 180, 210),   # magenta
+        (  0, 180, 180, 210),   # cyan
+        (220, 120,   0, 210),   # orange
+        (180, 180,   0, 210),   # yellow
+        (100,   0, 180, 210),   # purple
+    ]
+
+    try:
+        if not bodies:
+            return None
+
+        colored: list = []
+        for i, body in enumerate(bodies):
+            if not isinstance(body, trimesh.Trimesh) or len(body.vertices) == 0:
+                continue
+            color = _BODY_PALETTE[i % len(_BODY_PALETTE)]
+            face_colors = np.full((len(body.faces), 4), color, dtype=np.uint8)
+            body = body.copy()
+            body.visual = trimesh.visual.ColorVisuals(mesh=body, face_colors=face_colors)
+            colored.append(body)
+
+        if not colored:
+            return None
+
+        combined = trimesh.util.concatenate(colored)
+        if not isinstance(combined, trimesh.Trimesh) or len(combined.vertices) == 0:
+            return None
+
+        center = reference_center if reference_center is not None else combined.center_mass
+        combined.apply_translation(-center)
+        combined.apply_transform(_Z_TO_YUP)
+
+        glb_bytes: bytes = combined.export(file_type="glb")
+        return glb_bytes
+
+    except Exception as exc:
+        logger.warning("multi-body overlay GLB generation failed: %s", exc)
         return None
 
 
