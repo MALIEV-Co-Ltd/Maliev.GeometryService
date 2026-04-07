@@ -542,7 +542,28 @@ def detect_small_features(
         vertices = mesh.vertices
         face_centroids_arr = mesh.triangles_center
 
-        # Faces where all three edges are short
+        # Pre-compute per-face dihedral angles to neighbours (used for curvature filtering).
+        # A face sitting on a smooth curved surface has low dihedral angles to all neighbours
+        # (small angle between face normals → smooth tessellation, not a real feature).
+        try:
+            face_adj_pairs = mesh.face_adjacency          # (N, 2) face pairs sharing an edge
+            adj_angles = mesh.face_adjacency_angles       # (N,) dihedral angle per pair (radians)
+            # Build per-face max-dihedral-angle map: max angle to any adjacent face.
+            max_dihedral = np.zeros(len(mesh.faces), dtype=float)
+            for (fa, fb), angle in zip(face_adj_pairs, adj_angles):
+                if angle > max_dihedral[fa]:
+                    max_dihedral[fa] = angle
+                if angle > max_dihedral[fb]:
+                    max_dihedral[fb] = angle
+            # Threshold: ~5° in radians.  Faces with all neighbours below this are
+            # on smooth curved surfaces (tessellation artifact, not a real sharp feature).
+            _SMOOTH_THRESHOLD = 0.09  # radians ≈ 5°
+        except Exception:
+            max_dihedral = None
+            _SMOOTH_THRESHOLD = 0.09
+
+        # Faces where all three edges are short AND at least one neighbour has a
+        # significant dihedral angle (indicating a genuine geometric boundary).
         small_face_set: set[int] = set()
         for fidx, face in enumerate(mesh.faces):
             verts = [vertices[int(v)] for v in face]
@@ -551,8 +572,12 @@ def detect_small_features(
                 float(np.linalg.norm(verts[2] - verts[1])),
                 float(np.linalg.norm(verts[0] - verts[2])),
             )
-            if max_edge < min_size_mm:
-                small_face_set.add(fidx)
+            if max_edge >= min_size_mm:
+                continue
+            # Skip triangles on smooth surfaces — they are tessellation density, not features.
+            if max_dihedral is not None and max_dihedral[fidx] < _SMOOTH_THRESHOLD:
+                continue
+            small_face_set.add(fidx)
 
         if not small_face_set:
             return 0, [], []
@@ -595,12 +620,25 @@ def detect_small_features(
             if not cluster:
                 continue
 
+            # Reject oversized clusters — a long curved strip produces many small
+            # triangles that join into a large cluster with no real small feature.
+            if len(cluster) > 50:
+                continue
+
             cluster_verts = np.array(
                 [vertices[v] for f in cluster for v in mesh.faces[f]]
             )
             extents = cluster_verts.max(axis=0) - cluster_verts.min(axis=0)
             diag = float(np.linalg.norm(extents))
             if diag < min_size_mm * 2:
+                # Surface-area guard: reject clusters whose area is smaller than
+                # a circular pocket of min_size_mm radius (likely just noise).
+                cluster_area = sum(
+                    float(mesh.area_faces[f]) for f in cluster if f < len(mesh.area_faces)
+                )
+                min_area = math.pi * (min_size_mm / 2) ** 2 * 0.25
+                if cluster_area < min_area:
+                    continue
                 centroid = cluster_verts.mean(axis=0)
                 centroids.append(
                     [float(centroid[0]), float(centroid[1]), float(centroid[2])]
@@ -612,6 +650,97 @@ def detect_small_features(
         logger.warning("small feature detection failed: %s", exc)
 
     return count, centroids[:100], face_indices[:500]
+
+
+def detect_small_features_occ(
+    occ_features: "list",  # list[OccFeature]
+    min_size_mm: float,
+    mesh: "trimesh.Trimesh | None" = None,
+    radius_factor: float = 2.0,
+    max_overlay_faces: int = 500,
+) -> tuple[int, list[list[float]], list[int]]:
+    """Detect features smaller than min_size_mm using CAD B-Rep topology.
+
+    Uses OCC-extracted feature data instead of triangle edge lengths, so
+    tessellation density on curved surfaces does not produce false positives.
+
+    For each OCC feature the "feature size" is derived from geometry:
+    - cylinder / hole: ``2 * radius_mm``
+    - torus fillet:    ``2 * minor_radius_mm``
+    - planar / freeform: ``sqrt(area_mm2)``
+    - cone:            ``2 * apex_radius_mm``
+
+    Overlay face indices are resolved by a spatial search: for each flagged
+    feature, the nearest STL triangles within ``feature_size_mm * radius_factor``
+    of the feature centroid are collected from *mesh*.  This avoids the
+    OCC-tessellation ↔ cascadio-tessellation index mismatch entirely.
+
+    Args:
+        occ_features:      OCC feature list from ``analyze_step_brep``.
+        min_size_mm:       Minimum acceptable feature size in mm.
+        mesh:              Cascadio-produced trimesh (Z-up, mm) for face lookup.
+                           If None, face_indices will be empty.
+        radius_factor:     Search radius multiplier applied to feature_size_mm.
+        max_overlay_faces: Cap on returned face indices.
+
+    Returns:
+        (count, centroids, face_indices)
+    """
+    count = 0
+    centroids: list[list[float]] = []
+    face_indices: list[int] = []
+
+    try:
+        import math as _math
+
+        # Pre-compute triangle centroids once if mesh is provided.
+        tri_centroids: "np.ndarray | None" = None
+        if mesh is not None and hasattr(mesh, "triangles_center"):
+            try:
+                tri_centroids = np.asarray(mesh.triangles_center)
+            except Exception:
+                pass
+
+        for feat in occ_features:
+            params = feat.parameters if hasattr(feat, "parameters") else {}
+            feat_type = feat.feature_type if hasattr(feat, "feature_type") else ""
+            area_mm2 = float(feat.area_mm2) if hasattr(feat, "area_mm2") else 0.0
+            centroid = feat.centroid if hasattr(feat, "centroid") else None
+
+            # Derive canonical "feature size" from CAD geometry
+            if "radius_mm" in params and not params.get("is_torus"):
+                feature_size_mm = 2.0 * float(params["radius_mm"])
+            elif params.get("is_torus") and "radius_mm" in params:
+                feature_size_mm = 2.0 * float(params["radius_mm"])
+            elif "apex_radius_mm" in params:
+                feature_size_mm = 2.0 * float(params["apex_radius_mm"])
+            elif area_mm2 > 0:
+                feature_size_mm = _math.sqrt(area_mm2)
+            else:
+                continue  # not enough information
+
+            if feature_size_mm >= min_size_mm:
+                continue  # feature is large enough — not a DFM concern
+
+            if centroid is None:
+                continue
+
+            count += 1
+            centroids.append([float(centroid[0]), float(centroid[1]), float(centroid[2])])
+
+            # Spatial face lookup in the STL mesh
+            if tri_centroids is not None and len(face_indices) < max_overlay_faces:
+                search_r = max(feature_size_mm * radius_factor, min_size_mm * 1.5)
+                c = np.array([float(centroid[0]), float(centroid[1]), float(centroid[2])])
+                dists = np.linalg.norm(tri_centroids - c, axis=1)
+                nearby = np.where(dists <= search_r)[0].tolist()
+                remaining = max_overlay_faces - len(face_indices)
+                face_indices.extend(nearby[:remaining])
+
+    except Exception as exc:
+        logger.warning("OCC-based small feature detection failed: %s", exc)
+
+    return count, centroids[:100], face_indices[:max_overlay_faces]
 
 
 # ---------------------------------------------------------------------------

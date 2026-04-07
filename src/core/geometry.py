@@ -1383,6 +1383,7 @@ def _compute_dfm_worker(
             detect_holes_mesh,
             detect_hollow_regions,
             detect_small_features,
+            detect_small_features_occ,
             detect_thin_pins,
         )
         from src.core.cnc_analyzers import (
@@ -1570,10 +1571,16 @@ def _compute_dfm_worker(
                         }
                     )
 
-            # Small features
-            sf_count, sf_centroids, sf_face_idx = detect_small_features(
-                mesh, rules.min_feature_mm
-            )
+            # Small features — use CAD topology when available (STEP/IGES) to avoid
+            # false positives from tessellation density on curved surfaces.
+            if occ_features:
+                sf_count, sf_centroids, sf_face_idx = detect_small_features_occ(
+                    occ_features, rules.min_feature_mm, mesh
+                )
+            else:
+                sf_count, sf_centroids, sf_face_idx = detect_small_features(
+                    mesh, rules.min_feature_mm
+                )
             if sf_count > 0:
                 issues.append(
                     {
