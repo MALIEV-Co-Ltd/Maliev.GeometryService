@@ -21,6 +21,11 @@ from src.infrastructure.storage import HttpDownloadService
 # Set up basic logging immediately
 logging.basicConfig(level=logging.INFO)
 
+# Enable faulthandler to catch segfaults in worker processes
+import faulthandler
+faulthandler.enable(file=sys.stderr, all_threads=True)
+logging.getLogger(__name__).info("Faulthandler enabled for crash diagnostics")
+
 # Initialize observability as early as possible to capture startup diagnostics
 setup_observability()
 
@@ -152,6 +157,271 @@ async def telemetry_test() -> JSONResponse:
             "service": "maliev-geometryservice",
         }
     )
+
+
+# Storage for file data during two-phase analysis
+# In production, this should be replaced with a proper cache (Redis, etc.)
+_file_analysis_cache: dict[str, dict[str, bytes | str]] = {}
+
+
+@router.post("/uploads/{upload_id}/quality-check", tags=["DFM Analysis"])
+async def quality_check(upload_id: str, file_data: dict) -> JSONResponse:
+    """Phase 1: Quick quality check on uploaded file.
+
+    Performs fast quality checks (<5 seconds) to determine if file is valid:
+    - Manifold/watertight check
+    - Multi-body detection
+    - Basic geometry metrics (volume, bounding box, surface area)
+
+    Returns immediately so user can see file preview and select manufacturing process.
+
+    Args:
+        upload_id: Unique identifier for this upload
+        file_data: Dictionary with keys:
+            - stl_bytes: Base64-encoded STL file data (required)
+            - cad_bytes: Optional base64-encoded CAD file data (STEP/IGES)
+            - cad_extension: CAD file extension (e.g., "step", "stp")
+
+    Returns:
+        Quality check results with file metrics and validation status
+    """
+    import base64
+    from src.core.geometry import _quick_quality_check
+
+    try:
+        # Decode file data
+        stl_bytes = base64.b64decode(file_data.get("stl_bytes", ""))
+        cad_bytes_b64 = file_data.get("cad_bytes")
+        cad_bytes = base64.b64decode(cad_bytes_b64) if cad_bytes_b64 else None
+        cad_extension = file_data.get("cad_extension")
+
+        # Perform quality check
+        quality_result = _quick_quality_check(stl_bytes, cad_bytes, cad_extension)
+
+        # Store file data for Phase 2 (process-specific analysis)
+        # In production, this should use proper cache with TTL
+        _file_analysis_cache[upload_id] = {
+            "stl_bytes": stl_bytes,
+            "cad_bytes": cad_bytes,
+            "cad_extension": cad_extension,
+        }
+
+        logger.info(
+            f"Quality check completed for {upload_id}",
+            extra={
+                "upload_id": upload_id,
+                "face_count": quality_result.get("face_count"),
+                "complexity": quality_result.get("complexity"),
+                "is_manifold": quality_result.get("is_manifold"),
+            },
+        )
+
+        return JSONResponse(
+            content={
+                "upload_id": upload_id,
+                "status": "quality_check_complete",
+                "quality": quality_result,
+                "ready_for_process_selection": True,
+            }
+        )
+
+    except Exception as e:
+        logger.error(
+            f"Quality check failed for {upload_id}: {e}",
+            extra={"upload_id": upload_id, "error": str(e)},
+            exc_info=True,
+        )
+        return JSONResponse(
+            content={
+                "upload_id": upload_id,
+                "status": "error",
+                "error_type": type(e).__name__,
+                "message": str(e),
+            },
+            status_code=500,
+        )
+
+
+@router.post("/uploads/{upload_id}/dfm/{process_code}", tags=["DFM Analysis"])
+async def analyze_for_process(
+    upload_id: str, process_code: str, timeout: int = 30
+) -> JSONResponse:
+    """Phase 2: Process-specific DFM analysis.
+
+    Run DFM analysis for a SPECIFIC manufacturing process only.
+    Triggered when user selects "FDM 3D Printing", "CNC Milling", etc.
+    Completes in <15 seconds for typical files.
+
+    Args:
+        upload_id: Unique identifier for this upload (must have completed quality check)
+        process_code: Manufacturing process code (e.g., "FDM", "SLA", "CNC_MILL", "CNC_TURN")
+        timeout: Maximum analysis time in seconds (default: 30)
+
+    Returns:
+        Process-specific DFM report with issues found for the selected manufacturing method
+    """
+    from src.core.geometry import _analyze_single_process
+    from src.core.geometry_optimizations import get_cached_result, cache_result
+
+    # Check if file data is available from quality check
+    if upload_id not in _file_analysis_cache:
+        return JSONResponse(
+            content={
+                "upload_id": upload_id,
+                "status": "error",
+                "error_type": "NotFound",
+                "message": "Upload not found. Please run quality check first.",
+            },
+            status_code=404,
+        )
+
+    try:
+        # Retrieve stored file data
+        file_data = _file_analysis_cache[upload_id]
+        stl_bytes = file_data["stl_bytes"]
+        cad_bytes = file_data.get("cad_bytes")
+        cad_extension = file_data.get("cad_extension")
+
+        # OPTIMIZATION: Check cache for existing results
+        cached = get_cached_result(stl_bytes, process_code)
+        if cached is not None:
+            logger.info(
+                f"Cache hit for {upload_id}/{process_code} - returning cached result",
+                extra={
+                    "upload_id": upload_id,
+                    "process_code": process_code,
+                    "cache_status": "hit",
+                },
+            )
+            return JSONResponse(
+                content={
+                    "upload_id": upload_id,
+                    "process_code": process_code,
+                    "status": "analysis_complete",
+                    "dfm_report": cached,
+                    "cache_status": "hit",
+                }
+            )
+
+        # Run process-specific analysis with timeout
+        loop = asyncio.get_event_loop()
+
+        # Use run_in_executor to run in thread pool (prevents blocking)
+        # with timeout to prevent indefinite hangs
+        result = await asyncio.wait_for(
+            loop.run_in_executor(
+                None,
+                lambda: _analyze_single_process(
+                    stl_bytes, process_code, cad_bytes, cad_extension
+                ),
+            ),
+            timeout=timeout,
+        )
+
+        # Check if analysis failed
+        if "error_type" in result:
+            logger.error(
+                f"Process analysis failed for {upload_id}/{process_code}: {result.get('message')}",
+                extra={
+                    "upload_id": upload_id,
+                    "process_code": process_code,
+                    "error_type": result.get("error_type"),
+                },
+            )
+            return JSONResponse(
+                content={
+                    "upload_id": upload_id,
+                    "process_code": process_code,
+                    "status": "error",
+                    **result,
+                },
+                status_code=500,
+            )
+
+        logger.info(
+            f"Process analysis completed for {upload_id}/{process_code}",
+            extra={
+                "upload_id": upload_id,
+                "process_code": process_code,
+                "issues_count": len(result.get("issues", [])),
+                "analysis_time_seconds": result.get("analysis_time_seconds"),
+            },
+        )
+
+        # OPTIMIZATION: Cache the result for future use
+        cache_result(stl_bytes, process_code, result)
+        logger.info(
+            f"Cached result for {upload_id}/{process_code}",
+            extra={"upload_id": upload_id, "process_code": process_code, "cache_status": "cached"},
+        )
+
+        return JSONResponse(
+            content={
+                "upload_id": upload_id,
+                "process_code": process_code,
+                "status": "analysis_complete",
+                "dfm_report": result,
+                "cache_status": "cold",  # First-time computation
+            }
+        )
+
+    except asyncio.TimeoutError:
+        logger.error(
+            f"Process analysis timed out after {timeout}s for {upload_id}/{process_code}",
+            extra={"upload_id": upload_id, "process_code": process_code, "timeout": timeout},
+        )
+        return JSONResponse(
+            content={
+                "upload_id": upload_id,
+                "process_code": process_code,
+                "status": "timeout",
+                "error_type": "TimeoutError",
+                "message": f"Analysis timed out after {timeout} seconds",
+            },
+            status_code=504,
+        )
+
+    except Exception as e:
+        logger.error(
+            f"Process analysis failed for {upload_id}/{process_code}: {e}",
+            extra={"upload_id": upload_id, "process_code": process_code, "error": str(e)},
+            exc_info=True,
+        )
+        return JSONResponse(
+            content={
+                "upload_id": upload_id,
+                "process_code": process_code,
+                "status": "error",
+                "error_type": type(e).__name__,
+                "message": str(e),
+            },
+            status_code=500,
+        )
+
+
+@router.delete("/uploads/{upload_id}", tags=["DFM Analysis"])
+async def cleanup_upload(upload_id: str) -> JSONResponse:
+    """Clean up cached file data for an upload.
+
+    Should be called when user navigates away or completes the workflow.
+
+    Args:
+        upload_id: Unique identifier for the upload to clean up
+
+    Returns:
+        Confirmation of cleanup
+    """
+    if upload_id in _file_analysis_cache:
+        del _file_analysis_cache[upload_id]
+        logger.info(f"Cleaned up upload data for {upload_id}")
+        return JSONResponse(
+            content={"upload_id": upload_id, "status": "cleaned_up"}
+        )
+    else:
+        return JSONResponse(
+            content={"upload_id": upload_id, "status": "not_found"},
+            status_code=404,
+        )
 
 
 # Also add mirroring endpoints to the root app for extra robustness

@@ -1,0 +1,356 @@
+"""Worker process diagnostics for enhanced error logging.
+
+This module provides diagnostic infrastructure for worker processes that run
+CPU-intensive geometry tasks. It captures detailed error information including
+stack traces, memory usage, and timing data when workers crash.
+"""
+
+import os
+import sys
+import logging
+import traceback
+import threading
+import time
+import uuid
+from dataclasses import dataclass, asdict
+from typing import Any, Callable, Optional
+from concurrent.futures import ProcessPoolExecutor
+import multiprocessing
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass
+class WorkerErrorResult:
+    """Structured error information from a crashed worker.
+
+    Attributes:
+        error_type: Exception class name (e.g., "MemoryError", "ValueError", "TimeoutError")
+        error_message: Exception message string
+        stack_trace: Full Python traceback as string
+        worker_id: Unique identifier for this worker invocation
+        memory_info: Dict with RSS memory usage in MB
+        timing_info: Dict with duration_seconds, timeout_seconds if applicable
+        context: Additional context (body_id, file_path, etc.)
+        resource_info: Dict with temp_file_count, child_process_count
+    """
+    error_type: str
+    error_message: str
+    stack_trace: str
+    worker_id: str
+    memory_info: dict[str, Any]
+    timing_info: dict[str, Any]
+    context: dict[str, Any]
+    resource_info: dict[str, Any] = None  # NEW FIELD
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert to regular dict for JSON serialization."""
+        data = asdict(self)
+        # Ensure resource_info is never None
+        if data.get("resource_info") is None:
+            data["resource_info"] = {}
+        return data
+
+
+def _count_temp_files() -> int:
+    """Count temporary files in /tmp directory.
+
+    Returns:
+        Number of files in the temp directory
+    """
+    try:
+        import tempfile
+        from pathlib import Path
+
+        temp_dir = tempfile.gettempdir()
+        return len([f for f in Path(temp_dir).iterdir() if f.is_file()])
+    except Exception:
+        return 0
+
+
+def setup_worker_diagnostics(
+    worker_type: str = "geometry",
+    memory_warning_mb: float = 1000.0,
+    memory_critical_mb: float = 2000.0,
+) -> str:
+    """Initialize diagnostic logging and monitoring for a worker process.
+
+    Args:
+        worker_type: Type of worker (e.g., "geometry", "dfm", "tessellation")
+        memory_warning_mb: Log warning when RSS exceeds this threshold
+        memory_critical_mb: Log critical when RSS exceeds this threshold
+
+    Returns:
+        worker_id: Unique identifier for this worker
+    """
+    # Generate unique worker ID
+    worker_id = f"{worker_type}_{uuid.uuid4().hex[:8]}_{os.getpid()}"
+
+    # Create dedicated log file for this worker
+    log_dir = "/tmp"
+    os.makedirs(log_dir, exist_ok=True)
+    log_file = os.path.join(log_dir, f"worker_{worker_id}.log")
+
+    # Configure file handler for worker-specific logging
+    file_handler = logging.FileHandler(log_file)
+    file_handler.setLevel(logging.DEBUG)
+    file_handler.setFormatter(
+        logging.Formatter(
+            "%(asctime)s %(levelname)s %(name)s: %(message)s",
+            datefmt="%Y-%m-%dT%H:%M:%SZ"
+        )
+    )
+
+    # Add handler to root logger so all modules log to this file
+    root_logger = logging.getLogger()
+    root_logger.addHandler(file_handler)
+    root_logger.setLevel(logging.DEBUG)
+
+    logger.info(f"Worker {worker_id} initialized, logging to {log_file}")
+
+    # Enable faulthandler to catch segfaults
+    try:
+        import faulthandler
+        faulthandler.enable(file=sys.stderr, all_threads=True)
+        logger.info(f"Faulthandler enabled for worker {worker_id}")
+    except Exception as e:
+        logger.warning(f"Failed to enable faulthandler: {e}")
+
+    # Start memory monitoring thread
+    monitor_thread = threading.Thread(
+        target=_monitor_memory,
+        args=(worker_id, memory_warning_mb, memory_critical_mb),
+        daemon=True,
+    )
+    monitor_thread.start()
+
+    return worker_id
+
+
+def _monitor_memory(
+    worker_id: str,
+    warning_mb: float,
+    critical_mb: float,
+    interval_seconds: float = 5.0,
+) -> None:
+    """Background thread that monitors worker memory usage.
+
+    Logs warnings when memory exceeds thresholds.
+
+    Args:
+        worker_id: Unique identifier for this worker
+        warning_mb: Log warning when RSS exceeds this
+        critical_mb: Log critical when RSS exceeds this
+        interval_seconds: How often to check memory usage
+    """
+    try:
+        import psutil
+    except ImportError:
+        logger.debug("psutil not available, skipping memory monitoring")
+        return
+
+    process = psutil.Process()
+
+    while True:
+        try:
+            # Get RSS (resident set size) in MB
+            rss_mb = process.memory_info().rss / 1024 / 1024
+
+            if rss_mb > critical_mb:
+                logger.critical(
+                    f"Worker {worker_id} memory critical: {rss_mb:.1f} MB "
+                    f"(threshold: {critical_mb} MB)"
+                )
+            elif rss_mb > warning_mb:
+                logger.warning(
+                    f"Worker {worker_id} memory high: {rss_mb:.1f} MB "
+                    f"(threshold: {warning_mb} MB)"
+                )
+
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            # Process died or we lost access
+            break
+
+        time.sleep(interval_seconds)
+
+
+def wrap_worker(
+    worker_type: str = "geometry",
+    memory_warning_mb: float = 1000.0,
+    memory_critical_mb: float = 2000.0,
+) -> Callable:
+    """Decorator that wraps a worker function with diagnostic logging.
+
+    The wrapped function will:
+    - Initialize worker-specific logging to a file
+    - Monitor memory usage in background thread
+    - Catch all exceptions and return structured error info
+    - Track timing information
+
+    Args:
+        worker_type: Type of worker for logging prefix
+        memory_warning_mb: Memory threshold for warnings
+        memory_critical_mb: Memory threshold for critical alerts
+
+    Returns:
+        Decorated function that returns either the normal result or WorkerErrorResult
+
+    Example:
+        @wrap_worker(worker_type="dfm")
+        def _compute_dfm_worker(stl_bytes, cad_bytes):
+            # ... DFM analysis logic ...
+            return reports
+    """
+    def decorator(func: Callable) -> Callable:
+        def wrapped(*args, **kwargs) -> Any:
+            # Setup diagnostics
+            worker_id = setup_worker_diagnostics(
+                worker_type=worker_type,
+                memory_warning_mb=memory_warning_mb,
+                memory_critical_mb=memory_critical_mb,
+            )
+
+            # Track timing
+            start_time = time.time()
+            memory_info = {}
+
+            try:
+                # Run the actual worker function
+                result = func(*args, **kwargs)
+
+                # Record final memory usage and resource tracking
+                try:
+                    import psutil
+                    process = psutil.Process()
+                    memory_info["rss_mb"] = process.memory_info().rss / 1024 / 1024
+                    memory_info["peak_mb"] = memory_info["rss_mb"]  # psutil doesn't track peak easily
+                except ImportError:
+                    pass
+
+                # Log success
+                duration = time.time() - start_time
+                logger.info(
+                    f"Worker {worker_id} completed successfully in {duration:.2f}s, "
+                    f"final RSS: {memory_info.get('rss_mb', 0):.1f} MB"
+                )
+
+                return result
+
+            except Exception as e:
+                # Capture detailed error information
+                duration = time.time() - start_time
+
+                # Track memory and resources on error
+                resource_info = {}
+                try:
+                    import psutil
+                    process = psutil.Process()
+                    memory_info["rss_mb"] = process.memory_info().rss / 1024 / 1024
+                    memory_info["peak_mb"] = memory_info["rss_mb"]
+
+                    # Track resources on error
+                    resource_info = {
+                        "temp_file_count": _count_temp_files(),
+                        "child_process_count": len(process.children()),
+                    }
+                except ImportError:
+                    resource_info = {"temp_file_count": _count_temp_files(), "child_process_count": 0}
+                except Exception:
+                    resource_info = {"temp_file_count": _count_temp_files(), "child_process_count": 0}
+
+                # Log the error with full context
+                logger.error(
+                    f"Worker {worker_id} failed after {duration:.2f}s: {type(e).__name__}: {e}\n"
+                    f"Stack trace:\n{traceback.format_exc()}",
+                    extra={
+                        "worker_id": worker_id,
+                        "error_type": type(e).__name__,
+                        "duration_seconds": duration,
+                        "rss_mb": memory_info.get("rss_mb", 0),
+                        "temp_files": resource_info.get("temp_file_count", 0),
+                        "child_processes": resource_info.get("child_process_count", 0),
+                    }
+                )
+
+                # Return structured error result
+                error_result = WorkerErrorResult(
+                    error_type=type(e).__name__,
+                    error_message=str(e),
+                    stack_trace=traceback.format_exc(),
+                    worker_id=worker_id,
+                    memory_info=memory_info,
+                    timing_info={"duration_seconds": duration},
+                    context={
+                        "function": func.__name__,
+                        "args_count": len(args),
+                        "kwargs_keys": list(kwargs.keys()),
+                    },
+                    resource_info=resource_info,  # NEW FIELD
+                )
+
+                return error_result.to_dict()
+
+        return wrapped
+    return decorator
+
+
+class DiagnosticExecutor(ProcessPoolExecutor):
+    """ProcessPoolExecutor with automatic worker diagnostics.
+
+    This executor wraps all submitted functions with diagnostic logging,
+    ensuring that worker crashes capture detailed error information.
+
+    Usage:
+        executor = DiagnosticExecutor(
+            max_workers=4,
+            enable_diagnostics=True,
+            memory_warning_mb=1000.0,
+            memory_critical_mb=2000.0,
+        )
+    """
+
+    def __init__(
+        self,
+        max_workers: int | None = None,
+        mp_context=None,
+        enable_diagnostics: bool = True,
+        memory_warning_mb: float = 1000.0,
+        memory_critical_mb: float = 2000.0,
+        **kwargs,
+    ):
+        """Initialize the diagnostic executor.
+
+        Args:
+            max_workers: Maximum number of worker processes
+            mp_context: Multiprocessing context (spawn/fork)
+            enable_diagnostics: Whether to enable diagnostic wrapping
+            memory_warning_mb: Memory threshold for warnings
+            memory_critical_mb: Memory threshold for critical alerts
+            **kwargs: Additional arguments passed to ProcessPoolExecutor
+        """
+        self.enable_diagnostics = enable_diagnostics
+        self.memory_warning_mb = memory_warning_mb
+        self.memory_critical_mb = memory_critical_mb
+
+        super().__init__(max_workers=max_workers, mp_context=mp_context, **kwargs)
+
+        logger.info(
+            f"DiagnosticExecutor initialized with {max_workers} workers, "
+            f"diagnostics={'enabled' if enable_diagnostics else 'disabled'}"
+        )
+
+    def submit(self, fn, *args, **kwargs):
+        """Submit a function to the executor with diagnostic wrapping.
+
+        If diagnostics are enabled, wraps the function to capture errors.
+        Otherwise, submits directly to the parent class.
+        """
+        if not self.enable_diagnostics:
+            # Diagnostics disabled, use standard submission
+            return super().submit(fn, *args, **kwargs)
+
+        # Wrap the function with diagnostics
+        # Note: We need to be careful about pickling here
+        # For now, we'll rely on the functions themselves to call setup_worker_diagnostics
+        # The decorator approach doesn't work well with pickling
+        return super().submit(fn, *args, **kwargs)

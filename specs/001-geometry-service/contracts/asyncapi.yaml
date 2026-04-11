@@ -26,6 +26,10 @@ channels:
 
     messages:
 
+      FileMetricsReadyEvent:
+
+        $ref: '#/components/messages/FileMetricsReadyEvent'
+
       FileAnalyzedEvent:
 
         $ref: '#/components/messages/FileAnalyzedEvent'
@@ -91,6 +95,154 @@ components:
                 type: string
 
                 format: date-time
+
+    FileMetricsReadyEvent:
+
+      payload:
+
+        type: object
+
+        required: [messageId, correlationId, payload]
+
+        properties:
+
+          messageId:
+
+            type: string
+
+            format: uuid
+
+          correlationId:
+
+            type: string
+
+            format: uuid
+
+          payload:
+
+            type: object
+
+            required: [fileId, storagePath, metrics]
+
+            properties:
+
+              fileId:
+
+                type: string
+
+                format: uuid
+
+              storagePath:
+
+                type: string
+
+              metrics:
+
+                type: object
+
+                properties:
+
+                  volumeCm3:
+
+                    type: number
+
+                  surfaceAreaCm2:
+
+                    type: number
+
+                  boundingBox:
+
+                    type: object
+
+                    properties:
+
+                      x:{type: number}
+
+                      y:{type: number}
+
+                      z:{type: number}
+
+                  isManifold:
+
+                    type: boolean
+
+                  eulerNumber:
+
+                    type: integer
+
+                  triangleCount:
+
+                    type: integer
+
+              processedAt:
+
+                type: string
+
+                format: date-time
+
+              bodyCount:
+
+                type: integer
+
+                description: Number of bodies in the CAD file (1 for single-body, >1 for assemblies)
+
+              bodies:
+
+                type: array
+
+                description: Per-body metadata for multi-body files
+
+                items:
+
+                  type: object
+
+                  properties:
+
+                    index:
+
+                      type: integer
+
+                      description: Zero-based body index
+
+                    name:
+
+                      type: string
+
+                      description: Stable body name from glTF node or generated "Body_NN" format
+
+                    volumeCm3:
+
+                      type: number
+
+                      description: Volume of this body in cm³
+
+                    bboxMin:
+
+                      type: object
+
+                      properties:
+
+                        x: {type: number}
+
+                        y: {type: number}
+
+                        z: {type: number}
+
+                      description: Minimum XYZ coordinates in mm
+
+                    bboxMax:
+
+                      type: object
+
+                      properties:
+
+                        x: {type: number}
+
+                        y: {type: number}
+
+                        z: {type: number}
+
+                      description: Maximum XYZ coordinates in mm
 
     FileAnalyzedEvent:
 
@@ -171,6 +323,70 @@ components:
                 type: string
 
                 format: date-time
+
+              bodyCount:
+
+                type: integer
+
+                description: Number of bodies in the CAD file (1 for single-body, >1 for assemblies)
+
+              bodies:
+
+                type: array
+
+                description: Per-body metadata for multi-body files
+
+                items:
+
+                  type: object
+
+                  properties:
+
+                    index:
+
+                      type: integer
+
+                      description: Zero-based body index
+
+                    name:
+
+                      type: string
+
+                      description: Stable body name from glTF node or generated "Body_NN" format
+
+                    volumeCm3:
+
+                      type: number
+
+                      description: Volume of this body in cm³
+
+                    bboxMin:
+
+                      type: object
+
+                      properties:
+
+                        x: {type: number}
+
+                        y: {type: number}
+
+                        z: {type: number}
+
+                      description: Minimum XYZ coordinates in mm
+
+                    bboxMax:
+
+                      type: object
+
+                      properties:
+
+                        x: {type: number}
+
+                        y: {type: number}
+
+                        z: {type: number}
+
+                      description: Maximum XYZ coordinates in mm
 
     FileAnalysisFailedEvent:
 

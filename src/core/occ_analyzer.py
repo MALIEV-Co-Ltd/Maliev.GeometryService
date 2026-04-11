@@ -50,13 +50,23 @@ class OccFeature:
     centroid: list[float] = field(default_factory=lambda: [0.0, 0.0, 0.0])
     normal: list[float] = field(default_factory=lambda: [0.0, 0.0, 1.0])
     area_mm2: float = 0.0
+    # Shortest meaningful dimension of this face (AABB minor axis, mm).
+    # Non-zero for planar faces; used by detect_small_features_occ to avoid
+    # flagging long-thin faces (e.g. slot walls) as "small" based on sqrt(area).
+    bbox_min_mm: float = 0.0
 
 
 def analyze_step_brep(
     cad_bytes: bytes,
     cad_extension: str = "step",
+    process_code: str | None = None,
 ) -> tuple[list[OccFeature], dict[int, list[int]]]:
     """Load STEP/IGES bytes into CadQuery/OCC and extract B-Rep features.
+
+    Args:
+        cad_bytes: STEP/IGES file data as bytes
+        cad_extension: File extension ("step", "stp", "igs", "iges")
+        process_code: Optional manufacturing process code for adaptive tessellation
 
     Returns:
         (features, face_tag_to_tri_indices)
@@ -117,9 +127,48 @@ def analyze_step_brep(
             return [], {}
 
         occ_shape = shape.val().wrapped
+        logger.info(f"OCC: STEP file loaded successfully, size={len(cad_bytes)} bytes")
 
         # Tessellate for face → triangle mapping
-        BRepMesh_IncrementalMesh(occ_shape, 0.05, False, 0.1, True)
+        # OPTIMIZATION: Adaptive tessellation quality based on process type
+        from src.core.geometry_optimizations import get_tessellation_tolerance
+
+        file_size_mb = len(cad_bytes) / (1024 * 1024)
+        tessellation_tolerance = get_tessellation_tolerance(
+            process_code or "DEFAULT", file_size_mb
+        )
+
+        logger.info(
+            f"OCC: Starting B-Rep tessellation (tolerance={tessellation_tolerance}mm, "
+            f"process={process_code or 'DEFAULT'})"
+        )
+        import time
+        start_time = time.time()
+        try:
+            # Adaptive tessellation: CNC needs high precision, printing can be coarser
+            BRepMesh_IncrementalMesh(
+                occ_shape,
+                tessellation_tolerance,  # Adaptive tolerance based on process
+                False,
+                0.5,  # Angular deflection (kept constant)
+                True,
+            )
+            elapsed = time.time() - start_time
+            logger.info(
+                f"OCC: Tessellation completed in {elapsed:.1f}s "
+                f"(tolerance={tessellation_tolerance}mm)"
+            )
+
+            # If tessellation takes too long (>30s), warn and suggest alternatives
+            if elapsed > 30:
+                logger.warning(
+                    f"OCC: Tessellation slow ({elapsed:.1f}s) - consider "
+                    f"disabling B-Rep analysis for this file or using mesh-only DFM"
+                )
+        except Exception as mesh_err:
+            logger.warning(f"OCC: Tessellation failed after {time.time() - start_time:.1f}s: {mesh_err}")
+            # Fall back to empty results rather than crashing
+            return [], {}
 
         explorer = TopExp_Explorer(occ_shape, TopAbs_FACE)
         face_tag = 0
@@ -190,6 +239,24 @@ def analyze_step_brep(
                 if is_reversed:
                     normal = [-n for n in normal]
 
+                # Compute the shortest meaningful dimension of this planar face
+                # so detect_small_features_occ can avoid flagging long-thin faces
+                # (e.g. 40×0.5 mm slot wall) purely because sqrt(area) looks small.
+                planar_bbox_min_mm: float = 0.0
+                if triangulation is not None and triangulation.NbNodes() >= 3:
+                    nb = triangulation.NbNodes()
+                    xs = [triangulation.Node(i).X() for i in range(1, nb + 1)]
+                    ys = [triangulation.Node(i).Y() for i in range(1, nb + 1)]
+                    zs = [triangulation.Node(i).Z() for i in range(1, nb + 1)]
+                    extents = sorted([
+                        max(xs) - min(xs),
+                        max(ys) - min(ys),
+                        max(zs) - min(zs),
+                    ])
+                    # extents[0] ≈ 0 (the face-normal direction for a planar face).
+                    # extents[1] is the short side; extents[2] is the long side.
+                    planar_bbox_min_mm = float(extents[1]) if extents[1] > 1e-3 else float(extents[2])
+
                 features.append(OccFeature(
                     feature_type="planar_face",
                     parameters={
@@ -201,6 +268,7 @@ def analyze_step_brep(
                     centroid=centroid,
                     normal=normal,
                     area_mm2=area_mm2,
+                    bbox_min_mm=planar_bbox_min_mm,
                 ))
 
             elif surf_type == GeomAbs_Torus:

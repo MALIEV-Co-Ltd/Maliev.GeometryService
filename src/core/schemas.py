@@ -5,12 +5,42 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from src.core.geometry import CncDfmReport, FdmDfmReport, GeometryMetrics, SlaDfmReport
+from src.core.geometry import (
+    CncDfmReport,
+    FdmDfmReport,
+    GeometryMetrics,
+    SlaDfmReport,
+)
 
 
 def to_camel(string: str) -> str:
     components = string.split("_")
     return components[0] + "".join(x.title() for x in components[1:])
+
+
+# ---------------------------------------------------------------------------
+# Body metadata for multi-body CAD files
+# ---------------------------------------------------------------------------
+
+
+class BoundingBox(BaseModel):
+    """3D bounding box with XYZ dimensions."""
+
+    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
+    x: float
+    y: float
+    z: float
+
+
+class BodyInfo(BaseModel):
+    """Per-body metadata for multi-body CAD files."""
+
+    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
+    index: int
+    name: str
+    volume_cm3: float | None = Field(alias="volumeCm3", default=None)
+    bbox_min: BoundingBox | None = Field(alias="bboxMin", default=None)
+    bbox_max: BoundingBox | None = Field(alias="bboxMax", default=None)
 
 
 # ---------------------------------------------------------------------------
@@ -129,6 +159,8 @@ class FileAnalyzedPayload(BaseModel):
     dfm_report: FdmDfmReport | SlaDfmReport | CncDfmReport | None = Field(
         alias="dfmReport", default=None
     )
+    body_count: int | None = Field(alias="bodyCount", default=None)
+    bodies: list[BodyInfo] | None = Field(alias="bodies", default=None)
 
 
 class FileAnalyzedMessageBody(BaseMessageBody):
@@ -156,6 +188,8 @@ class FileMetricsReadyPayload(BaseModel):
     storage_path: str = Field(alias="storagePath")
     metrics: GeometryMetrics
     processed_at: datetime = Field(alias="processedAt")
+    body_count: int | None = Field(alias="bodyCount", default=None)
+    bodies: list[BodyInfo] | None = Field(alias="bodies", default=None)
 
 
 class FileMetricsReadyMessageBody(BaseMessageBody):

@@ -1,3 +1,7 @@
+# Production image — targets Kubernetes Engine (Linux).
+# This same image is what Aspire builds locally via AddDockerfile, so local and
+# production environments are identical (python:3.12-slim, OSMesa, Xvfb, gmsh).
+#
 # Stage 1: Build
 FROM python:3.12-slim AS builder
 
@@ -59,6 +63,9 @@ ENV PYVISTA_OFF_SCREEN=true
 ENV MESA_GL_VERSION_OVERRIDE=3.3
 ENV PYTHONPATH=/app
 ENV OTEL_EXPORTER_OTLP_ENDPOINT=
+# Xvfb display — must match the display started in CMD below.
+# Worker subprocesses inherit this env var so they know which display to use.
+ENV DISPLAY=:99
 
 WORKDIR /app
 
@@ -74,4 +81,7 @@ USER appuser
 
 EXPOSE 8081
 
-CMD ["uvicorn", "src.main:app", "--host", "0.0.0.0", "--port", "8081"]
+# Start Xvfb (virtual framebuffer) before uvicorn so PyVista/VTK off-screen
+# rendering works without a real GPU or display.  Without Xvfb, pv.Plotter()
+# hangs indefinitely, blocking all ProcessPoolExecutor workers.
+CMD ["sh", "-c", "Xvfb :99 -screen 0 1024x768x24 -ac +extension GLX +render -noreset & sleep 1 && exec uvicorn src.main:app --host 0.0.0.0 --port 8081"]

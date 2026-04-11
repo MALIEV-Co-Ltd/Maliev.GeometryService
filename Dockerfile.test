@@ -1,5 +1,9 @@
-# Dockerfile for running geometry tests with headless rendering
-# This runs tests inside a Linux container where EGL rendering works
+# Test runner image — Linux container matching the production Kubernetes target.
+# Run with: docker-compose -f docker-compose.test.yml run test-all
+#
+# All tests run inside the same python:3.12-slim + OSMesa + Xvfb stack used in
+# production, so platform-specific failures (headless rendering, Linux-only libs)
+# are caught locally rather than in prod.
 FROM python:3.12-slim
 
 ENV PYTHONUNBUFFERED=1 \
@@ -53,5 +57,5 @@ ENV PYTHONPATH="/app/src:$PYTHONPATH"
 ENV PYVISTA_OFF_SCREEN=true
 ENV MESA_GL_VERSION_OVERRIDE=3.3
 
-# Run tests with verbose output to see preview image generation
-CMD ["poetry", "run", "pytest", "-v", "-s", "tests/test_geometry.py"]
+# Run the full test suite by default (matches CI and prod Linux environment)
+CMD ["poetry", "run", "pytest", "-v", "tests/"]

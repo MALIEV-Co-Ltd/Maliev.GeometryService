@@ -226,13 +226,20 @@ def compute_overhang_analysis(
         if not isinstance(mesh, trimesh.Trimesh) or len(mesh.faces) < 3:
             return 0, 0.0, [], []
 
+        # Normalise face winding before relying on face_normals — an inconsistently
+        # wound mesh (e.g. from cascadio multi-body concatenation before merge_vertices)
+        # can have downward-facing faces reported as upward, silencing all overhangs.
+        if not mesh.is_winding_consistent:
+            mesh = mesh.copy()
+            trimesh.repair.fix_winding(mesh)
+
         face_normals = mesh.face_normals
         face_areas = mesh.area_faces
         face_centroids = mesh.triangles_center
 
-        # Add 2° tolerance so parts designed right at the angle boundary don't
-        # produce false positives (e.g. wrench at exactly 45°).
-        effective_thresh = threshold_deg + 2.0
+        # 0.5° tolerance keeps FP risk low while catching genuine near-threshold overhangs
+        # (the old 2.0° margin silently dropped real overhangs between 45° and 47°).
+        effective_thresh = threshold_deg + 0.5
         overhang_z_thresh = -math.sin(math.radians(effective_thresh))
 
         # Find all overhang faces
@@ -244,16 +251,28 @@ def compute_overhang_analysis(
             if (normal / norm)[2] < overhang_z_thresh:
                 overhang_set.add(i)
 
+        logger.info(
+            "overhang candidates: %d faces (threshold %.1f° + 0.5° = %.1f°, z_thresh=%.3f)",
+            len(overhang_set), threshold_deg, effective_thresh, overhang_z_thresh,
+        )
+
         if not overhang_set:
+            logger.info("No overhang faces detected - all faces are within the threshold angle")
             return 0, 0.0, [], []
 
-        # Determine the build-plate contact band: faces within 3% of part height
-        # (or 2 mm, whichever is larger) above the global Z minimum are excluded
+        # Determine the build-plate contact band: faces within 1% of part height
+        # (or 1 mm, whichever is larger) above the global Z minimum are excluded
         # because they represent the bottom face resting on the build plate.
+        # Previously 3%/2mm — too aggressive for tall parts with low-positioned overhangs
+        # (e.g. a flange-mounted duct whose bottom face sits just above the build plate).
         all_centroids = face_centroids
         global_min_z = float(mesh.vertices[:, 2].min())
         part_height = float(mesh.vertices[:, 2].max()) - global_min_z
-        build_plate_band = max(2.0, part_height * 0.03)
+        build_plate_band = max(1.0, part_height * 0.01)
+        logger.info(
+            "build-plate band: %.2f mm (part height %.2f mm, global_min_z %.2f mm)",
+            build_plate_band, part_height, global_min_z,
+        )
 
         # Build face adjacency among overhang faces only
         edge_to_faces: dict[tuple[int, int], list[int]] = {}
@@ -275,9 +294,14 @@ def compute_overhang_analysis(
 
         # BFS clustering
         visited: set[int] = set()
+        total_clusters = 0
+        clusters_filtered_by_build_plate = 0
+        clusters_filtered_by_area = 0
+
         for start in overhang_set:
             if start in visited:
                 continue
+            total_clusters += 1
             cluster: list[int] = []
             queue = [start]
             while queue:
@@ -290,31 +314,45 @@ def compute_overhang_analysis(
                     if n not in visited:
                         queue.append(n)
 
+            # Strip faces whose centroid sits in the build-plate contact band
+            # (faces resting on the build plate are not "overhangs" requiring support).
+            # Only strip individual faces, not the whole cluster — a tall overhang that
+            # connects to a build-plate-contact face must not be silenced entirely.
+            trimmed_cluster = [
+                f for f in cluster
+                if float(all_centroids[f][2]) >= global_min_z + build_plate_band
+            ]
+
+            if not trimmed_cluster:
+                # All faces in this cluster are in the build-plate band
+                clusters_filtered_by_build_plate += 1
+                continue
+
             # Ignore small stray patches that don't represent significant
             # overhang regions requiring support.  Filter by area (mm²) so
             # that the threshold is independent of mesh resolution.
-            region_area_check = sum(float(face_areas[f]) for f in cluster)
+            region_area_check = sum(float(face_areas[f]) for f in trimmed_cluster)
             if region_area_check < 4.0:  # < 4 mm² → not a meaningful overhang
+                clusters_filtered_by_area += 1
                 continue
 
-            # Exclude build-plate contact region
-            region_min_z = float(
-                min(all_centroids[f][2] for f in cluster)
-            )
-            if region_min_z < global_min_z + build_plate_band:
-                continue
-
-            region_area = sum(float(face_areas[f]) for f in cluster)
+            region_area = region_area_check
             overhang_area_cm2 += region_area / 100.0
 
-            cluster_centroids = np.array([all_centroids[f] for f in cluster])
+            cluster_centroids = np.array([all_centroids[f] for f in trimmed_cluster])
             region_centroid = cluster_centroids.mean(axis=0)
             overhang_centroids.append(
                 [float(region_centroid[0]), float(region_centroid[1]),
                  float(region_centroid[2])]
             )
-            face_indices.extend(cluster)
+            face_indices.extend(trimmed_cluster)
             overhang_region_count += 1
+
+        logger.info(
+            "overhang clustering: %d total cluster(s), %d filtered by build-plate band, %d filtered by area (< 4mm²), %d final region(s), %.2f cm²",
+            total_clusters, clusters_filtered_by_build_plate, clusters_filtered_by_area,
+            overhang_region_count, overhang_area_cm2,
+        )
 
     except Exception as exc:
         logger.warning("overhang analysis failed: %s", exc)
@@ -656,7 +694,7 @@ def detect_small_features_occ(
     occ_features: "list",  # list[OccFeature]
     min_size_mm: float,
     mesh: "trimesh.Trimesh | None" = None,
-    radius_factor: float = 2.0,
+    face_tag_to_tri: "dict[int, list[int]] | None" = None,
     max_overlay_faces: int = 500,
 ) -> tuple[int, list[list[float]], list[int]]:
     """Detect features smaller than min_size_mm using CAD B-Rep topology.
@@ -666,21 +704,20 @@ def detect_small_features_occ(
 
     For each OCC feature the "feature size" is derived from geometry:
     - cylinder / hole: ``2 * radius_mm``
-    - torus fillet:    ``2 * minor_radius_mm``
-    - planar / freeform: ``sqrt(area_mm2)``
+    - torus fillet:    ``2 * minor_radius_mm`` (minor tube radius)
+    - planar face:     ``bbox_min_mm`` (AABB short side) — avoids flagging
+                       long-thin slot walls because their sqrt(area) looks small
     - cone:            ``2 * apex_radius_mm``
+    - freeform:        ``sqrt(area_mm2)`` last resort
 
-    Overlay face indices are resolved by a spatial search: for each flagged
-    feature, the nearest STL triangles within ``feature_size_mm * radius_factor``
-    of the feature centroid are collected from *mesh*.  This avoids the
-    OCC-tessellation ↔ cascadio-tessellation index mismatch entirely.
+    Overlay face indices use the OCC face_tag → tri_indices map when provided
+    (exact topology), falling back to a spatial centroid search on the mesh.
 
     Args:
         occ_features:      OCC feature list from ``analyze_step_brep``.
         min_size_mm:       Minimum acceptable feature size in mm.
-        mesh:              Cascadio-produced trimesh (Z-up, mm) for face lookup.
-                           If None, face_indices will be empty.
-        radius_factor:     Search radius multiplier applied to feature_size_mm.
+        mesh:              Cascadio-produced trimesh (Z-up, mm) for spatial fallback.
+        face_tag_to_tri:   OCC face tag → STL triangle index list (from analyze_step_brep).
         max_overlay_faces: Cap on returned face indices.
 
     Returns:
@@ -693,7 +730,7 @@ def detect_small_features_occ(
     try:
         import math as _math
 
-        # Pre-compute triangle centroids once if mesh is provided.
+        # Pre-compute triangle centroids once for spatial fallback.
         tri_centroids: "np.ndarray | None" = None
         if mesh is not None and hasattr(mesh, "triangles_center"):
             try:
@@ -707,19 +744,29 @@ def detect_small_features_occ(
             area_mm2 = float(feat.area_mm2) if hasattr(feat, "area_mm2") else 0.0
             centroid = feat.centroid if hasattr(feat, "centroid") else None
 
-            # Derive canonical "feature size" from CAD geometry
-            if "radius_mm" in params and not params.get("is_torus"):
-                feature_size_mm = 2.0 * float(params["radius_mm"])
-            elif params.get("is_torus") and "radius_mm" in params:
+            # Derive canonical "feature size" from CAD geometry.
+            # For cylinders and holes: radius_mm is the cylinder radius.
+            # For torus fillets: radius_mm is the minor (tube) radius, which
+            # determines printability — not the large sweep radius (major_radius_mm).
+            if "radius_mm" in params:
                 feature_size_mm = 2.0 * float(params["radius_mm"])
             elif "apex_radius_mm" in params:
                 feature_size_mm = 2.0 * float(params["apex_radius_mm"])
+            elif feat_type == "planar_face":
+                # Use the AABB short side (bbox_min_mm) so long-thin slot walls
+                # (e.g. 40×0.5 mm) are correctly flagged by their 0.5 mm width,
+                # not by sqrt(area)=4.5 mm which would skip them.
+                bbox_min = float(getattr(feat, "bbox_min_mm", 0.0))
+                feature_size_mm = bbox_min if bbox_min > 1e-3 else (
+                    2.0 * _math.sqrt(area_mm2 / _math.pi) if area_mm2 > 0 else 0.0
+                )
             elif area_mm2 > 0:
-                feature_size_mm = _math.sqrt(area_mm2)
+                # Last resort for freeform / unclassified surfaces.
+                feature_size_mm = 2.0 * _math.sqrt(area_mm2 / _math.pi)
             else:
                 continue  # not enough information
 
-            if feature_size_mm >= min_size_mm:
+            if feature_size_mm <= 0 or feature_size_mm >= min_size_mm:
                 continue  # feature is large enough — not a DFM concern
 
             if centroid is None:
@@ -728,9 +775,21 @@ def detect_small_features_occ(
             count += 1
             centroids.append([float(centroid[0]), float(centroid[1]), float(centroid[2])])
 
-            # Spatial face lookup in the STL mesh
-            if tri_centroids is not None and len(face_indices) < max_overlay_faces:
-                search_r = max(feature_size_mm * radius_factor, min_size_mm * 1.5)
+            if len(face_indices) >= max_overlay_faces:
+                continue
+
+            # Prefer topology-correct face lookup via face_tag → tri_indices map.
+            feat_tag = feat.face_tag if hasattr(feat, "face_tag") else -1
+            if face_tag_to_tri is not None and feat_tag in face_tag_to_tri:
+                tris = face_tag_to_tri[feat_tag]
+                remaining = max_overlay_faces - len(face_indices)
+                face_indices.extend(tris[:remaining])
+            elif tri_centroids is not None:
+                # Spatial fallback: search radius covers the face footprint.
+                search_r = max(
+                    _math.sqrt(area_mm2) if area_mm2 > 0 else feature_size_mm,
+                    min_size_mm * 1.5,
+                )
                 c = np.array([float(centroid[0]), float(centroid[1]), float(centroid[2])])
                 dists = np.linalg.norm(tri_centroids - c, axis=1)
                 nearby = np.where(dists <= search_r)[0].tolist()

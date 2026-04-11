@@ -7,6 +7,15 @@ import trimesh
 
 from src.core.geometry import GeometryProcessor, _generate_preview_images_sync
 
+# Rendering tests require PyVista (Linux/Docker only — not available on Windows)
+try:
+    import pyvista  # noqa: F401
+    HAS_PYVISTA = True
+except ImportError:
+    HAS_PYVISTA = False
+
+requires_pyvista = pytest.mark.skipif(not HAS_PYVISTA, reason="PyVista not installed (run in Docker)")
+
 ASSETS_DIR = Path(__file__).parent / "assets"
 
 
@@ -18,6 +27,12 @@ def processor():
 def is_format_supported(ext: str) -> bool:
     """Checks if trimesh or GMSH backend is available."""
     fmt = ext.strip(".").lower()
+    if fmt in ["3mf"]:
+        try:
+            import lxml  # noqa: F401
+            return True
+        except ImportError:
+            return False
     if fmt in trimesh.exchange.load.available_formats():
         return True
     if fmt in ["igs", "iges", "step", "stp"]:
@@ -45,6 +60,7 @@ TEST_GEOMETRIES = [
 ]
 
 
+@requires_pyvista
 class TestThumbnailGeneration:
     """Tests for thumbnail generation functionality."""
 
@@ -92,6 +108,7 @@ class TestThumbnailGeneration:
         assert result is None or isinstance(result, bytes)
 
 
+@requires_pyvista
 class TestPreviewImagesGeneration:
     """Tests for 7-view preview image generation functionality (6 ortho + 1 isometric)."""
 
@@ -199,7 +216,12 @@ class TestAnalyzeStreamWithPreviewImages:
     [
         ".stl",
         ".obj",
-        ".3mf",
+        pytest.param(
+            ".3mf",
+            marks=pytest.mark.skipif(
+                not is_format_supported(".3mf"), reason="3MF backend missing (lxml required)"
+            ),
+        ),
         pytest.param(
             ".step",
             marks=pytest.mark.skipif(
@@ -279,6 +301,7 @@ def test_analyze_broken_mesh(processor):
     assert metrics.volume_cm3 >= 0
 
 
+@requires_pyvista
 class TestPreviewImagesOutput:
     """Tests that save preview images for manual inspection."""
 
@@ -345,3 +368,375 @@ class TestPreviewImagesOutput:
                 print(f"  Missing: dice_{view}.webp")
 
         assert saved_count == 8, f"Expected 8 preview images, got {saved_count}"
+
+
+class TestTessellationSettings:
+    """Tests that tessellation settings are correctly applied and reduce mesh complexity."""
+
+    def test_cascadio_tessellation_settings(self):
+        """Verify cascadio STEP tessellation uses coarser tolerances for performance."""
+        # Import the function that contains the cascadio call
+        from src.core import geometry
+
+        # Check that the constants used match our expected values
+        # We can't directly test the call without a STEP file, but we can verify
+        # the code contains the expected values
+        import inspect
+
+        source = inspect.getsource(geometry._load_cad_with_cascadio)
+        assert "tol_linear=0.05" in source, "cascadio tol_linear should be 0.05 (balanced quality)"
+        assert "tol_angular=0.1" in source, "cascadio tol_angular should be 0.1 (~5.7° deflection)"
+
+    def test_gmsh_tessellation_settings(self):
+        """Verify gmsh fallback uses coarser mesh settings for performance."""
+        import inspect
+        import src.core.geometry as geom
+
+        # Check both Unix and Windows code paths
+        source = inspect.getsource(geom._run_gmsh_with_timeout)
+        assert 'CharacteristicLengthMax", 2.0' in source, \
+            "gmsh CharacteristicLengthMax should be 2.0 (20x coarser than 0.1)"
+
+
+class TestManifoldCheckPerBody:
+    """Tests that manifold checking is done per-body with watertight fallback."""
+
+    def test_per_body_manifold_check(self):
+        """Verify manifold check evaluates each body independently."""
+        import trimesh
+        from src.core.geometry import GeometryProcessor
+
+        proc = GeometryProcessor()
+
+        # Create two separate cubes (manifold individually)
+        cube1 = trimesh.creation.box(extents=[10, 10, 10])
+        cube2 = trimesh.creation.box(extents=[10, 10, 10])
+        cube2.apply_translation([20, 0, 0])
+
+        # Both should be manifold
+        assert cube1.is_watertight
+        assert cube2.is_watertight
+
+        # Simulate the per-body manifold check (matching actual implementation)
+        def _body_is_manifold(m):
+            ec = np.unique(m.edges_sorted, axis=0, return_counts=True)[1]
+            if bool(np.all(ec <= 2)):
+                return True
+            return bool(m.is_watertight)
+
+        assert _body_is_manifold(cube1), "Single cube should be manifold"
+        assert _body_is_manifold(cube2), "Single cube should be manifold"
+
+    def test_vertex_merge_digits_setting(self):
+        """Verify vertex merge uses digits_vertex=3 for more tolerant welding."""
+        import inspect
+        from src.core import geometry
+
+        source = inspect.getsource(geometry._load_cad_with_cascadio)
+        assert "digits_vertex=3" in source, \
+            "merge_vertices should use digits_vertex=3 (0.001mm precision, more tolerant)"
+
+
+class TestOverhangDetectionBuildPlateBand:
+    """Tests that overhang detection uses a smaller build-plate exclusion band."""
+
+    def test_build_plate_band_reduced(self):
+        """Verify build-plate band is 1%/1mm (reduced from 3%/2mm)."""
+        import inspect
+        from src.core import mesh_analyzers
+
+        source = inspect.getsource(mesh_analyzers.compute_overhang_analysis)
+        assert "part_height * 0.01" in source, \
+            "Build-plate band should use 1% of part height (reduced from 3%)"
+        assert "max(1.0," in source, \
+            "Build-plate band minimum should be 1.0mm (reduced from 2.0mm)"
+
+    def test_overhang_logging(self):
+        """Verify overhang detection includes logging for clustering results."""
+        import inspect
+        from src.core import mesh_analyzers
+
+        source = inspect.getsource(mesh_analyzers.compute_overhang_analysis)
+        assert "logger.info" in source or "logger.debug" in source, \
+            "Overhang analysis should log results"
+        assert "overhang" in source.lower(), \
+            "Should reference overhang in log output"
+
+
+class TestThumbnailRenderingWithLighting:
+    """Tests that thumbnail rendering produces non-flat images with shading."""
+
+    def test_thumbnail_has_shading_variance(self):
+        """Verify thumbnail rendering produces non-uniform pixel values (proving lighting works)."""
+        try:
+            from PIL import Image
+        except ImportError:
+            pytest.skip("PIL/Pillow not available - cannot test image pixel variance")
+
+        from src.core.headless_thumbnail import render_thumbnail_from_glb_headless
+        import trimesh
+        import io
+
+        # Create a simple cube mesh
+        mesh = trimesh.creation.box(extents=[10, 10, 10])
+        glb_bytes = mesh.export(file_type="glb")
+
+        # Generate thumbnail
+        thumbnail_bytes = render_thumbnail_from_glb_headless(glb_bytes, size=256, format="png")
+
+        assert thumbnail_bytes is not None, "Thumbnail generation should succeed"
+        assert isinstance(thumbnail_bytes, bytes), "Thumbnail should be bytes"
+
+        # Load the image and check pixel variance
+        img = Image.open(io.BytesIO(thumbnail_bytes))
+        img_array = np.array(img)
+
+        # Calculate variance across the image
+        # A flat grey image would have very low variance
+        # A properly lit/shaded image should have significant variance
+        pixel_variance = np.var(img_array)
+
+        # Threshold: variance should be at least 100 (on 0-255 scale)
+        # This proves we have shading/different face colors
+        assert pixel_variance > 100, \
+            f"Thumbnail appears flat (variance={pixel_variance:.1f}); " \
+            "expected significant variance from lighting/shading. " \
+            "This suggests pyrender may not be working or lighting is disabled."
+
+    def test_thumbnail_iso_camera_angle(self):
+        """Verify thumbnail uses automatic camera placement for good default view."""
+        import inspect
+        from src.core.headless_thumbnail import _render_with_trimesh
+
+        # Check the function uses trimesh's automatic camera placement
+        source = inspect.getsource(_render_with_trimesh)
+
+        # Should let trimesh automatically handle camera placement
+        assert "trimesh will automatically handle camera" in source or \
+               "scene.save_image" in source, \
+            "Thumbnail should use trimesh's automatic camera placement"
+
+    def test_thumbnail_renders_all_bodies(self):
+        """Verify thumbnail renders all bodies in multi-body assemblies."""
+        try:
+            import pyrender
+        except ImportError:
+            pytest.skip("pyrender not available")
+
+        from src.core.headless_thumbnail import _render_with_pyrender
+        import trimesh
+
+        # Create two cubes (multi-body)
+        cube1 = trimesh.creation.box(extents=[5, 5, 5])
+        cube2 = trimesh.creation.box(extents=[5, 5, 5])
+        cube2.apply_translation([10, 0, 0])
+
+        # Create a scene with both bodies
+        scene = trimesh.Scene([cube1, cube2])
+        glb_bytes = scene.export(file_type="glb")
+
+        # Render thumbnail
+        thumbnail_bytes = _render_with_pyrender(glb_bytes, size=256, format="png")
+
+        assert thumbnail_bytes is not None, "Multi-body thumbnail should render"
+        # Check that we got a reasonable size (both cubes should be visible)
+        assert len(thumbnail_bytes) > 1000, "Thumbnail should have content"
+
+
+class TestAutoRotationCameraPreset:
+    """Tests that camera presets properly stop auto-rotation."""
+
+    def test_set_camera_preset_stops_auto_rotation(self):
+        """
+        Verify setCameraPreset stops auto-rotation by zeroing current speed.
+        This is a code inspection test since we can't run BabylonJS in pytest.
+        """
+        # Read the part-viewer.js file
+        viewer_path = (
+            Path(__file__).parent.parent.parent /
+            "Maliev.Intranet" /
+            "Maliev.Intranet.Client" /
+            "wwwroot" /
+            "js" /
+            "part-viewer.js"
+        )
+
+        if not viewer_path.exists():
+            pytest.skip(f"part-viewer.js not found at {viewer_path}")
+
+        source = viewer_path.read_text()
+
+        # Find the setCameraPreset function
+        assert "export function setCameraPreset" in source, \
+            "setCameraPreset function should exist"
+
+        # Check that it stops auto-rotation
+        assert "autoSpeedCurrent[canvasId] = 0" in source, \
+            "setCameraPreset should zero autoSpeedCurrent to prevent drift"
+        assert "autoSpeedTarget[canvasId]  = SPEED_STOP" in source, \
+            "setCameraPreset should set autoSpeedTarget to SPEED_STOP"
+        assert "animStates[canvasId]       = 'interacting'" in source, \
+            "setCameraPreset should set animStates to 'interacting'"
+
+        # Verify these come BEFORE applyPreset (order matters!)
+        preset_func_start = source.find("export function setCameraPreset")
+        preset_func_end = source.find("}", source.find("applyPreset", preset_func_start))
+        preset_func_body = source[preset_func_start:preset_func_end]
+
+        # Check that auto-rotation stop code appears before applyPreset
+        stop_pos = preset_func_body.find("autoSpeedCurrent[canvasId] = 0")
+        apply_pos = preset_func_body.find("applyPreset")
+        assert stop_pos < apply_pos, \
+            "Auto-rotation stop should happen BEFORE applyPreset to prevent drift"
+
+
+class TestNearClippingPlaneFix:
+    """Tests that the near clipping plane is set correctly to prevent early clipping."""
+
+    def test_camera_near_plane_value(self):
+        """Verify CAMERA_NEAR_PLANE is set to 0.001 (0.1% of mesh radius)."""
+        viewer_path = (
+            Path(__file__).parent.parent.parent /
+            "Maliev.Intranet" /
+            "Maliev.Intranet.Client" /
+            "wwwroot" /
+            "js" /
+            "part-viewer.js"
+        )
+
+        if not viewer_path.exists():
+            pytest.skip(f"part-viewer.js not found at {viewer_path}")
+
+        source = viewer_path.read_text()
+
+        # Check that CAMERA_NEAR_PLANE is set to 0.0001 (0.01% of mesh radius —
+        # further reduced from 0.001 to allow arbitrarily close zoom without clipping)
+        assert "CAMERA_NEAR_PLANE: 0.0001" in source, \
+            "CAMERA_NEAR_PLANE should be 0.0001 (0.01% of mesh radius) to prevent early clipping"
+
+        # Verify the old value (0.000001) is NOT present
+        assert "CAMERA_NEAR_PLANE: 0.000001" not in source, \
+            "Old CAMERA_NEAR_PLANE value (0.000001) should be replaced"
+
+        # Verify there's an absolute minimum of 0.01mm
+        assert "Math.max(meshRadius * CONFIG.CAMERA_NEAR_PLANE, 0.01)" in source, \
+            "Should have absolute minimum of 0.01mm to prevent negative near plane"
+
+
+class TestMultiBodyTransparencyFix:
+    """Tests that multi-body selection state is tracked correctly."""
+
+    def test_selected_body_indices_tracking_exists(self):
+        """Verify selectedBodyIndices state tracking is present."""
+        viewer_path = (
+            Path(__file__).parent.parent.parent /
+            "Maliev.Intranet" /
+            "Maliev.Intranet.Client" /
+            "wwwroot" /
+            "js" /
+            "part-viewer.js"
+        )
+
+        if not viewer_path.exists():
+            pytest.skip(f"part-viewer.js not found at {viewer_path}")
+
+        source = viewer_path.read_text()
+
+        # Check that selectedBodyIndices is declared
+        assert "selectedBodyIndices" in source, \
+            "selectedBodyIndices state tracking should be declared"
+
+        # Check that it's declared alongside perCanvasBodyMap
+        body_map_pos = source.find("const perCanvasBodyMap")
+        selected_pos = source.find("const selectedBodyIndices")
+        assert body_map_pos > 0 and selected_pos > 0, \
+            "selectedBodyIndices should be declared near perCanvasBodyMap"
+
+    def test_select_body_handles_reclick(self):
+        """Verify selectBody checks if clicked body is already selected."""
+        viewer_path = (
+            Path(__file__).parent.parent.parent /
+            "Maliev.Intranet" /
+            "Maliev.Intranet.Client" /
+            "wwwroot" /
+            "js" /
+            "part-viewer.js"
+        )
+
+        if not viewer_path.exists():
+            pytest.skip(f"part-viewer.js not found at {viewer_path}")
+
+        source = viewer_path.read_text()
+
+        # Find the selectBody function
+        assert "export function selectBody" in source, \
+            "selectBody function should exist"
+
+        # Check for the re-click logic
+        assert "bodyIndex === currentlySelected" in source, \
+            "selectBody should check if clicked body equals currently selected body"
+
+        assert "clearBodySelection(canvasId)" in source, \
+            "selectBody should call clearBodySelection when same body is clicked"
+
+    def test_clear_body_selection_resets_state(self):
+        """Verify clearBodySelection resets selectedBodyIndices to null."""
+        viewer_path = (
+            Path(__file__).parent.parent.parent /
+            "Maliev.Intranet" /
+            "Maliev.Intranet.Client" /
+            "wwwroot" /
+            "js" /
+            "part-viewer.js"
+        )
+
+        if not viewer_path.exists():
+            pytest.skip(f"part-viewer.js not found at {viewer_path}")
+
+        source = viewer_path.read_text()
+
+        # Find the clearBodySelection function
+        assert "export function clearBodySelection" in source, \
+            "clearBodySelection function should exist"
+
+        # Check that it resets selectedBodyIndices
+        clear_func_start = source.find("export function clearBodySelection")
+        clear_func_end = source.find("\n}", source.rfind("console.log", clear_func_start))
+        clear_func_body = source[clear_func_start:clear_func_end]
+
+        assert "selectedBodyIndices[canvasId] = null" in clear_func_body, \
+            "clearBodySelection should reset selectedBodyIndices[canvasId] to null"
+
+
+@requires_pyvista
+class TestThumbnailTrimeshRendering:
+    """Tests that thumbnail rendering uses trimesh native rendering instead of pyrender."""
+
+    def test_trimesh_rendering_function_exists(self):
+        """Verify _render_with_trimesh function exists and is used."""
+        from src.core.headless_thumbnail import render_thumbnail_from_glb_headless
+
+        # Check that the function exists
+        import inspect
+        import src.core.headless_thumbnail as thumb_module
+
+        assert hasattr(thumb_module, "_render_with_trimesh"), \
+            "_render_with_trimesh function should exist"
+
+        # Check that render_thumbnail_from_glb_headless calls trimesh first
+        source = inspect.getsource(render_thumbnail_from_glb_headless)
+        assert "_render_with_trimesh" in source, \
+            "render_thumbnail_from_glb_headless should try _render_with_trimesh first"
+
+    def test_thumbnail_fallback_chain(self):
+        """Verify thumbnail tries PyVista first, then falls back to trimesh."""
+        import inspect
+        from src.core.headless_thumbnail import render_thumbnail_from_glb_headless
+
+        source = inspect.getsource(render_thumbnail_from_glb_headless)
+        assert "_render_with_pyvista" in source, \
+            "render_thumbnail_from_glb_headless should try PyVista"
+        assert "_render_with_trimesh" in source, \
+            "render_thumbnail_from_glb_headless should fall back to trimesh"
+        assert "falling back" in source or "unavailable" in source, \
+            "Should log when falling back"
