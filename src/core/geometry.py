@@ -2280,7 +2280,7 @@ def _analyze_single_body(
         # ── TWO-PHASE ARCHITECTURE: Skip full DFM analysis during upload ─────
         # DFM analysis is now triggered on-demand by frontend when user selects process
         # This prevents timeout during upload and allows progressive loading
-        # Return quality metrics + empty DFM reports
+        # Return quality metrics + empty DFM reports with default values
 
         reports: dict[str, Any] = {
             "quality": {
@@ -2301,20 +2301,40 @@ def _analyze_single_body(
         }
 
         # Return empty DFM reports for all processes (will be populated on-demand)
+        # Must include all required fields for FdmDfmReport validation
         # This maintains backward compatibility with code that expects process keys
-        empty_report_template = {
-            "reportType": "",
-            "issues": [],
-            "twoPhaseDeferred": True,  # Flag indicating DFM deferred to on-demand analysis
-        }
+
+        # Helper to create empty report with all required fields
+        def _create_empty_printing_report(process_code: str) -> dict[str, Any]:
+            return {
+                "reportType": process_code,
+                "thinWallCount": 0,
+                "thinWallRegions": [],
+                "overhangFaceCount": 0,
+                "overhangAreaCm2": 0.0,
+                "overhangRegions": [],
+                "supportRequired": False,
+                "estimatedSupportVolumeCm3": None,
+                "smallDetailCount": 0,
+                "issues": [],
+                "twoPhaseDeferred": True,  # Flag indicating DFM deferred to on-demand analysis
+            }
+
+        # Helper to create empty CNC report
+        def _create_empty_cnc_report(process_code: str) -> dict[str, Any]:
+            return {
+                "reportType": process_code,
+                "issues": [],
+                "twoPhaseDeferred": True,
+            }
 
         # Add empty reports for all known processes
         for process_code in PRINTING_RULES:
-            reports[process_code] = {**empty_report_template, "reportType": process_code}
+            reports[process_code] = _create_empty_printing_report(process_code)
 
-        reports["CNC_MILL"] = {**empty_report_template, "reportType": "CNC_MILL"}
-        reports["CNC"] = {**empty_report_template, "reportType": "CNC"}
-        reports["CNC_TURN"] = {**empty_report_template, "reportType": "CNC_TURN"}
+        reports["CNC_MILL"] = _create_empty_cnc_report("CNC_MILL")
+        reports["CNC"] = _create_empty_cnc_report("CNC")
+        reports["CNC_TURN"] = _create_empty_cnc_report("CNC_TURN")
 
         logger.info(
             f"_analyze_single_body completed with quality metrics only (DFM deferred). "
