@@ -316,6 +316,101 @@ class TestDetectSmallFeaturesOcc:
         assert faces == []
 
 
+# ---------------------------------------------------------------------------
+# Support-tower overlay
+# ---------------------------------------------------------------------------
+
+
+class TestSupportTowerOverlay:
+    """generate_support_tower_overlay_glb and _generate_overlays_worker support-tower key."""
+
+    def test_support_tower_overlay_generated_for_fdm_with_overhangs(self):
+        """_generate_overlays_worker emits FDM__overhang_support when overhang faceIndices present."""
+        from src.core.geometry import _generate_overlays_worker
+
+        mesh = trimesh.creation.icosphere(radius=10)
+        stl_bytes = mesh.export(file_type="stl")
+        face_indices = list(range(min(10, len(mesh.faces))))
+
+        reports = {
+            "FDM": {
+                "issues": [
+                    {
+                        "category": "overhang",
+                        "faceIndices": face_indices,
+                        "severity": "warning",
+                        "title": "Overhang regions",
+                        "description": "test",
+                        "value": 0,
+                        "threshold": 0,
+                        "centroid": [0, 0, 0],
+                    }
+                ],
+            }
+        }
+
+        result = _generate_overlays_worker(stl_bytes, reports)
+        assert "FDM__overhang_support" in result, (
+            f"Expected FDM__overhang_support key; got keys: {list(result.keys())}"
+        )
+        assert len(result["FDM__overhang_support"]) > 0
+
+    def test_support_tower_overlay_absent_when_no_overhangs(self):
+        """_generate_overlays_worker must NOT emit overhang_support when no overhang issues."""
+        from src.core.geometry import _generate_overlays_worker
+
+        mesh = trimesh.creation.box([10, 10, 10])
+        stl_bytes = mesh.export(file_type="stl")
+
+        reports = {
+            "FDM": {
+                "issues": [
+                    {
+                        "category": "thin_wall",
+                        "faceIndices": [0, 1, 2],
+                        "severity": "warning",
+                        "title": "Thin walls",
+                        "description": "test",
+                        "value": 0,
+                        "threshold": 0,
+                        "centroid": [0, 0, 0],
+                    }
+                ],
+            }
+        }
+
+        result = _generate_overlays_worker(stl_bytes, reports)
+        assert "FDM__overhang_support" not in result
+
+    def test_support_tower_prism_geometry(self):
+        """GLB triangle count = 8 × face_count, prism bottoms reach mesh Z-min."""
+        from src.core.overlay_generator import generate_support_tower_overlay_glb
+
+        # Box at z=[0..10]: z_min=0 so prism bottoms reach y=0 after Z→Y rotation
+        mesh = trimesh.creation.box([20, 20, 10])
+        mesh.apply_translation([0, 0, 5])  # z range [0..10]
+
+        face_indices = list(range(4))
+        glb = generate_support_tower_overlay_glb(mesh, face_indices, reference_center=np.zeros(3))
+        assert glb is not None
+        assert len(glb) > 0
+
+        loaded = trimesh.load(io.BytesIO(glb), file_type="glb")
+        out_mesh = loaded.to_geometry() if isinstance(loaded, trimesh.Scene) else loaded
+
+        # Each face produces exactly 8 prism triangles
+        assert len(out_mesh.faces) == len(face_indices) * 8, (
+            f"Expected {len(face_indices) * 8} triangles, got {len(out_mesh.faces)}"
+        )
+
+        # After Z→Y rotation, z=0 maps to y=0.
+        # Prism bottoms (always at z_min=0) → Y-min ≈ 0 in the GLB.
+        y_min = float(out_mesh.bounds[0, 1])
+        assert abs(y_min) < 1.0, (
+            f"GLB Y-min {y_min:.3f} mm should be near 0 (mesh Z-min after Z→Y rotation)"
+        )
+
+
 class TestDetectSmallFeaturesFallbackImproved:
     """The triangle-edge fallback must not flag smooth curved surfaces."""
 

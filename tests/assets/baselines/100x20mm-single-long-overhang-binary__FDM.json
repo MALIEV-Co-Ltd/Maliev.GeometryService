@@ -1,0 +1,63 @@
+{
+  "analysis_time_seconds": 0.0053,
+  "estimatedSupportVolumeCm3": null,
+  "issues": [
+    {
+      "category": "overhang",
+      "centroid": [
+        0.0,
+        0.0,
+        5.0
+      ],
+      "description": "1 overhang region(s) exceed the 45.0\u00b0 limit (36.0 cm\u00b2 total area).",
+      "faceIndices": [
+        18,
+        19
+      ],
+      "metadata": {
+        "areaCm2": 36.0,
+        "regionCount": 1
+      },
+      "severity": "warning",
+      "threshold": 45.0,
+      "title": "Overhangs (1 region(s), 36.0\u00a0cm\u00b2)",
+      "value": 36.0
+    },
+    {
+      "category": "bridge",
+      "centroid": [
+        46.6667,
+        6.6667,
+        0.0
+      ],
+      "description": "6 bridge span(s) exceed the 10.0mm limit for FDM.",
+      "faceIndices": [
+        6,
+        7,
+        14,
+        15,
+        18,
+        19
+      ],
+      "metadata": {},
+      "severity": "warning",
+      "threshold": 10.0,
+      "title": "Long Bridges (6 spans)",
+      "value": 6.0
+    }
+  ],
+  "overhangAreaCm2": 36.0,
+  "overhangFaceCount": 1,
+  "overhangRegions": [
+    [
+      0.0,
+      0.0,
+      5.0
+    ]
+  ],
+  "reportType": "FDM",
+  "smallDetailCount": 0,
+  "supportRequired": true,
+  "thinWallCount": 0,
+  "thinWallRegions": []
+}

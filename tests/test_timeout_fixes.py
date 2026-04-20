@@ -21,18 +21,18 @@ def test_assets_dir():
 @pytest.fixture
 def sample_step_file(test_assets_dir):
     """Get path to a sample STEP file."""
-    step_file = test_assets_dir / "cube.step"
+    step_file = test_assets_dir / "50x50x50mm-solid-cube.step"
     if not step_file.exists():
-        pytest.skip("cube.step not found")
+        pytest.skip("50x50x50mm-solid-cube.step not found")
     return step_file
 
 
 @pytest.fixture
 def sample_stl_file(test_assets_dir):
     """Get path to a sample STL file."""
-    stl_file = test_assets_dir / "cube.stl"
+    stl_file = test_assets_dir / "50x50x50mm-solid-cube-binary.stl"
     if not stl_file.exists():
-        pytest.skip("cube.stl not found")
+        pytest.skip("50x50x50mm-solid-cube-binary.stl not found")
     return stl_file
 
 
@@ -54,7 +54,9 @@ class TestCascadioTimeoutFixes:
 
             # Verify metrics have expected fields
             assert hasattr(metrics, "volume_cm3"), "Should have volume_cm3 metric"
-            assert hasattr(metrics, "surface_area_cm2"), "Should have surface_area_cm2 metric"
+            assert hasattr(metrics, "surface_area_cm2"), (
+                "Should have surface_area_cm2 metric"
+            )
         finally:
             processor.shutdown()
 
@@ -73,7 +75,9 @@ class TestCascadioTimeoutFixes:
         finally:
             processor.shutdown()
 
-    def test_geometry_processor_concurrent_files(self, sample_step_file, sample_stl_file):
+    def test_geometry_processor_concurrent_files(
+        self, sample_step_file, sample_stl_file
+    ):
         """Test that GeometryProcessor can handle concurrent file processing."""
         # Test sequential processing instead (concurrent has pickling issues)
         step_bytes = sample_step_file.read_bytes()
@@ -137,16 +141,15 @@ class TestExecutorManagement:
         """Test that multiple GeometryProcessor instances can coexist."""
         step_bytes = sample_step_file.read_bytes()
 
-        processors = [
-            GeometryProcessor(enable_diagnostics=False)
-            for _ in range(2)
-        ]
+        processors = [GeometryProcessor(enable_diagnostics=False) for _ in range(2)]
 
         try:
             # Process with both processors
             results = []
             for processor in processors:
-                metrics, preview, thumbnail = processor.analyze_bytes(step_bytes, ".step")
+                metrics, preview, thumbnail = processor.analyze_bytes(
+                    step_bytes, ".step"
+                )
                 results.append(metrics)
 
             # Both should work
@@ -169,7 +172,9 @@ class TestTimeoutBehavior:
                 metrics, preview, thumbnail = processor.analyze_bytes(b"", ".step")
             except Exception as e:
                 # Expected to fail, but should be a proper exception
-                assert isinstance(e, (ValueError, FileNotFoundError)), f"Unexpected exception type: {type(e)}"
+                assert isinstance(e, (ValueError, FileNotFoundError)), (
+                    f"Unexpected exception type: {type(e)}"
+                )
 
             # The important thing is it doesn't crash the processor
         finally:
@@ -265,7 +270,9 @@ class TestMemoryManagement:
             # Process same file multiple times
             results = []
             for _ in range(3):
-                metrics, preview, thumbnail = processor.analyze_bytes(step_bytes, ".step")
+                metrics, preview, thumbnail = processor.analyze_bytes(
+                    step_bytes, ".step"
+                )
                 results.append(metrics)
 
             # All should succeed
@@ -287,10 +294,14 @@ class TestMemoryManagement:
             # This should trigger worker recycling
             results = []
             for _ in range(5):
-                metrics, preview, thumbnail = processor.analyze_bytes(step_bytes, ".step")
+                metrics, preview, thumbnail = processor.analyze_bytes(
+                    step_bytes, ".step"
+                )
                 results.append(metrics)
 
             # All should succeed despite worker recycling
-            assert all(r is not None for r in results), "Worker recycling caused failures"
+            assert all(r is not None for r in results), (
+                "Worker recycling caused failures"
+            )
         finally:
             processor.shutdown()

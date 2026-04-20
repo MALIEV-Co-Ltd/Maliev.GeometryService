@@ -29,7 +29,7 @@ from tests.test_utils import (
 @pytest.fixture
 def sample_stl_file(test_assets_dir):
     """Get path to a sample STL file."""
-    stl_file = test_assets_dir / "cube.stl"
+    stl_file = test_assets_dir / "50x50x50mm-solid-cube-binary.stl"
     assert stl_file.exists(), f"Test asset {stl_file} not found"
     return stl_file
 
@@ -57,7 +57,9 @@ class TestDFMTimeouts:
         timeout_seconds = 10
 
         with monitor_resources() as monitor:
-            result = compute_dfm_analysis_for_stl(stl_bytes, timeout_seconds=timeout_seconds)
+            result = compute_dfm_analysis_for_stl(
+                stl_bytes, timeout_seconds=timeout_seconds
+            )
 
         # Verify result
         assert result is not None, "DFM analysis returned None"
@@ -66,7 +68,9 @@ class TestDFMTimeouts:
 
         # Verify it completed within timeout
         duration = monitor.snapshots[-1].timestamp - monitor.snapshots[0].timestamp
-        assert duration < timeout_seconds, f"Analysis took {duration}s, exceeds {timeout_seconds}s timeout"
+        assert duration < timeout_seconds, (
+            f"Analysis took {duration}s, exceeds {timeout_seconds}s timeout"
+        )
 
     def test_dfm_timeout_fails_gracefully(self, sample_stl_file):
         """Test that DFM timeout is handled gracefully without crashes."""
@@ -78,7 +82,9 @@ class TestDFMTimeouts:
         orphaned_before = check_for_orphaned_processes()
 
         # Attempt analysis with impossible timeout
-        result = compute_dfm_analysis_for_stl(stl_bytes, timeout_seconds=timeout_seconds)
+        result = compute_dfm_analysis_for_stl(
+            stl_bytes, timeout_seconds=timeout_seconds
+        )
 
         # Verify result structure even on timeout
         assert result is not None, "Result should not be None on timeout"
@@ -91,7 +97,9 @@ class TestDFMTimeouts:
         orphaned_after = check_for_orphaned_processes()
         orphaned_count = len(orphaned_after) - len(orphaned_before)
 
-        assert orphaned_count == 0, f"Found {orphaned_count} orphaned processes after timeout"
+        assert orphaned_count == 0, (
+            f"Found {orphaned_count} orphaned processes after timeout"
+        )
 
     def test_dfm_per_body_timeout_in_multi_body(self, multi_body_glbs):
         """Test that per-body timeout works in multi-body analysis."""
@@ -102,7 +110,9 @@ class TestDFMTimeouts:
         # by using very short timeout
         timeout_seconds = 0.001
 
-        result = compute_multi_body_dfm_analysis(multi_body_glbs, timeout_seconds=timeout_seconds)
+        result = compute_multi_body_dfm_analysis(
+            multi_body_glbs, timeout_seconds=timeout_seconds
+        )
 
         # Should handle timeout gracefully
         assert result is not None, "Multi-body DFM returned None on timeout"
@@ -113,7 +123,9 @@ class TestDFMTimeouts:
             # At least we got some structure back
             assert isinstance(result["reports"], list), "Reports should be a list"
 
-    @pytest.mark.skipif(sys.platform == "win32", reason="SIGALRM not available on Windows")
+    @pytest.mark.skipif(
+        sys.platform == "win32", reason="SIGALRM not available on Windows"
+    )
     def test_dfm_signal_timeout_single_body(self, sample_stl_file):
         """Test signal-based timeout mechanism on Unix systems."""
         stl_bytes = sample_stl_file.read_bytes()
@@ -144,7 +156,9 @@ class TestDFMTimeouts:
         # Verify handler was set up correctly
         # (actual timeout depends on analysis speed)
 
-    @pytest.mark.skipif(sys.platform != "win32", reason="Watchdog primarily for Windows")
+    @pytest.mark.skipif(
+        sys.platform != "win32", reason="Watchdog primarily for Windows"
+    )
     def test_dfm_watchdog_timeout_windows(self, sample_stl_file):
         """Test watchdog thread timeout mechanism on Windows."""
         stl_bytes = sample_stl_file.read_bytes()
@@ -165,7 +179,9 @@ class TestDFMTimeouts:
         watchdog_thread.start()
 
         try:
-            result = compute_dfm_analysis_for_stl(stl_bytes, timeout_seconds=timeout_seconds)
+            result = compute_dfm_analysis_for_stl(
+                stl_bytes, timeout_seconds=timeout_seconds
+            )
         finally:
             stop_event.set()
             watchdog_thread.join(timeout=2)
@@ -189,11 +205,14 @@ class TestDFMPerformance:
         assert perf["success"], f"DFM analysis failed: {perf.get('error')}"
 
         # Small geometry should complete in < 10 seconds
-        assert perf["duration_seconds"] < 10, \
+        assert perf["duration_seconds"] < 10, (
             f"Small geometry took {perf['duration_seconds']:.2f}s, exceeds 10s baseline"
+        )
 
-        print(f"\nSmall geometry DFM: {perf['duration_seconds']:.2f}s, "
-              f"memory: {perf['rss_mb_delta']:.1f}MB")
+        print(
+            f"\nSmall geometry DFM: {perf['duration_seconds']:.2f}s, "
+            f"memory: {perf['rss_mb_delta']:.1f}MB"
+        )
 
     def test_dfm_medium_geometry_performance(self, large_stl_file):
         """Test DFM performance on medium geometries (10K-50K vertices)."""
@@ -204,7 +223,9 @@ class TestDFMPerformance:
 
         # Only test if it's actually medium-sized
         if estimated_vertices < 10000:
-            pytest.skip(f"File too small for medium test: {estimated_vertices} vertices")
+            pytest.skip(
+                f"File too small for medium test: {estimated_vertices} vertices"
+            )
 
         perf = measure_performance(
             lambda: compute_dfm_analysis_for_stl(stl_bytes, timeout_seconds=60)
@@ -214,11 +235,14 @@ class TestDFMPerformance:
         assert perf["success"], f"DFM analysis failed: {perf.get('error')}"
 
         # Medium geometry should complete in < 30 seconds
-        assert perf["duration_seconds"] < 30, \
+        assert perf["duration_seconds"] < 30, (
             f"Medium geometry took {perf['duration_seconds']:.2f}s, exceeds 30s baseline"
+        )
 
-        print(f"\nMedium geometry ({estimated_vertices} vertices) DFM: "
-              f"{perf['duration_seconds']:.2f}s, memory: {perf['rss_mb_delta']:.1f}MB")
+        print(
+            f"\nMedium geometry ({estimated_vertices} vertices) DFM: "
+            f"{perf['duration_seconds']:.2f}s, memory: {perf['rss_mb_delta']:.1f}MB"
+        )
 
     def test_dfm_memory_cleanup(self, sample_stl_file):
         """Test that memory is cleaned up after DFM analysis."""
@@ -232,6 +256,7 @@ class TestDFMPerformance:
 
         # Force cleanup
         import gc
+
         gc.collect()
         time.sleep(0.5)
 
@@ -271,8 +296,9 @@ class TestDFMPerformance:
                     pytest.fail(f"Concurrent analysis failed: {e}")
 
         # Verify all completed
-        assert len(results) == num_concurrent, \
+        assert len(results) == num_concurrent, (
             f"Only {len(results)}/{num_concurrent} analyses completed"
+        )
 
         # Verify no orphaned processes
         orphaned_after = check_for_orphaned_processes()
@@ -301,7 +327,9 @@ class TestDFMFaultTolerance:
             # Should indicate failure
             if "reports" in result:
                 # May have empty reports or error info
-                assert isinstance(result["reports"], list), f"Invalid mesh {i} reports not a list"
+                assert isinstance(result["reports"], list), (
+                    f"Invalid mesh {i} reports not a list"
+                )
 
     def test_dfm_handles_mixed_valid_invalid_bodies(self, multi_body_glbs):
         """Test multi-body DFM with mix of valid and invalid bodies."""
@@ -312,7 +340,9 @@ class TestDFMFaultTolerance:
         mixed_glbs = [
             multi_body_glbs[0],  # Valid
             b"invalid mesh data",  # Invalid
-            multi_body_glbs[-1] if len(multi_body_glbs) > 1 else multi_body_glbs[0],  # Valid
+            multi_body_glbs[-1]
+            if len(multi_body_glbs) > 1
+            else multi_body_glbs[0],  # Valid
         ]
 
         result = compute_multi_body_dfm_analysis(mixed_glbs, timeout_seconds=30)
@@ -336,7 +366,9 @@ class TestDFMFaultTolerance:
         # Use very short timeout to force timeouts
         timeout_seconds = 0.001
 
-        result = compute_multi_body_dfm_analysis(multi_body_glbs, timeout_seconds=timeout_seconds)
+        result = compute_multi_body_dfm_analysis(
+            multi_body_glbs, timeout_seconds=timeout_seconds
+        )
 
         # Should return structure even with timeouts
         assert result is not None, "Multi-body with timeout returned None"
@@ -369,12 +401,16 @@ class TestDFMResourceManagement:
         orphaned_after = check_for_orphaned_processes()
         orphaned_count = len(orphaned_after) - len(orphaned_before)
 
-        assert orphaned_count == 0, f"Found {orphaned_count} orphaned processes after timeout"
+        assert orphaned_count == 0, (
+            f"Found {orphaned_count} orphaned processes after timeout"
+        )
 
         # Verify memory was released
         memory_growth = monitor.get_memory_growth()
         # Allow some growth but not excessive
-        assert memory_growth < 200, f"Memory growth {memory_growth}MB after timeout is excessive"
+        assert memory_growth < 200, (
+            f"Memory growth {memory_growth}MB after timeout is excessive"
+        )
 
     def test_dfm_temp_file_cleanup(self, sample_stl_file):
         """Test that DFM cleans up temporary files."""
@@ -384,7 +420,9 @@ class TestDFMResourceManagement:
         temp_files_before = len([f for f in Path(temp_dir).iterdir() if f.is_file()])
 
         # Run DFM analysis
-        result = compute_dfm_analysis_for_stl(sample_stl_file.read_bytes(), timeout_seconds=30)
+        result = compute_dfm_analysis_for_stl(
+            sample_stl_file.read_bytes(), timeout_seconds=30
+        )
 
         # Give time for cleanup
         time.sleep(0.5)
@@ -395,7 +433,9 @@ class TestDFMResourceManagement:
 
         # Temp files should be cleaned up (allow some growth for legitimate reasons)
         # Excessive growth would indicate a leak
-        assert temp_file_growth < 10, f"Temp file growth {temp_file_growth} indicates potential leak"
+        assert temp_file_growth < 10, (
+            f"Temp file growth {temp_file_growth} indicates potential leak"
+        )
 
 
 @pytest.fixture

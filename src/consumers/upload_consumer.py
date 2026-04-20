@@ -25,16 +25,10 @@ import httpx
 from src.core.config import settings
 from src.core.geometry import (
     BoundingBox,
-    CncDfmReport,
-    FdmDfmReport,
     GeometryMetrics,
     GeometryProcessor,
-    SlaDfmReport,
-    _compute_dfm_from_paths,
-    _compute_dfm_single_body,
     _compute_metrics_worker,
     _export_glb_from_paths,
-    _generate_overlays_from_paths,
     _render_preview_worker,
     _render_thumbnail_worker,
     compute_metrics_trimesh_only,
@@ -43,9 +37,6 @@ from src.core.observability import tracer
 from src.core.schemas import (
     BodyInfo,
     BoundingBox as SchemaBoundingBox,
-    DfmAnalysisReadyEvent,
-    DfmAnalysisReadyMessageBody,
-    DfmAnalysisReadyPayload,
     FileAnalysisFailedEvent,
     FileAnalysisFailedMessageBody,
     FileAnalysisFailedPayload,
@@ -66,9 +57,48 @@ from src.core.schemas import (
     SmallThumbnailReadyPayload,
 )
 from src.infrastructure.auth import ServiceAccountTokenProvider
+from src.infrastructure.event_publisher import initialize_event_publisher, publish_event
 from src.infrastructure.storage import IStorageService
 
 logger = logging.getLogger(__name__)
+
+# RSS self-defense: if the parent process crosses this threshold, force a
+# gc.collect() before accepting more work.  Not a hard limit — just a nudge
+# to reclaim unreferenced pages before they compound.
+_RSS_GC_THRESHOLD_MB = 3_000  # 3 GB — conservative; process limit is typically 4-8 GB
+
+
+def _check_rss_and_maybe_gc(label: str) -> float:
+    """Log current RSS. If above threshold, run gc.collect() and log again.
+
+    Args:
+        label: Context label for log messages (e.g. "post-phase1").
+
+    Returns:
+        Current RSS in MB after any GC.
+    """
+    import gc
+
+    rss_mb = psutil.Process().memory_info().rss / 1024 / 1024
+    if rss_mb > _RSS_GC_THRESHOLD_MB:
+        logger.warning(
+            "RSS %.0f MB exceeds %.0f MB threshold (%s) — running gc.collect()",
+            rss_mb,
+            _RSS_GC_THRESHOLD_MB,
+            label,
+        )
+        gc.collect()
+        rss_mb = psutil.Process().memory_info().rss / 1024 / 1024
+        logger.info("RSS after gc.collect() [%s]: %.0f MB", label, rss_mb)
+    return rss_mb
+
+
+# T5d: single source of truth for Phase 2 task budgets.
+# All per-task timeouts are derived from this constant so log messages
+# and actual deadline are always in sync.
+_THUMBNAIL_BUDGET_S = 180   # single/multi-body thumbnail
+_GLB_BUDGET_S = 180         # viewer GLB export
+_PREVIEW_BUDGET_S = 60      # 7-view preview generation (reduced for faster failure detection)
 
 
 def _shutdown_executor_gracefully(processor: "GeometryProcessor", timeout_seconds: int = 10) -> None:
@@ -130,6 +160,14 @@ class UploadConsumer:
         self.channel: aio_pika.abc.AbstractChannel | None = None
         self.queue: aio_pika.abc.AbstractRobustQueue | None = None
         self.exchange: aio_pika.abc.AbstractRobustExchange | None = None
+        # T4a: single shared client — avoids a TLS handshake per artifact upload.
+        # Limits is set high enough to saturate the upload fan-out (4 Phase-2
+        # tasks + N overlay GLBs).  keepalive_expiry keeps connections warm
+        # between messages in a slow queue.
+        self._http_client: httpx.AsyncClient = httpx.AsyncClient(
+            limits=httpx.Limits(max_connections=20, max_keepalive_connections=10),
+            timeout=httpx.Timeout(connect=10.0, read=300.0, write=300.0, pool=5.0),
+        )
 
     async def connect(self) -> None:
         max_retries = 10
@@ -154,6 +192,8 @@ class UploadConsumer:
                         "maliev.events", type="topic", durable=True
                     ),
                 )
+                # Initialize the standalone event publisher with the exchange
+                initialize_event_publisher(self.exchange)
                 logger.info("Successfully connected to RabbitMQ")
                 return
             except Exception as e:
@@ -176,23 +216,11 @@ class UploadConsumer:
         | FileAnalysisFailedEvent
         | FileMetricsReadyEvent
         | PreviewImagesGeneratedEvent
-        | DfmAnalysisReadyEvent
         | SmallThumbnailReadyEvent,
         routing_key: str,
     ) -> None:
-        if self.exchange is None:
-            raise RuntimeError("Exchange not initialized")
-
-        # model_dump_json(by_alias=True) ensures camelCase for MassTransit
-        message_body = event.model_dump_json(by_alias=True).encode()
-        await self.exchange.publish(
-            aio_pika.Message(
-                body=message_body,
-                content_type="application/json",
-                delivery_mode=aio_pika.DeliveryMode.PERSISTENT,
-            ),
-            routing_key=routing_key,
-        )
+        """Publish event using the standalone event publisher."""
+        await publish_event(event, routing_key)
 
     async def process_message(
         self, message: aio_pika.abc.AbstractIncomingMessage
@@ -273,7 +301,6 @@ class UploadConsumer:
                         )
                         loop = asyncio.get_running_loop()
                         executor = self.geometry_processor.executor
-                        dfm_executor = self.geometry_processor.dfm_executor
                         logger.info(
                             "Starting Phase 1 metrics computation",
                             extra={
@@ -289,7 +316,7 @@ class UploadConsumer:
                                 ),
                                 timeout=PHASE1_TIMEOUT_SECONDS,
                             )
-                            rss_mb = psutil.Process().memory_info().rss / 1024 / 1024
+                            rss_mb = _check_rss_and_maybe_gc("post-phase1")
                             logger.info(
                                 "Phase 1 metrics computation complete",
                                 extra={
@@ -358,13 +385,14 @@ class UploadConsumer:
                         # Extract body metadata
                         body_count = metrics_result.get("body_count", 1)
                         body_names = metrics_result.get("body_names", [])
+                        body_volumes = metrics_result.get("body_volumes_cm3", [])
                         body_infos: list[BodyInfo] | None = None
                         if body_count > 1 and body_names:
                             body_infos = [
                                 BodyInfo(
                                     index=i,
                                     name=name,
-                                    volume_cm3=None,  # TODO: Extract per-body volume from mesh_list
+                                    volume_cm3=body_volumes[i] if i < len(body_volumes) else None,
                                     bbox_min=None,
                                     bbox_max=None,
                                 )
@@ -426,6 +454,19 @@ class UploadConsumer:
                                 "No GLB or STL bytes available — skipping Phase 2",
                                 extra={"event": "phase2_skip", "file_id": str(file_id)},
                             )
+                            try:
+                                await self.publish_failure(
+                                    correlation_id,
+                                    file_id,
+                                    "GEOMETRY_NO_RESULT",
+                                    "Phase 1 produced no GLB or STL bytes",
+                                    inner_msg.storage_path,
+                                )
+                            except Exception as pub_err:
+                                logger.warning(
+                                    "Failed to publish GEOMETRY_NO_RESULT for Phase 2 skip: %s",
+                                    pub_err,
+                                )
                         else:
                             upload_id = inner_msg.upload_id
                             _glb_published = [False]
@@ -453,6 +494,21 @@ class UploadConsumer:
                                     cad_path_for_dfm = os.path.join(temp_dir, f"original.{cad_ext}")
                                     with open(cad_path_for_dfm, "wb") as f:
                                         f.write(data)
+
+                                # ── Fix: release large in-memory buffers immediately ──────────
+                                # `data` (original uploaded file, 10-200 MB) and `cad_glb_bytes`
+                                # (converted GLB, up to 100 MB) are both now flushed to disk.
+                                # Setting them to None lets GC reclaim the bytes while the four
+                                # Phase 2 tasks run (up to 300 s).  With prefetch_count=2, a
+                                # second large file can arrive before Phase 2 finishes; without
+                                # this release, both payloads co-exist in the parent process.
+                                #
+                                # DO NOT clear original_stl_bytes here — _run_dfm uses it as an
+                                # early-exit check for pure STL uploads (cad_glb_path = None).
+                                # DO NOT clear mesh_stl_bytes_dict here — _run_dfm reads it to
+                                # write per-body temp STL files; it frees the dict itself after.
+                                data = None  # noqa: F841
+                                cad_glb_bytes = None  # noqa: F841
 
                                 logger.info(
                                     f"Phase 2 temp files written: CAD GLB={bool(cad_glb_path)}, "
@@ -543,7 +599,7 @@ class UploadConsumer:
                                                 cad_glb_path,
                                                 file_ext,
                                             ),
-                                            timeout=180,
+                                            timeout=_GLB_BUDGET_S,
                                         )
                                         if not glb:
                                             return
@@ -599,7 +655,7 @@ class UploadConsumer:
                                         )
                                     except asyncio.TimeoutError:
                                         logger.warning(
-                                            "GLB export timed out after 180s",
+                                            f"GLB export timed out after {_GLB_BUDGET_S}s",
                                             extra={"event": "glb_timeout", "file_id": str(file_id)},
                                         )
                                     except Exception as e:
@@ -616,7 +672,7 @@ class UploadConsumer:
                                                 _render_preview_worker,
                                                 cad_glb_path,
                                             ),
-                                            timeout=60,  # Reduced from 300s for faster failure detection
+                                            timeout=_PREVIEW_BUDGET_S,
                                         )
 
                                         preview_paths: dict[str, str] = {}
@@ -701,277 +757,13 @@ class UploadConsumer:
                                             extra={"event": "previews_error", "file_id": str(file_id)},
                                         )
 
-                                async def _run_dfm() -> None:
-                                    """Phase 2 task: runs DFM analysis (FDM, CNC, SLA checks)."""
-                                    nonlocal dfm_executor
-                                    try:
-                                        # Must be declared before the early-exit check below.
-                                        # Declaring it after (Python scoping) causes UnboundLocalError
-                                        # for GLB-only uploads where the first two conditions are false.
-                                        glb_path_for_dfm: str | None = None
-                                        if not cad_path_for_dfm and not original_stl_bytes and not glb_path_for_dfm:
-                                            logger.warning(
-                                                "DFM skipped: no CAD file, STL, or GLB available",
-                                                extra={"event": "dfm_skip", "file_id": str(file_id)},
-                                            )
-                                            return
-
-                                        logger.info(
-                                            "DFM task starting",
-                                            extra={"event": "dfm_task_start", "file_id": str(file_id)},
-                                        )
-
-                                        # Use GLB for all formats (produced in Phase 1 for STEP/OBJ/STL/3MF)
-                                        glb_path_for_dfm = cad_glb_path
-
-                                        # Split DFM analysis by body for fault tolerance
-                                        async def _run_body_dfm(body_id: int, stl_path: str) -> tuple[int, dict]:
-                                            """Run DFM for a single body. Returns (body_id, result)."""
-                                            try:
-                                                result = await asyncio.wait_for(
-                                                    loop.run_in_executor(
-                                                        dfm_executor,
-                                                        _compute_dfm_single_body,
-                                                        stl_path,
-                                                        cad_path_for_dfm,
-                                                        cad_ext if cad_path_for_dfm else None,
-                                                        body_id,
-                                                    ),
-                                                    timeout=95,  # Per-body timeout (worker has 90s timeout, this is safety net)
-                                                )
-                                                return (body_id, result)
-                                            except asyncio.TimeoutError:
-                                                logger.error(f"Body {body_id} DFM timed out after 95s")
-                                                return (body_id, {"error_type": "TimeoutError", "body_id": body_id})
-                                            except Exception as e:
-                                                logger.error(f"Body {body_id} DFM failed: {e}")
-                                                return (body_id, {"error_type": type(e).__name__, "error_message": str(e), "body_id": body_id})
-
-                                        # Extract bodies from GLB to temporary STL files
-                                        stl_paths_dict: dict[int, str] | None = None
-                                        if glb_path_for_dfm:
-                                            stl_paths_dict = await _extract_bodies_to_temp_stls(glb_path_for_dfm)
-
-                                        # Run all bodies in parallel with fault tolerance
-                                        if stl_paths_dict:
-                                            body_tasks = [
-                                                _run_body_dfm(body_id, stl_path)
-                                                for body_id, stl_path in stl_paths_dict.items()
-                                            ]
-
-                                            # Gather results - don't fail all if one crashes
-                                            body_results = await asyncio.gather(
-                                                *body_tasks,
-                                                return_exceptions=True,
-                                            )
-
-                                            # Aggregate successful results
-                                            reports: dict[str, Any] = {}
-                                            for item in body_results:
-                                                if isinstance(item, Exception):
-                                                    logger.error(f"Body task exception: {item}")
-                                                    continue
-
-                                                body_id, result = item
-                                                if "error_type" in result:
-                                                    logger.warning(
-                                                        f"Body {body_id} DFM analysis failed: {result.get('error_type')}",
-                                                        extra={
-                                                            "event": "body_dfm_failed",
-                                                            "body_id": body_id,
-                                                            "error_type": result.get("error_type"),
-                                                        }
-                                                    )
-                                                    # Continue with other bodies
-                                                else:
-                                                    # Merge this body's reports
-                                                    for process, report in result.items():
-                                                        if process not in reports:
-                                                            reports[process] = report
-                                                        elif isinstance(report, dict):
-                                                            # Aggregate per-body stats
-                                                            reports[process].update(report)
-                                        else:
-                                            reports = {}
-
-
-                                        # Generate overlay GLBs from GLB mesh data
-                                        overlay_paths: dict[str, str] = {}
-                                        try:
-                                            # Generate overlay GLBs (returns dict[str, bytes])
-                                            overlay_glbs: dict[str, bytes] = await loop.run_in_executor(
-                                                dfm_executor,
-                                                _generate_overlays_from_paths,
-                                                glb_path_for_dfm,
-                                                reports,
-                                            )
-
-                                            # Upload each overlay GLB to GCS
-                                            for overlay_key, glb_bytes in overlay_glbs.items():
-                                                overlay_path = f"{inner_msg.storage_path}_{overlay_key}_overlay.glb"
-                                                # Upload to GCS (non-blocking: continue on failure)
-                                                success = await self.upload_artifact(
-                                                    glb_bytes,
-                                                    overlay_path,
-                                                    "model/gltf-binary",
-                                                    inner_msg.upload_id,
-                                                )
-                                                if success:
-                                                    overlay_paths[overlay_key] = overlay_path
-                                                    logger.debug(f"Uploaded overlay: {overlay_key} → {overlay_paths[overlay_key]}")
-                                                else:
-                                                    logger.warning(f"Failed to upload overlay: {overlay_key}")
-
-                                            logger.info(
-                                                "Generated %d overlay(s) for DFM visualization (%d uploaded successfully)",
-                                                len(overlay_glbs),
-                                                len(overlay_paths),
-                                            )
-                                        except Exception as e:
-                                            logger.warning(
-                                                "Failed to generate/upload overlay GLBs: %s",
-                                                e,
-                                                exc_info=True,
-                                            )
-
-                                        _now = datetime.now(timezone.utc)
-                                        fdm_raw = reports.get("FDM")
-                                        sla_raw = reports.get("SLA")
-                                        cnc_raw = reports.get("CNC")
-                                        dfm_event = DfmAnalysisReadyEvent(
-                                            messageId=uuid4(),
-                                            correlationId=correlation_id,
-                                            messageType=[
-                                                "urn:message:Maliev.MessagingContracts.Contracts.Geometry:DfmAnalysisReadyEvent"
-                                            ],
-                                            message=DfmAnalysisReadyMessageBody(
-                                                messageId=uuid4(),
-                                                messageName="DfmAnalysisReadyEvent",
-                                                messageType=MessageTypeEnum.Event,
-                                                messageVersion="1.0.0",
-                                                publishedBy="GeometryService",
-                                                consumedBy=["IntranetBff"],
-                                                correlationId=correlation_id,
-                                                causationId=None,
-                                                occurredAtUtc=_now,
-                                                isPublic=False,
-                                                payload=DfmAnalysisReadyPayload(
-                                                    fileId=file_id,
-                                                    storagePath=inner_msg.storage_path,
-                                                    fdmReport=FdmDfmReport.model_validate(
-                                                        fdm_raw
-                                                    )
-                                                    if fdm_raw
-                                                    else None,
-                                                    slaReport=SlaDfmReport.model_validate(
-                                                        sla_raw
-                                                    )
-                                                    if sla_raw
-                                                    else None,
-                                                    cncReport=CncDfmReport.model_validate(
-                                                        cnc_raw
-                                                    )
-                                                    if cnc_raw
-                                                    else None,
-                                                    analyzedAt=_now,
-                                                    overlayPaths=overlay_paths or None,
-                                                    bodyCount=body_count,
-                                                ),
-                                            ),
-                                        )
-                                        await self.publish_event(
-                                            dfm_event, "maliev.geometryservice.v1.dfm.ready"
-                                        )
-                                        logger.info(
-                                            "DFM published",
-                                            extra={"event": "dfm_published", "file_id": str(file_id)},
-                                        )
-
-                                        # Proactive dfm_executor recovery: if the pool broke during DFM
-                                        # but we still got results, rebuild it for next DFM task
-                                        if hasattr(dfm_executor, "_broken") and dfm_executor._broken:
-                                            self.geometry_processor._rebuild_dfm_executor()
-                                            dfm_executor = self.geometry_processor.dfm_executor
-                                            logger.info(
-                                                "Rebuilt dfm_executor after successful DFM (pool was broken)",
-                                                extra={"event": "dfm_executor_rebuilt", "file_id": str(file_id)},
-                                            )
-                                    except asyncio.TimeoutError:
-                                        logger.warning(
-                                            "DFM timed out after 180s",
-                                            extra={"event": "dfm_timeout", "file_id": str(file_id)},
-                                        )
-                                    except Exception as e:
-                                        error_code = (
-                                            "GEOMETRY_WORKER_CRASH"
-                                            if isinstance(e, BrokenProcessPool)
-                                            else "GEOMETRY_PHASE2_TIMEOUT"
-                                            if isinstance(e, asyncio.TimeoutError)
-                                            else "DFM_ANALYZER_FAILED"
-                                        )
-                                        logger.warning(
-                                            "DFM task failed (%s): %s",
-                                            error_code,
-                                            e,
-                                            exc_info=True,
-                                            extra={
-                                                "event": "dfm_error",
-                                                "file_id": str(file_id),
-                                                "error_code": error_code,
-                                            },
-                                        )
-                                        if isinstance(e, BrokenProcessPool):
-                                            # Extract worker crash diagnostics
-                                            worker_logs = _extract_worker_diagnostics(file_id)
-
-                                            logger.warning(
-                                                "DFM task failed (%s): %s\nWorker diagnostics:\n%s",
-                                                error_code,
-                                                e,
-                                                worker_logs,
-                                                exc_info=True,
-                                                extra={
-                                                    "event": "dfm_error",
-                                                    "file_id": str(file_id),
-                                                    "error_code": error_code,
-                                                    "worker_diagnostics": worker_logs,
-                                                },
-                                            )
-
-                                            _old_broken = self.geometry_processor
-                                            _shutdown_executor_gracefully(_old_broken, timeout_seconds=10)
-                                            self.geometry_processor = GeometryProcessor()
-                                            # Update dfm_executor reference to point to new processor's dfm_executor
-                                            dfm_executor = self.geometry_processor.dfm_executor
-                                            logger.info(
-                                                "Replaced broken GeometryProcessor after DFM worker crash",
-                                                extra={"event": "dfm_pool_replaced", "file_id": str(file_id)},
-                                            )
-                                        try:
-                                            await self.publish_failure(
-                                                correlation_id,
-                                                file_id,
-                                                error_code,
-                                                repr(e),
-                                                inner_msg.storage_path,
-                                            )
-                                        except Exception as pub_err:
-                                            logger.warning(
-                                                "Failed to publish DFM failure event: %s",
-                                                pub_err,
-                                                extra={
-                                                    "event": "dfm_failure_publish_error",
-                                                    "file_id": str(file_id),
-                                                },
-                                            )
-
                                 # ------------------------------------------------------------------
-                                # Fan-out: all four tasks start immediately, each publishes
+                                # Fan-out: all three tasks start immediately, each publishes
                                 # when done. 15-minute hard deadline prevents runaway.
                                 # ------------------------------------------------------------------
-                                PHASE2_HARD_DEADLINE_SECONDS = 300  # Reduced from 900s (15min) → 300s (5min) - faster failure detection with parallel DFM
+                                PHASE2_HARD_DEADLINE_SECONDS = 300  # 5 minutes for all Phase 2 tasks (thumbnail, GLB, previews)
                                 logger.info(
-                                    "Phase 2 fan-out starting (thumbnail, GLB, previews, DFM)",
+                                    "Phase 2 fan-out starting (thumbnail, GLB, previews)",
                                     extra={"event": "phase2_fanout_start", "file_id": str(file_id)},
                                 )
 
@@ -984,7 +776,7 @@ class UploadConsumer:
                                         await task_coro
                                         completed_tasks.add(task_name)
                                         logger.info(
-                                            f"Task {task_name} completed ({len(completed_tasks)}/4)",
+                                            f"Task {task_name} completed ({len(completed_tasks)}/3)",
                                             extra={"event": f"phase2_task_{task_name}_complete", "file_id": str(file_id)}
                                         )
 
@@ -1009,13 +801,12 @@ class UploadConsumer:
                                         )
 
                                 def cleanup_cad_glb():
-                                    """Clean up CAD GLB after ALL tasks (including DFM) complete.
+                                    """Clean up CAD GLB after ALL Phase 2 tasks complete.
 
-                                    cad.glb is needed by both rendering tasks (thumb, previews, glb)
-                                    AND DFM (multi-body extraction, overlay generation).  Do NOT delete
-                                    it until every task is done.
+                                    cad.glb is needed by rendering tasks (thumb, previews, glb).
+                                    Do NOT delete it until every task is done.
                                     """
-                                    if len(completed_tasks) >= 4 and cad_glb_path:
+                                    if len(completed_tasks) >= 3 and cad_glb_path:
                                         try:
                                             if os.path.exists(cad_glb_path):
                                                 size_mb = os.path.getsize(cad_glb_path)/1024/1024
@@ -1030,9 +821,9 @@ class UploadConsumer:
                                             logger.warning(f"Failed to remove cad.glb: {e}")
 
                                 def cleanup_cad_file():
-                                    """Clean up original CAD file after DFM completes."""
-                                    # Original CAD file needed only for DFM
-                                    if "dfm" in completed_tasks and cad_path_for_dfm:
+                                    """Clean up original CAD file after Phase 2 completes."""
+                                    # Original CAD file no longer needed after rendering tasks finish
+                                    if len(completed_tasks) >= 3 and cad_path_for_dfm:
                                         try:
                                             if os.path.exists(cad_path_for_dfm):
                                                 size_mb = os.path.getsize(cad_path_for_dfm)/1024/1024
@@ -1053,6 +844,7 @@ class UploadConsumer:
                                 def cleanup_shared():
                                     """Run shared-file cleanup; safe to call from any task."""
                                     cleanup_cad_glb()
+                                    cleanup_cad_file()
 
                                 tasks = {
                                     "thumb": asyncio.create_task(
@@ -1063,9 +855,6 @@ class UploadConsumer:
                                     ),
                                     "previews": asyncio.create_task(
                                         _run_with_cleanup("previews", _run_previews(), cleanup_shared)
-                                    ),
-                                    "dfm": asyncio.create_task(
-                                        _run_with_cleanup("dfm", _run_dfm(), lambda: (cleanup_cad_file(), cleanup_shared()))
                                     ),
                                 }
 
@@ -1080,7 +869,7 @@ class UploadConsumer:
                                         extra={"event": "phase2_task_cancelled", "file_id": str(file_id)},
                                     )
 
-                                rss_mb = psutil.Process().memory_info().rss / 1024 / 1024
+                                rss_mb = _check_rss_and_maybe_gc("post-phase2")
                                 logger.info(
                                     "Phase 2 complete (all tasks finished or timed out)",
                                     extra={
@@ -1185,27 +974,27 @@ class UploadConsumer:
         Returns True if file size is within limits, False if exceeds MAX_FILE_SIZE_MB.
         """
         try:
-            async with httpx.AsyncClient(timeout=10.0) as client:  # Short timeout for HEAD request
-                response = await client.head(url)
-                content_length = response.headers.get("Content-Length")
-                if content_length:
-                    size_mb = int(content_length) / (1024 * 1024)
-                    if size_mb > settings.MAX_FILE_SIZE_MB:
-                        logger.warning(
-                            f"File exceeds size limit: {size_mb:.1f}MB > {settings.MAX_FILE_SIZE_MB}MB - rejecting early",
-                            extra={"event": "file_size_early_rejection", "size_mb": size_mb}
-                        )
-                        return False
-                    else:
-                        logger.info(
-                            f"File size check passed: {size_mb:.1f}MB",
-                            extra={"event": "file_size_validated", "size_mb": size_mb}
-                        )
-                        return True
+            # T4a: reuse the shared client instead of creating a fresh one.
+            response = await self._http_client.head(url)
+            content_length = response.headers.get("Content-Length")
+            if content_length:
+                size_mb = int(content_length) / (1024 * 1024)
+                if size_mb > settings.MAX_FILE_SIZE_MB:
+                    logger.warning(
+                        f"File exceeds size limit: {size_mb:.1f}MB > {settings.MAX_FILE_SIZE_MB}MB - rejecting early",
+                        extra={"event": "file_size_early_rejection", "size_mb": size_mb}
+                    )
+                    return False
                 else:
-                    # Content-Length not available, proceed with download
-                    logger.debug("Content-Length header not available, skipping early size check")
+                    logger.info(
+                        f"File size check passed: {size_mb:.1f}MB",
+                        extra={"event": "file_size_validated", "size_mb": size_mb}
+                    )
                     return True
+            else:
+                # Content-Length not available, proceed with download
+                logger.debug("Content-Length header not available, skipping early size check")
+                return True
         except Exception as e:
             logger.warning(f"Failed to check file size before download: {e}, proceeding anyway")
             return True  # Proceed with download if HEAD request fails
@@ -1246,29 +1035,37 @@ class UploadConsumer:
             artifact_id = str(uuid4())
             token = self._token_provider.get_token()
 
+            # T4b: move base64 encoding off the event loop — large blobs (e.g. a
+            # 100 MB GLB) expand to ~133 MB JSON and block all coroutines for
+            # hundreds of milliseconds when encoded synchronously.
+            b64_data = await asyncio.to_thread(
+                lambda: base64.b64encode(data).decode("utf-8")
+            )
+
             payload = {
                 "artifactId": artifact_id,
                 "parentUploadId": parent_upload_id,
                 "storagePath": path,
                 "contentType": content_type,
-                "artifactData": base64.b64encode(data).decode("utf-8"),
+                "artifactData": b64_data,
             }
 
-            # Adaptive timeout: larger files get more time (30s base + 1s per MB)
+            # T4a: reuse the shared client — adaptive per-request timeout via
+            # the extensions dict (overrides the client-level timeout for this call).
             size_mb = len(data) / (1024 * 1024)
-            timeout = 30.0 + min(size_mb * 2, 270.0)  # Max 300s (5 minutes)
-            async with httpx.AsyncClient(timeout=timeout) as client:
-                response = await client.post(
-                    f"{upload_service_url}/upload/v1/uploads/artifacts",
-                    json=payload,
-                    headers={"Authorization": f"Bearer {token}"},
-                )
-                response.raise_for_status()
-                result = response.json()
-                logger.info(
-                    f"Artifact uploaded successfully: {result.get('storagePath')}"
-                )
-                return True
+            request_timeout = 30.0 + min(size_mb * 2, 270.0)  # 30s–300s
+            response = await self._http_client.post(
+                f"{upload_service_url}/upload/v1/uploads/artifacts",
+                json=payload,
+                headers={"Authorization": f"Bearer {token}"},
+                timeout=request_timeout,
+            )
+            response.raise_for_status()
+            result = response.json()
+            logger.info(
+                f"Artifact uploaded successfully: {result.get('storagePath')}"
+            )
+            return True
 
         except httpx.HTTPStatusError as e:
             logger.error(
@@ -1332,54 +1129,6 @@ class UploadConsumer:
 
         await self.queue.consume(self.process_message)
         logger.info("Consumer started and waiting for messages...")
-
-
-async def _extract_bodies_to_temp_stls(glb_path: str) -> dict[int, str]:
-    """Extract per-body meshes from GLB to temporary STL files.
-
-    Args:
-        glb_path: Path to GLB file containing multiple bodies
-
-    Returns:
-        {body_id: temp_stl_path}
-
-    Each STL file is cleaned up after DFM analysis.
-    """
-    import trimesh
-    import io
-
-    stl_paths = {}
-
-    try:
-        with open(glb_path, "rb") as fh:
-            glb_bytes = fh.read()
-
-        scene_data = trimesh.load(io.BytesIO(glb_bytes), file_type='glb')
-
-        if isinstance(scene_data, trimesh.Scene):
-            # Create a temporary directory that will be cleaned up after DFM
-            tmpdir = tempfile.mkdtemp(prefix="dfm_body_")
-
-            for node_name, geometry in scene_data.geometry.items():
-                if isinstance(geometry, trimesh.Trimesh) and len(geometry.vertices) > 0:
-                    body_id = len(stl_paths)
-                    stl_path = os.path.join(tmpdir, f"body_{body_id}.stl")
-
-                    # Export mesh to STL
-                    geometry.export(stl_path)
-                    stl_paths[body_id] = stl_path
-
-                    logger.info(
-                        f"Extracted body {body_id} ({node_name}): "
-                        f"{len(geometry.vertices)} vertices, {len(geometry.faces)} faces"
-                    )
-        else:
-            logger.warning("GLB did not contain a scene, skipping body extraction")
-
-    except Exception as e:
-        logger.error(f"Failed to extract bodies from GLB: {e}", exc_info=True)
-
-    return stl_paths
 
 
 def _extract_worker_diagnostics(file_id: UUID) -> str:

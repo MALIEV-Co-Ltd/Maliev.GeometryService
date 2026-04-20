@@ -3,6 +3,7 @@ Headless GLB thumbnail renderer using trimesh's built-in rendering (PyOpenGL/pyg
 Produces lit, shaded thumbnails with proper depth cues — no flat grey.
 Falls back to matplotlib when trimesh rendering is unavailable.
 """
+
 import io
 import logging
 import os
@@ -12,6 +13,7 @@ import numpy as np
 logger = logging.getLogger(__name__)
 
 # ── Primary renderer: trimesh native rendering ────────────────────────────────
+
 
 def _render_with_trimesh(
     glb_bytes: bytes,
@@ -82,6 +84,7 @@ def _render_with_trimesh(
 
 # ── Fallback renderer: matplotlib ─────────────────────────────────────────────
 
+
 def _render_with_pyvista(
     glb_bytes: bytes,
     size: int,
@@ -103,7 +106,7 @@ def _render_with_pyvista(
         pv.OFF_SCREEN = True
 
         # Load GLB using trimesh (supports glTF/GLB, including multi-body Scenes)
-        tmesh = trimesh.load(io.BytesIO(glb_bytes), file_type='glb')
+        tmesh = trimesh.load(io.BytesIO(glb_bytes), file_type="glb")
 
         # trimesh.load returns a Scene for multi-body GLBs — dump to a single Trimesh
         if isinstance(tmesh, trimesh.Scene):
@@ -112,7 +115,10 @@ def _render_with_pyvista(
             if not geometries:
                 logger.warning("PyVista thumbnail: empty scene")
                 return None
-            tmesh = max(geometries, key=lambda g: len(g.vertices) if isinstance(g, trimesh.Trimesh) else 0)
+            tmesh = max(
+                geometries,
+                key=lambda g: len(g.vertices) if isinstance(g, trimesh.Trimesh) else 0,
+            )
 
         if not isinstance(tmesh, trimesh.Trimesh) or len(tmesh.vertices) == 0:
             logger.warning("PyVista thumbnail: invalid mesh after load")
@@ -123,7 +129,9 @@ def _render_with_pyvista(
         faces = tmesh.faces  # shape (N, 3) — trimesh triangles, no count prefix
 
         # PyVista PolyData requires faces as flat array: [3, v0, v1, v2, 3, v0, v1, v2, ...]
-        faces_pv = np.hstack([np.full((len(faces), 1), 3, dtype=np.int32), faces]).flatten()
+        faces_pv = np.hstack(
+            [np.full((len(faces), 1), 3, dtype=np.int32), faces]
+        ).flatten()
 
         # Create PyVista mesh from vertices and faces
         mesh = pv.PolyData(vertices.copy(), faces_pv)
@@ -145,19 +153,27 @@ def _render_with_pyvista(
 
         # Create renderer with off-screen rendering
         # lighting=None disables default headlight so we can use custom lights
-        plotter = pv.Plotter(off_screen=True, notebook=False, window_size=[size, size], lighting=None)
-        plotter.set_background('#FFFFFF')
-        plotter.enable_anti_aliasing('msaa')
+        plotter = pv.Plotter(
+            off_screen=True, notebook=False, window_size=[size, size], lighting=None
+        )
+        plotter.set_background(None)  # Transparent for light/dark mode theme overlay
+        plotter.enable_anti_aliasing("msaa")
 
         # 3-light rig for even illumination (matches _render_single_view)
-        plotter.add_light(pv.Light(position=(1, -1, 1), intensity=0.35, light_type='scene light'))
-        plotter.add_light(pv.Light(position=(-1, 0.5, 0.5), intensity=0.30, light_type='scene light'))
-        plotter.add_light(pv.Light(position=(0, 0, 1), intensity=0.20, light_type='scene light'))
+        plotter.add_light(
+            pv.Light(position=(1, -1, 1), intensity=0.35, light_type="scene light")
+        )
+        plotter.add_light(
+            pv.Light(position=(-1, 0.5, 0.5), intensity=0.30, light_type="scene light")
+        )
+        plotter.add_light(
+            pv.Light(position=(0, 0, 1), intensity=0.20, light_type="scene light")
+        )
 
         # Add mesh with proper lighting (tuned to avoid overly shiny surfaces)
         plotter.add_mesh(
             mesh,
-            color='#D4D4D4',
+            color="#D4D4D4",
             smooth_shading=True,
             specular=0.02,
             specular_power=8,
@@ -183,8 +199,8 @@ def _render_with_pyvista(
         # Set window size
         plotter.window_size = [size, size]
 
-        # Render to image
-        img = plotter.screenshot(return_img=True)
+        # Render to image with transparent background
+        img = plotter.screenshot(return_img=True, transparent_background=True)
         plotter.close()
 
         if img is None:
@@ -196,7 +212,13 @@ def _render_with_pyvista(
 
         buf = io.BytesIO()
         pil_img = Image.fromarray(img)
-        pil_img.save(buf, format=format.upper())
+        fmt_upper = format.upper()
+        # JPEG does not support alpha channel — composite onto white background
+        if fmt_upper in ("JPEG", "JPG") and pil_img.mode == "RGBA":
+            bg = Image.new("RGB", pil_img.size, (255, 255, 255))
+            bg.paste(pil_img, mask=pil_img.split()[3])
+            pil_img = bg
+        pil_img.save(buf, format=fmt_upper)
         return buf.getvalue()
 
     except ImportError:
@@ -208,6 +230,7 @@ def _render_with_pyvista(
 
 
 # ── Public API ────────────────────────────────────────────────────────────────
+
 
 def render_thumbnail_from_glb_headless(
     glb_bytes: bytes,
@@ -235,19 +258,17 @@ def render_thumbnail_from_glb_headless(
         logger.info("Successfully rendered thumbnail using PyVista (with lighting)")
         return result
 
-    # Fall back to trimesh native rendering
-    result = _render_with_trimesh(glb_bytes, size, format)
-    if result is not None:
-        return result
-
-    logger.info("trimesh rendering unavailable — falling back to PyVista for thumbnail")
-    return _render_with_pyvista(glb_bytes, size, format)
+    # T4d: fallback to trimesh native rendering only — do NOT retry PyVista
+    # (the original code called _render_with_pyvista a second time as a dead
+    # fallback after the first attempt already failed).
+    return _render_with_trimesh(glb_bytes, size, format)
 
 
 def render_thumbnail_stl_fallback(stl_bytes: bytes, size: int = 256) -> bytes | None:
     """Render a thumbnail from STL bytes (converts STL → GLB internally)."""
     try:
         import trimesh
+
         mesh = trimesh.load(io.BytesIO(stl_bytes), file_type="stl")
         return render_thumbnail_from_glb_headless(
             mesh.export(file_type="glb"),
@@ -260,24 +281,43 @@ def render_thumbnail_stl_fallback(stl_bytes: bytes, size: int = 256) -> bytes | 
 
 # ── Simple test ───────────────────────────────────────────────────────────────
 
+
 def test_headless_rendering():
     """Test the headless thumbnail rendering with a simple cube."""
     print("Testing headless GLB thumbnail rendering...")
     try:
         import trimesh
 
-        vertices = np.array([
-            [0, 0, 0], [1, 0, 0], [1, 1, 0], [0, 1, 0],
-            [0, 0, 1], [1, 0, 1], [1, 1, 1], [0, 1, 1],
-        ], dtype=np.float32)
-        faces = np.array([
-            [0, 1, 2], [0, 2, 3],
-            [4, 6, 5], [4, 7, 6],
-            [0, 1, 5], [0, 5, 4],
-            [2, 3, 7], [2, 7, 6],
-            [0, 3, 7], [0, 7, 4],
-            [1, 2, 6], [1, 6, 5],
-        ], dtype=np.int32)
+        vertices = np.array(
+            [
+                [0, 0, 0],
+                [1, 0, 0],
+                [1, 1, 0],
+                [0, 1, 0],
+                [0, 0, 1],
+                [1, 0, 1],
+                [1, 1, 1],
+                [0, 1, 1],
+            ],
+            dtype=np.float32,
+        )
+        faces = np.array(
+            [
+                [0, 1, 2],
+                [0, 2, 3],
+                [4, 6, 5],
+                [4, 7, 6],
+                [0, 1, 5],
+                [0, 5, 4],
+                [2, 3, 7],
+                [2, 7, 6],
+                [0, 3, 7],
+                [0, 7, 4],
+                [1, 2, 6],
+                [1, 6, 5],
+            ],
+            dtype=np.int32,
+        )
         mesh = trimesh.Trimesh(vertices=vertices, faces=faces)
         glb_bytes = mesh.export(file_type="glb")
 

@@ -268,9 +268,9 @@ class TestDFMPerformance:
 
     def test_dfm_performance_regression(self, test_assets_dir):
         """Test for DFM performance regression over time."""
-        stl_file = test_assets_dir / "cube.stl"
+        stl_file = test_assets_dir / "50x50x50mm-solid-cube-binary.stl"
         if not stl_file.exists():
-            pytest.skip("cube.stl not found")
+            pytest.skip("50x50x50mm-solid-cube-binary.stl not found")
 
         stl_bytes = stl_file.read_bytes()
 
@@ -335,9 +335,9 @@ class TestMemoryCleanup:
 
     def test_memory_cleanup_after_dfm_analysis(self, test_assets_dir):
         """Test that memory is cleaned up after DFM analysis."""
-        stl_file = test_assets_dir / "cube.stl"
+        stl_file = test_assets_dir / "50x50x50mm-solid-cube-binary.stl"
         if not stl_file.exists():
-            pytest.skip("cube.stl not found")
+            pytest.skip("50x50x50mm-solid-cube-binary.stl not found")
 
         stl_bytes = stl_file.read_bytes()
 
@@ -390,9 +390,9 @@ class TestMemoryCleanup:
 
     def test_no_orphaned_processes_after_dfm(self, test_assets_dir):
         """Test that no orphaned processes remain after DFM analysis."""
-        stl_file = test_assets_dir / "cube.stl"
+        stl_file = test_assets_dir / "50x50x50mm-solid-cube-binary.stl"
         if not stl_file.exists():
-            pytest.skip("cube.stl not found")
+            pytest.skip("50x50x50mm-solid-cube-binary.stl not found")
 
         stl_bytes = stl_file.read_bytes()
 
@@ -446,9 +446,9 @@ class TestResourceMonitoring:
 
     def test_dfm_resource_profile(self, test_assets_dir):
         """Profile resource usage during DFM analysis."""
-        stl_file = test_assets_dir / "cube.stl"
+        stl_file = test_assets_dir / "50x50x50mm-solid-cube-binary.stl"
         if not stl_file.exists():
-            pytest.skip("cube.stl not found")
+            pytest.skip("50x50x50mm-solid-cube-binary.stl not found")
 
         stl_bytes = stl_file.read_bytes()
 

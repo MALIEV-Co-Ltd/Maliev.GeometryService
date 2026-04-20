@@ -25,18 +25,18 @@ def test_assets_dir():
 @pytest.fixture
 def sample_stl_file(test_assets_dir):
     """Get path to a sample STL file."""
-    stl_file = test_assets_dir / "cube.stl"
+    stl_file = test_assets_dir / "50x50x50mm-solid-cube-binary.stl"
     if not stl_file.exists():
-        pytest.skip("cube.stl not found")
+        pytest.skip("50x50x50mm-solid-cube-binary.stl not found")
     return stl_file
 
 
 @pytest.fixture
 def sample_step_file(test_assets_dir):
     """Get path to a sample STEP file."""
-    step_file = test_assets_dir / "cover.STEP"
+    step_file = test_assets_dir / "50x50x50mm-solid-cube.step"
     if not step_file.exists():
-        pytest.skip("cover.STEP not found")
+        pytest.skip("50x50x50mm-solid-cube.step not found")
     return step_file
 
 

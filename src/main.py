@@ -2,6 +2,8 @@ import asyncio
 import logging
 import os
 import sys
+import time
+from collections import OrderedDict
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager, suppress
 
@@ -13,16 +15,24 @@ from fastapi.responses import JSONResponse
 from scalar_fastapi import get_scalar_api_reference
 
 from src.consumers.upload_consumer import UploadConsumer
+from src.core.config import settings
 from src.core.geometry import GeometryProcessor
 from src.core.observability import setup_observability
 from src.infrastructure.iam_registration import register_iam_permissions
 from src.infrastructure.storage import HttpDownloadService
 
-# Set up basic logging immediately
-logging.basicConfig(level=logging.INFO)
+# Set up logging
+# When OTEL endpoint is not configured (local dev), add stdout handler
+if not settings.OTEL_EXPORTER_OTLP_ENDPOINT:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(levelname)s:%(name)s:%(message)s",
+        stream=sys.stdout,
+    )
 
 # Enable faulthandler to catch segfaults in worker processes
 import faulthandler
+
 faulthandler.enable(file=sys.stderr, all_threads=True)
 logging.getLogger(__name__).info("Faulthandler enabled for crash diagnostics")
 
@@ -159,9 +169,107 @@ async def telemetry_test() -> JSONResponse:
     )
 
 
-# Storage for file data during two-phase analysis
-# In production, this should be replaced with a proper cache (Redis, etc.)
-_file_analysis_cache: dict[str, dict[str, bytes | str]] = {}
+# ---------------------------------------------------------------------------
+# Bounded TTL cache for two-phase analysis file data.
+#
+# Plain dict leaks: every /quality-check call stores raw STL+CAD bytes
+# keyed by upload_id and relies on a client-initiated DELETE to clean up.
+# A browser close, navigation, or network failure silently leaks multi-MB
+# entries that accumulate until OOM.
+#
+# _BoundedFileCache enforces three limits:
+#   MAX_ENTRIES  — at most 20 concurrent uploads tracked
+#   MAX_BYTES    — at most 500 MB total raw file bytes in memory
+#   TTL_SECONDS  — entries older than 10 minutes are evicted opportunistically
+#
+# Eviction is eager (on every write) and O(n) on MAX_ENTRIES, which is tiny.
+# ---------------------------------------------------------------------------
+
+_MAX_CACHE_ENTRIES = 20
+_MAX_CACHE_BYTES = 500 * 1024 * 1024  # 500 MB
+_CACHE_TTL_SECONDS = 3600  # 1 hour (increased from 600s for lazy DFM)
+
+
+class _BoundedFileCache:
+    """Insertion-ordered dict with entry-count, total-byte, and TTL caps."""
+
+    def __init__(
+        self,
+        max_entries: int = _MAX_CACHE_ENTRIES,
+        max_bytes: int = _MAX_CACHE_BYTES,
+        ttl_seconds: float = _CACHE_TTL_SECONDS,
+    ) -> None:
+        self._data: OrderedDict[str, dict] = OrderedDict()
+        self._sizes: dict[str, int] = {}
+        self._timestamps: dict[str, float] = {}
+        self._total_bytes = 0
+        self.max_entries = max_entries
+        self.max_bytes = max_bytes
+        self.ttl_seconds = ttl_seconds
+
+    def __contains__(self, key: str) -> bool:
+        self._evict_expired()
+        return key in self._data
+
+    def __getitem__(self, key: str) -> dict:
+        self._evict_expired()
+        return self._data[key]
+
+    def __setitem__(self, key: str, value: dict) -> None:
+        # Compute size: stl_bytes + cad_bytes (optional)
+        stl = value.get("stl_bytes") or b""
+        cad = value.get("cad_bytes") or b""
+        entry_bytes = len(stl) + len(cad)
+
+        # Remove existing entry for this key before eviction checks
+        if key in self._data:
+            self._remove(key)
+
+        self._evict_expired()
+
+        # Evict oldest until within both limits
+        while self._data and (
+            len(self._data) >= self.max_entries
+            or self._total_bytes + entry_bytes > self.max_bytes
+        ):
+            self._remove_oldest()
+
+        self._data[key] = value
+        self._sizes[key] = entry_bytes
+        self._timestamps[key] = time.monotonic()
+        self._total_bytes += entry_bytes
+
+    def __delitem__(self, key: str) -> None:
+        if key in self._data:
+            self._remove(key)
+        else:
+            raise KeyError(key)
+
+    def _remove(self, key: str) -> None:
+        del self._data[key]
+        self._total_bytes -= self._sizes.pop(key, 0)
+        self._timestamps.pop(key, None)
+
+    def _remove_oldest(self) -> None:
+        if self._data:
+            oldest_key = next(iter(self._data))
+            self._remove(oldest_key)
+
+    def _evict_expired(self) -> None:
+        now = time.monotonic()
+        expired = [k for k, t in self._timestamps.items() if now - t > self.ttl_seconds]
+        for key in expired:
+            self._remove(key)
+
+    def __len__(self) -> int:
+        return len(self._data)
+
+    @property
+    def total_bytes(self) -> int:
+        return self._total_bytes
+
+
+_file_analysis_cache: _BoundedFileCache = _BoundedFileCache()
 
 
 @router.post("/uploads/{upload_id}/quality-check", tags=["DFM Analysis"])
@@ -186,6 +294,7 @@ async def quality_check(upload_id: str, file_data: dict) -> JSONResponse:
         Quality check results with file metrics and validation status
     """
     import base64
+
     from src.core.geometry import _quick_quality_check
 
     try:
@@ -244,36 +353,122 @@ async def quality_check(upload_id: str, file_data: dict) -> JSONResponse:
 
 @router.post("/uploads/{upload_id}/dfm/{process_code}", tags=["DFM Analysis"])
 async def analyze_for_process(
-    upload_id: str, process_code: str, timeout: int = 30
+    upload_id: str, process_code: str, request: dict | None = None, timeout: int = 30
 ) -> JSONResponse:
-    """Phase 2: Process-specific DFM analysis.
+    """Phase 2: Process-specific DFM analysis (on-demand, lazy DFM).
 
     Run DFM analysis for a SPECIFIC manufacturing process only.
     Triggered when user selects "FDM 3D Printing", "CNC Milling", etc.
     Completes in <15 seconds for typical files.
 
+    Now supports cache-miss recovery via GCS re-download for delayed process selection.
+
     Args:
-        upload_id: Unique identifier for this upload (must have completed quality check)
+        upload_id: Unique identifier for this upload
         process_code: Manufacturing process code (e.g., "FDM", "SLA", "CNC_MILL", "CNC_TURN")
+        request: Optional request body with {storage_path, download_url} for cache-miss recovery
         timeout: Maximum analysis time in seconds (default: 30)
 
     Returns:
         Process-specific DFM report with issues found for the selected manufacturing method
     """
-    from src.core.geometry import _analyze_single_process
-    from src.core.geometry_optimizations import get_cached_result, cache_result
+    from datetime import datetime, timezone
+    from uuid import uuid4
 
-    # Check if file data is available from quality check
+    from src.core.geometry import (
+        CncDfmReport,
+        FdmDfmReport,
+        SlaDfmReport,
+        _analyze_single_process,
+        _quick_quality_check,
+    )
+    from src.core.geometry_optimizations import cache_result, get_cached_result
+    from src.core.overlays import generate_and_upload_overlays
+    from src.core.schemas import (
+        DfmAnalysisReadyEvent,
+        DfmAnalysisReadyMessageBody,
+        DfmAnalysisReadyPayload,
+        MessageTypeEnum,
+    )
+    from src.infrastructure.event_publisher import publish_event
+
+    storage_path: str | None = None
+    download_url: str | None = None
+
+    # Parse request body for cache-miss recovery
+    if request:
+        storage_path = request.get("storage_path")
+        download_url = request.get("download_url")
+
+    # Cache miss: need to re-download from GCS
     if upload_id not in _file_analysis_cache:
-        return JSONResponse(
-            content={
-                "upload_id": upload_id,
-                "status": "error",
-                "error_type": "NotFound",
-                "message": "Upload not found. Please run quality check first.",
-            },
-            status_code=404,
-        )
+        if not storage_path and not download_url:
+            return JSONResponse(
+                content={
+                    "upload_id": upload_id,
+                    "status": "error",
+                    "error_type": "NotFound",
+                    "message": "Upload not found. Please provide storage_path or download_url in request body.",
+                },
+                status_code=404,
+            )
+
+        # Re-download from GCS
+        try:
+            if not download_url:
+                return JSONResponse(
+                    content={
+                        "upload_id": upload_id,
+                        "status": "error",
+                        "error_type": "BadRequest",
+                        "message": "download_url is required when upload_id not in cache",
+                    },
+                    status_code=400,
+                )
+
+            # Download file bytes from signed URL
+            http_download = HttpDownloadService()
+            try:
+                file_stream = await http_download.download_file(download_url)
+                data = file_stream.read()
+                file_stream.close()
+
+                # Run quality check to populate cache
+                quality_result = _quick_quality_check(data, None, None)
+
+                # Store file data for future use
+                _file_analysis_cache[upload_id] = {
+                    "stl_bytes": data,
+                    "cad_bytes": None,
+                    "cad_extension": None,
+                }
+
+                logger.info(
+                    f"Cache-miss recovery: downloaded and cached file for {upload_id}",
+                    extra={
+                        "upload_id": upload_id,
+                        "face_count": quality_result.get("face_count"),
+                        "file_size_bytes": len(data),
+                    },
+                )
+            finally:
+                await http_download.close()
+
+        except Exception as e:
+            logger.error(
+                f"Failed to re-download file for {upload_id}: {e}",
+                extra={"upload_id": upload_id},
+                exc_info=True,
+            )
+            return JSONResponse(
+                content={
+                    "upload_id": upload_id,
+                    "status": "error",
+                    "error_type": type(e).__name__,
+                    "message": f"Failed to re-download file: {str(e)}",
+                },
+                status_code=500,
+            )
 
     try:
         # Retrieve stored file data
@@ -352,8 +547,120 @@ async def analyze_for_process(
         cache_result(stl_bytes, process_code, result)
         logger.info(
             f"Cached result for {upload_id}/{process_code}",
-            extra={"upload_id": upload_id, "process_code": process_code, "cache_status": "cached"},
+            extra={
+                "upload_id": upload_id,
+                "process_code": process_code,
+                "cache_status": "cached",
+            },
         )
+
+        # Generate overlays if GLB path is available
+        overlay_paths: dict[str, str] | None = None
+        if storage_path:
+            try:
+                # Check if we have a GLB path (use storage_path as base, replace extension with .glb)
+                import os
+
+                glb_path = f"{os.path.splitext(storage_path)[0]}.glb"
+
+                # Build reports dict for overlay generation
+                reports: dict[str, dict] = {process_code: result}
+
+                # Generate and upload overlays (120 s hard cap so slow overlay
+                # generation never blocks the HTTP response indefinitely).
+                overlay_paths = await asyncio.wait_for(
+                    generate_and_upload_overlays(
+                        glb_path=glb_path,
+                        reports=reports,
+                        storage_path=storage_path,
+                        storage_service=HttpDownloadService(),
+                        upload_id=upload_id,
+                    ),
+                    timeout=120,
+                )
+            except asyncio.TimeoutError:
+                logger.warning(
+                    f"Overlay generation timed out after 120 s for {upload_id}/{process_code}; "
+                    "returning analysis result without overlays",
+                    extra={"upload_id": upload_id, "process_code": process_code},
+                )
+            except Exception as e:
+                logger.warning(
+                    f"Failed to generate overlays for {upload_id}/{process_code}: {e}",
+                    extra={"upload_id": upload_id, "process_code": process_code},
+                    exc_info=True,
+                )
+
+        # Publish DfmAnalysisReadyEvent
+        try:
+            _now = datetime.now(timezone.utc)
+
+            # Build the report based on process_code
+            fdm_report = None
+            sla_report = None
+            cnc_report = None
+
+            if process_code == "FDM":
+                fdm_report = FdmDfmReport.model_validate(result)
+            elif process_code == "SLA":
+                sla_report = SlaDfmReport.model_validate(result)
+            elif process_code in ("CNC", "CNC_MILL", "CNC_TURN"):
+                cnc_report = CncDfmReport.model_validate(result)
+
+            # Use the file_id portion of upload_id if it's a full UUID, otherwise generate one
+            try:
+                file_id = uuid4()
+                # Try to parse upload_id as UUID first
+                try:
+                    from uuid import UUID
+
+                    file_id = UUID(upload_id)
+                except ValueError:
+                    # upload_id is not a valid UUID, use a generated one
+                    file_id = uuid4()
+            except Exception:
+                file_id = uuid4()
+
+            dfm_event = DfmAnalysisReadyEvent(
+                messageId=uuid4(),
+                correlationId=upload_id,
+                messageType=[
+                    "urn:message:Maliev.MessagingContracts.Contracts.Geometry:DfmAnalysisReadyEvent"
+                ],
+                message=DfmAnalysisReadyMessageBody(
+                    messageId=uuid4(),
+                    messageName="DfmAnalysisReadyEvent",
+                    messageType=MessageTypeEnum.Event,
+                    messageVersion="1.0.0",
+                    publishedBy="GeometryService",
+                    consumedBy=["IntranetBff"],
+                    correlationId=upload_id,
+                    causationId=None,
+                    occurredAtUtc=_now,
+                    isPublic=False,
+                    payload=DfmAnalysisReadyPayload(
+                        fileId=str(file_id),
+                        storagePath=storage_path or "",
+                        fdmReport=fdm_report,
+                        slaReport=sla_report,
+                        cncReport=cnc_report,
+                        analyzedAt=_now,
+                        overlayPaths=overlay_paths,
+                        bodyCount=None,  # Not tracked in on-demand endpoint
+                    ),
+                ),
+            )
+            await publish_event(dfm_event, "maliev.geometryservice.v1.dfm.ready")
+            logger.info(
+                f"Published DfmAnalysisReadyEvent for {upload_id}/{process_code}",
+                extra={"upload_id": upload_id, "process_code": process_code},
+            )
+        except Exception as e:
+            logger.warning(
+                f"Failed to publish DfmAnalysisReadyEvent for {upload_id}/{process_code}: {e}",
+                extra={"upload_id": upload_id, "process_code": process_code},
+                exc_info=True,
+            )
 
         return JSONResponse(
             content={
@@ -368,7 +675,11 @@ async def analyze_for_process(
     except asyncio.TimeoutError:
         logger.error(
             f"Process analysis timed out after {timeout}s for {upload_id}/{process_code}",
-            extra={"upload_id": upload_id, "process_code": process_code, "timeout": timeout},
+            extra={
+                "upload_id": upload_id,
+                "process_code": process_code,
+                "timeout": timeout,
+            },
         )
         return JSONResponse(
             content={
@@ -384,7 +695,12 @@ async def analyze_for_process(
     except Exception as e:
         logger.error(
             f"Process analysis failed for {upload_id}/{process_code}: {e}",
-            extra={"upload_id": upload_id, "process_code": process_code, "error": str(e)},
+
+            extra={
+                "upload_id": upload_id,
+                "process_code": process_code,
+                "error": str(e),
+            },
             exc_info=True,
         )
         return JSONResponse(
@@ -414,14 +730,11 @@ async def cleanup_upload(upload_id: str) -> JSONResponse:
     if upload_id in _file_analysis_cache:
         del _file_analysis_cache[upload_id]
         logger.info(f"Cleaned up upload data for {upload_id}")
-        return JSONResponse(
-            content={"upload_id": upload_id, "status": "cleaned_up"}
-        )
-    else:
-        return JSONResponse(
-            content={"upload_id": upload_id, "status": "not_found"},
-            status_code=404,
-        )
+        return JSONResponse(content={"upload_id": upload_id, "status": "cleaned_up"})
+    return JSONResponse(
+        content={"upload_id": upload_id, "status": "not_found"},
+        status_code=404,
+    )
 
 
 # Also add mirroring endpoints to the root app for extra robustness

@@ -3,6 +3,13 @@
 import pytest
 import trimesh
 import numpy as np
+from pathlib import Path
+
+
+@pytest.fixture
+def test_assets_dir():
+    """Return path to the test assets directory."""
+    return Path(__file__).parent / "assets"
 
 
 @pytest.fixture

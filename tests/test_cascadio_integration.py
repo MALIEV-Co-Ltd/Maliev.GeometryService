@@ -9,9 +9,13 @@ import os
 import time
 import psutil
 from pathlib import Path
-from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, TimeoutError as FuturesTimeout
+from concurrent.futures import (
+    ProcessPoolExecutor,
+    ThreadPoolExecutor,
+    TimeoutError as FuturesTimeout,
+)
 
-from src.core.geometry import GeometryProcessor
+from src.core.geometry import GeometryProcessor, load_cascadio_geometry
 from tests.test_utils import (
     monitor_resources,
     check_for_orphaned_processes,
@@ -23,7 +27,7 @@ from tests.test_utils import (
 @pytest.fixture
 def sample_step_file(test_assets_dir):
     """Get path to a sample STEP file."""
-    step_file = test_assets_dir / "cube.step"
+    step_file = test_assets_dir / "50x50x50mm-solid-cube.step"
     assert step_file.exists(), f"Test asset {step_file} not found"
     return step_file
 
@@ -32,13 +36,16 @@ def sample_step_file(test_assets_dir):
 def multi_body_step_file(test_assets_dir):
     """Get path to a multi-body STEP file if available."""
     # Try to find a multi-body STEP file
-    multi_files = list(test_assets_dir.glob("*.step")) + list(test_assets_dir.glob("*.stp"))
+    multi_files = list(test_assets_dir.glob("*multibod*.step"))
     for f in multi_files:
-        # Check if file is large enough to potentially be multi-body
-        if f.stat().st_size > 20000:  # > 20KB
+        if f.stat().st_size > 5000:  # > 5KB
             return f
-    # Fall back to cube.step
-    return test_assets_dir / "cube.step"
+    # Fall back to 50mm-polygon-multibodies-nonoverlap.step
+    multi_file = test_assets_dir / "50mm-polygon-multibodies-nonoverlap.step"
+    if multi_file.exists():
+        return multi_file
+    # Final fallback
+    return test_assets_dir / "50x50x50mm-solid-cube.step"
 
 
 class TestCascadioIntegration:
@@ -53,7 +60,9 @@ class TestCascadioIntegration:
         try:
             # Monitor resources during load
             with monitor_resources() as monitor:
-                metrics, preview, thumbnail = processor.analyze_bytes(step_bytes, ".step")
+                metrics, preview, thumbnail = processor.analyze_bytes(
+                    step_bytes, ".step"
+                )
 
             # Verify result structure
             assert metrics is not None, "analyze_bytes returned None metrics"
@@ -64,7 +73,9 @@ class TestCascadioIntegration:
 
             # Check memory usage is reasonable
             peak_memory = monitor.get_peak_memory()
-            assert peak_memory < 1000, f"Peak memory usage {peak_memory}MB exceeds 1000MB"
+            assert peak_memory < 1000, (
+                f"Peak memory usage {peak_memory}MB exceeds 1000MB"
+            )
         finally:
             processor.shutdown()
 
@@ -92,7 +103,9 @@ class TestCascadioIntegration:
 
         # Verify result indicates failure
         assert result is not None, "Result should not be None on timeout"
-        assert result.get("success") is False, "Result should indicate failure on timeout"
+        assert result.get("success") is False, (
+            "Result should indicate failure on timeout"
+        )
 
         # Wait for cleanup to complete
         time.sleep(1.0)
@@ -104,7 +117,9 @@ class TestCascadioIntegration:
         orphaned_after = check_for_orphaned_processes()
         orphaned_count = len(orphaned_after) - len(orphaned_before)
 
-        assert orphaned_count == 0, f"Found {orphaned_count} orphaned processes after timeout"
+        assert orphaned_count == 0, (
+            f"Found {orphaned_count} orphaned processes after timeout"
+        )
 
         # Verify children were cleaned up (may have some, but not excessive)
         child_growth = children_after - children_before
@@ -162,7 +177,9 @@ class TestCascadioIntegration:
                     pytest.fail("Concurrent load timed out")
 
         # Verify all completed
-        assert len(results) == num_concurrent, f"Only {len(results)}/{num_concurrent} loads completed"
+        assert len(results) == num_concurrent, (
+            f"Only {len(results)}/{num_concurrent} loads completed"
+        )
 
         # Verify all succeeded (or at least didn't crash)
         for i, result in enumerate(results):
@@ -181,6 +198,7 @@ class TestCascadioIntegration:
 
         # Force garbage collection
         import gc
+
         gc.collect()
 
         # Give system time to release memory
@@ -199,17 +217,23 @@ class TestCascadioIntegration:
         step_bytes = sample_step_file.read_bytes()
 
         # Measure load time
-        perf = measure_performance(lambda: load_cascadio_geometry(step_bytes, timeout_seconds=30))
+        perf = measure_performance(
+            lambda: load_cascadio_geometry(step_bytes, timeout_seconds=30)
+        )
 
         # Verify it completed successfully
         assert perf["success"], f"Load failed: {perf.get('error')}"
 
         # Verify performance is reasonable (< 30 seconds)
-        assert perf["duration_seconds"] < 30, f"Load took {perf['duration_seconds']:.2f}s, exceeds 30s baseline"
+        assert perf["duration_seconds"] < 30, (
+            f"Load took {perf['duration_seconds']:.2f}s, exceeds 30s baseline"
+        )
 
         # Log performance for monitoring
-        print(f"\nCascadio load performance: {perf['duration_seconds']:.2f}s, "
-              f"memory: {perf['rss_mb_delta']:.1f}MB delta")
+        print(
+            f"\nCascadio load performance: {perf['duration_seconds']:.2f}s, "
+            f"memory: {perf['rss_mb_delta']:.1f}MB delta"
+        )
 
     def test_cascadio_invalid_input_handling(self):
         """Test that cascadio handles invalid input gracefully."""
@@ -226,12 +250,16 @@ class TestCascadioIntegration:
             assert result is not None, f"Invalid input {i} returned None"
 
             # Should indicate failure
-            assert result.get("success") is False, f"Invalid input {i} incorrectly succeeded"
+            assert result.get("success") is False, (
+                f"Invalid input {i} incorrectly succeeded"
+            )
 
     def test_cascadio_large_file_timeout(self, test_assets_dir):
         """Test timeout behavior with a large file that might timeout."""
         # Use the largest available file
-        files = list(test_assets_dir.glob("*.step")) + list(test_assets_dir.glob("*.stp"))
+        files = list(test_assets_dir.glob("*.step")) + list(
+            test_assets_dir.glob("*.stp")
+        )
         if not files:
             pytest.skip("No STEP files found for timeout test")
 
@@ -264,6 +292,7 @@ class TestCascadioCleanup:
 
     def test_processpool_terminates_on_timeout(self):
         """Test that ProcessPoolExecutor properly terminates workers on timeout."""
+
         # Create a function that will timeout
         def slow_function():
             time.sleep(100)  # Sleep for a long time
@@ -291,6 +320,7 @@ class TestCascadioCleanup:
 
     def test_threadpool_vs_processpool_cleanup(self):
         """Compare ThreadPoolExecutor vs ProcessPoolExecutor cleanup."""
+
         # Note: This test documents why we use ProcessPoolExecutor
         def hang_function():
             time.sleep(100)

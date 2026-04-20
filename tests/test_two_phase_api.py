@@ -24,18 +24,18 @@ def test_assets_dir():
 @pytest.fixture
 def sample_stl_file(test_assets_dir):
     """Get path to a sample STL file."""
-    stl_file = test_assets_dir / "cube.stl"
+    stl_file = test_assets_dir / "50x50x50mm-solid-cube-binary.stl"
     if not stl_file.exists():
-        pytest.skip("cube.stl not found")
+        pytest.skip("50x50x50mm-solid-cube-binary.stl not found")
     return stl_file
 
 
 @pytest.fixture
 def sample_step_file(test_assets_dir):
     """Get path to a sample STEP file."""
-    step_file = test_assets_dir / "cover.STEP"
+    step_file = test_assets_dir / "50x50x50mm-solid-cube.step"
     if not step_file.exists():
-        pytest.skip("cover.STEP not found")
+        pytest.skip("50x50x50mm-solid-cube.step not found")
     return step_file
 
 
@@ -51,9 +51,7 @@ class TestQualityCheckEndpoint:
     """Test Phase 1: Quality check endpoint."""
 
     @pytest.mark.asyncio
-    async def test_quality_check_completes_quickly(
-        self, client, sample_stl_file
-    ):
+    async def test_quality_check_completes_quickly(self, client, sample_stl_file):
         """Test that quality check completes quickly."""
         stl_bytes = sample_stl_file.read_bytes()
         stl_b64 = base64.b64encode(stl_bytes).decode("utf-8")
@@ -133,9 +131,7 @@ class TestProcessAnalysisEndpoint:
     """Test Phase 2: Process-specific analysis endpoint."""
 
     @pytest.mark.asyncio
-    async def test_single_process_analysis(
-        self, client, sample_stl_file
-    ):
+    async def test_single_process_analysis(self, client, sample_stl_file):
         """Test single process analysis after quality check."""
         # First, run quality check
         stl_bytes = sample_stl_file.read_bytes()
@@ -221,9 +217,7 @@ class TestProcessAnalysisEndpoint:
         assert data["error_type"] == "NotFound"
 
     @pytest.mark.asyncio
-    async def test_process_analysis_with_invalid_process(
-        self, client, sample_stl_file
-    ):
+    async def test_process_analysis_with_invalid_process(self, client, sample_stl_file):
         """Test process analysis with invalid process code."""
         # First, run quality check
         stl_bytes = sample_stl_file.read_bytes()

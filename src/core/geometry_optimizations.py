@@ -8,7 +8,9 @@ This module provides:
 """
 
 import hashlib
+import json
 import time
+from collections import OrderedDict
 from functools import lru_cache
 from typing import Any
 
@@ -79,8 +81,80 @@ def get_tessellation_tolerance(process_code: str, file_size_mb: float = 0) -> fl
 
 
 # ── Optimization 3: Result Caching ─────────────────────────────────────
+#
+# DFM reports are rich objects (face index lists, centroids, issue geometry)
+# and can easily reach 10-50 MB each.  The previous FIFO-by-count cap of 100
+# entries had no size limit, allowing a 100 × 50 MB = 5 GB ceiling.
+#
+# _BoundedDfmCache enforces:
+#   MAX_ENTRIES — at most 50 reports cached
+#   MAX_BYTES   — at most 200 MB total (JSON-serialized approximation)
+# Eviction is FIFO (oldest-first) on every write.
 
-_cache: dict[str, dict[str, Any]] = {}
+_MAX_DFM_CACHE_ENTRIES = 50
+_MAX_DFM_CACHE_BYTES = 200 * 1024 * 1024  # 200 MB
+
+
+class _BoundedDfmCache:
+    """Insertion-ordered DFM report cache with entry-count and byte caps."""
+
+    def __init__(
+        self,
+        max_entries: int = _MAX_DFM_CACHE_ENTRIES,
+        max_bytes: int = _MAX_DFM_CACHE_BYTES,
+    ) -> None:
+        self._data: OrderedDict[str, dict[str, Any]] = OrderedDict()
+        self._sizes: dict[str, int] = {}
+        self._total_bytes = 0
+        self.max_entries = max_entries
+        self.max_bytes = max_bytes
+
+    def get(self, key: str) -> dict[str, Any] | None:
+        return self._data.get(key)
+
+    def set(self, key: str, value: dict[str, Any]) -> None:
+        # Approximate serialized size once on insertion; avoids repeated dumps.
+        try:
+            entry_bytes = len(json.dumps(value, default=str).encode())
+        except Exception:
+            entry_bytes = 0
+
+        if key in self._data:
+            self._remove(key)
+
+        # Evict oldest until within both limits
+        while self._data and (
+            len(self._data) >= self.max_entries
+            or self._total_bytes + entry_bytes > self.max_bytes
+        ):
+            self._remove_oldest()
+
+        self._data[key] = value
+        self._sizes[key] = entry_bytes
+        self._total_bytes += entry_bytes
+
+    def clear(self) -> None:
+        self._data.clear()
+        self._sizes.clear()
+        self._total_bytes = 0
+
+    def _remove(self, key: str) -> None:
+        del self._data[key]
+        self._total_bytes -= self._sizes.pop(key, 0)
+
+    def _remove_oldest(self) -> None:
+        if self._data:
+            self._remove(next(iter(self._data)))
+
+    def __len__(self) -> int:
+        return len(self._data)
+
+    @property
+    def total_bytes(self) -> int:
+        return self._total_bytes
+
+
+_cache: _BoundedDfmCache = _BoundedDfmCache()
 
 
 def get_cache_key(stl_bytes: bytes, process_code: str) -> str:
@@ -121,19 +195,12 @@ def cache_result(stl_bytes: bytes, process_code: str, result: dict[str, Any]) ->
         result: DFM analysis result to cache
     """
     cache_key = get_cache_key(stl_bytes, process_code)
-    _cache[cache_key] = result
-
-    # Implement simple LRU eviction if cache gets too large
-    if len(_cache) > 100:
-        # Remove oldest entry (simple FIFO)
-        oldest_key = next(iter(_cache))
-        del _cache[oldest_key]
+    _cache.set(cache_key, result)
 
 
 def clear_cache() -> None:
     """Clear all cached results."""
-    global _cache
-    _cache = {}
+    _cache.clear()
 
 
 # ── Optimization 4: Process-Specific Analysis with All Optimizations ───────

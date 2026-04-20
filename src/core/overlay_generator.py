@@ -215,6 +215,87 @@ def generate_multi_body_overlay_glb(
         return None
 
 
+def generate_support_tower_overlay_glb(
+    mesh: object,  # trimesh.Trimesh
+    face_indices: list[int],
+    reference_center: "np.ndarray | None" = None,
+) -> bytes | None:
+    """Build a GLB of triangular prisms projecting from overhanging faces down to the build plate.
+
+    For each overhang triangle, a prism is extruded straight down (in Z) to the mesh's
+    global minimum Z (the build-plate datum, same as used by compute_overhang_analysis).
+    The resulting GLB uses the same coordinate transform as generate_overlay_glb so it
+    aligns with the main model. No vertex colours are baked — the JS OVERLAY_STYLES
+    table in part-viewer.js controls appearance (light blue, alpha 0.35).
+
+    Args:
+        mesh:             Source trimesh.Trimesh (Z-up, mm).
+        face_indices:     Overhang triangle indices.
+        reference_center: Centre used when the main GLB was exported.
+
+    Returns:
+        GLB bytes or None on failure.
+    """
+    import trimesh
+
+    try:
+        if not isinstance(mesh, trimesh.Trimesh):
+            return None
+        if not face_indices:
+            return None
+
+        # Clamp to valid range
+        max_idx = len(mesh.faces) - 1
+        valid_indices = [f for f in face_indices if 0 <= f <= max_idx]
+        if not valid_indices:
+            return None
+
+        # Build-plate datum = global minimum Z of the entire mesh
+        z_min = float(mesh.vertices[:, 2].min())
+
+        # Top triangle vertices: shape (N, 3, 3)
+        face_verts = mesh.vertices[mesh.faces[valid_indices]]  # (N, 3, 3)
+        N = len(valid_indices)
+
+        # Bottom vertices: same x,y but z clamped to build-plate
+        bottom_verts = face_verts.copy()
+        bottom_verts[:, :, 2] = z_min
+
+        # Prism vertices: [top0, top1, top2, bot0, bot1, bot2] per prism
+        prism_verts = np.concatenate([face_verts, bottom_verts], axis=1)  # (N, 6, 3)
+        all_verts = prism_verts.reshape(-1, 3)  # (N*6, 3)
+
+        # 8 triangles per prism: top cap + bottom cap (reversed) + 3 side quads (2 tris each)
+        # Local indices: 0,1,2 = top vertices; 3,4,5 = bottom vertices
+        local_faces = np.array([
+            [0, 1, 2],            # top cap
+            [3, 5, 4],            # bottom cap (reversed winding)
+            [0, 3, 4], [0, 4, 1], # side 0–1
+            [1, 4, 5], [1, 5, 2], # side 1–2
+            [2, 5, 3], [2, 3, 0], # side 2–0
+        ], dtype=np.int64)        # (8, 3)
+
+        # Broadcast per-prism vertex offsets: prism i starts at vertex i*6
+        offsets = np.arange(N, dtype=np.int64)[:, None, None] * 6  # (N, 1, 1)
+        all_faces = (local_faces[None, :, :] + offsets).reshape(-1, 3)  # (N*8, 3)
+
+        support_mesh = trimesh.Trimesh(
+            vertices=all_verts,
+            faces=all_faces,
+            process=False,
+        )
+
+        center = reference_center if reference_center is not None else mesh.center_mass
+        support_mesh.apply_translation(-center)
+        support_mesh.apply_transform(_Z_TO_YUP)
+
+        return support_mesh.export(file_type="glb")
+
+    except Exception as exc:
+        logger.warning("support tower overlay GLB generation failed: %s", exc)
+        return None
+
+
 def get_category_color_hex(category: str) -> str:
     """Return the CSS hex colour for a DFM category (for frontend use)."""
     rgba = _CATEGORY_COLORS.get(category, _CATEGORY_COLORS["default"])

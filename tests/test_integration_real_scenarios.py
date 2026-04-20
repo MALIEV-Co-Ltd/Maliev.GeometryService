@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import List, Dict, Any
 
 from src.core.geometry import (
-    load_cascadio_geometry,
+    load_cascadio_geometry,  # noqa: F401 – used in all test methods below
     compute_dfm_analysis_for_stl,
     compute_multi_body_dfm_analysis,
 )
@@ -27,9 +27,9 @@ class TestFullPipeline:
 
     def test_full_pipeline_step_to_overlays(self, test_assets_dir):
         """Test complete pipeline: STEP file → multi-body GLBs → DFM analysis."""
-        step_file = test_assets_dir / "cube.step"
+        step_file = test_assets_dir / "50x50x50mm-solid-cube.step"
         if not step_file.exists():
-            pytest.skip("cube.step not found")
+            pytest.skip("50x50x50mm-solid-cube.step not found")
 
         step_bytes = step_file.read_bytes()
 
@@ -37,7 +37,9 @@ class TestFullPipeline:
         cascadio_result = load_cascadio_geometry(step_bytes, timeout_seconds=30)
 
         assert cascadio_result is not None, "Cascadio loading failed"
-        assert cascadio_result.get("success") is not False, "Cascadio loading indicated failure"
+        assert cascadio_result.get("success") is not False, (
+            "Cascadio loading indicated failure"
+        )
 
         if not cascadio_result.get("success"):
             # If cascadio failed, we can't continue
@@ -88,7 +90,9 @@ class TestFullPipeline:
     def test_pipeline_with_multi_body_file(self, test_assets_dir):
         """Test complete pipeline with a multi-body STEP file."""
         # Find a STEP file that might be multi-body
-        step_files = list(test_assets_dir.glob("*.step")) + list(test_assets_dir.glob("*.stp"))
+        step_files = list(test_assets_dir.glob("*.step")) + list(
+            test_assets_dir.glob("*.stp")
+        )
         if not step_files:
             pytest.skip("No STEP files found")
 
@@ -112,7 +116,9 @@ class TestFullPipeline:
         glb_bytes_list = [body["mesh"] for body in bodies]
 
         # Run DFM analysis on all bodies
-        dfm_result = compute_multi_body_dfm_analysis(glb_bytes_list, timeout_seconds=120)
+        dfm_result = compute_multi_body_dfm_analysis(
+            glb_bytes_list, timeout_seconds=120
+        )
 
         # Verify results
         assert dfm_result is not None, "Multi-body DFM returned None"
@@ -159,8 +165,9 @@ class TestConcurrentOperations:
                     pytest.fail(f"Concurrent load failed: {e}")
 
         # Verify all completed
-        assert len(results) == num_concurrent, \
+        assert len(results) == num_concurrent, (
             f"Only {len(results)}/{num_concurrent} uploads completed"
+        )
 
         # Verify no orphaned processes
         time.sleep(1.0)  # Give time for cleanup
@@ -173,9 +180,9 @@ class TestConcurrentOperations:
         """Test handling multiple concurrent DFM analyses."""
         from concurrent.futures import ThreadPoolExecutor
 
-        stl_file = test_assets_dir / "cube.stl"
+        stl_file = test_assets_dir / "50x50x50mm-solid-cube-binary.stl"
         if not stl_file.exists():
-            pytest.skip("cube.stl not found")
+            pytest.skip("50x50x50mm-solid-cube-binary.stl not found")
 
         stl_bytes = stl_file.read_bytes()
 
@@ -203,8 +210,9 @@ class TestConcurrentOperations:
                     pytest.fail(f"Concurrent DFM failed: {e}")
 
         # Verify all completed
-        assert len(results) == num_concurrent, \
+        assert len(results) == num_concurrent, (
             f"Only {len(results)}/{num_concurrent} analyses completed"
+        )
 
         # Verify no orphaned processes
         time.sleep(1.0)  # Give time for cleanup
@@ -217,8 +225,8 @@ class TestConcurrentOperations:
         """Test mixed concurrent operations (cascadio + DFM)."""
         from concurrent.futures import ThreadPoolExecutor
 
-        step_file = test_assets_dir / "cube.step"
-        stl_file = test_assets_dir / "cube.stl"
+        step_file = test_assets_dir / "50x50x50mm-solid-cube.step"
+        stl_file = test_assets_dir / "50x50x50mm-solid-cube-binary.stl"
 
         if not step_file.exists() or not stl_file.exists():
             pytest.skip("Required test files not found")
@@ -347,8 +355,8 @@ class TestResourceManagement:
         cleaned_before = cleanup_temp_files(prefix="geom_")
 
         # Perform operations
-        step_file = test_assets_dir / "cube.step"
-        stl_file = test_assets_dir / "cube.stl"
+        step_file = test_assets_dir / "50x50x50mm-solid-cube.step"
+        stl_file = test_assets_dir / "50x50x50mm-solid-cube-binary.stl"
 
         if step_file.exists():
             step_bytes = step_file.read_bytes()
@@ -360,6 +368,7 @@ class TestResourceManagement:
 
         # Give time for cleanup
         import time
+
         time.sleep(1.0)
 
         # Check temp files again
@@ -395,12 +404,14 @@ class TestResourceManagement:
             time.sleep(0.2)
 
             rss_after = process.memory_info().rss / 1024 / 1024
-            memory_samples.append({
-                "iteration": i,
-                "before": rss_before,
-                "after": rss_after,
-                "delta": rss_after - rss_before,
-            })
+            memory_samples.append(
+                {
+                    "iteration": i,
+                    "before": rss_before,
+                    "after": rss_after,
+                    "delta": rss_after - rss_before,
+                }
+            )
 
         # Check for memory leaks
         # Later iterations should not show continuously increasing memory
@@ -408,15 +419,18 @@ class TestResourceManagement:
 
         # Average delta should be reasonable
         avg_delta = sum(deltas) / len(deltas)
-        assert avg_delta < 100, f"Average memory growth {avg_delta:.1f}MB indicates leak"
+        assert avg_delta < 100, (
+            f"Average memory growth {avg_delta:.1f}MB indicates leak"
+        )
 
         # Last iteration should not be significantly higher than first
         first_delta = deltas[0]
         last_delta = deltas[-1]
         delta_growth = last_delta - first_delta
 
-        assert delta_growth < 50, \
+        assert delta_growth < 50, (
             f"Memory delta grew by {delta_growth:.1f}MB across iterations, indicating leak"
+        )
 
         print(f"\nMemory stability: {[f'{d:.1f}' for d in deltas]} MB")
 
@@ -460,12 +474,14 @@ class TestRealWorldScenarios:
         total_time = time.time() - start_time
 
         # All should complete
-        assert len(results) == num_operations, \
+        assert len(results) == num_operations, (
             f"Only {len(results)}/{num_operations} operations completed"
+        )
 
         # Should complete in reasonable time
         # (allowing 30s per operation plus overhead)
-        assert total_time < num_operations * 35, \
+        assert total_time < num_operations * 35, (
             f"Sequential operations took {total_time:.1f}s, too slow"
+        )
 
         print(f"\nRapid sequential: {num_operations} operations in {total_time:.1f}s")

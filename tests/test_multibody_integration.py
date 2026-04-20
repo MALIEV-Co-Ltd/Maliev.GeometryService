@@ -115,10 +115,13 @@ class TestCascadioMultiBodyLoading:
 class TestMultiBodyMetricsComputation:
     """Test metrics worker correctly handles multi-body meshes."""
 
+    # _compute_metrics_worker calls _load_cad_with_cascadio_isolated (not the
+    # public _load_cad_with_cascadio wrapper). Patch the isolated version.
+
     def test_metrics_aggregates_volume_across_bodies(self, two_body_meshes):
         """Volume should be sum of all body volumes."""
         # Each box is 10x10x10 = 1000 mm³, total should be 2000 mm³
-        with patch("src.core.geometry._load_cad_with_cascadio") as mock_cascadio:
+        with patch("src.core.geometry._load_cad_with_cascadio_isolated") as mock_cascadio:
             mock_cascadio.return_value = (two_body_meshes, b"fake_glb", 2, ["Body_01", "Body_02"])
 
             result = _compute_metrics_worker(b"fake_data", ".step")
@@ -127,7 +130,7 @@ class TestMultiBodyMetricsComputation:
 
     def test_metrics_aggregates_surface_area(self, two_body_meshes):
         """Surface area should be sum of all body areas."""
-        with patch("src.core.geometry._load_cad_with_cascadio") as mock_cascadio:
+        with patch("src.core.geometry._load_cad_with_cascadio_isolated") as mock_cascadio:
             mock_cascadio.return_value = (two_body_meshes, b"fake_glb", 2, ["Body_01", "Body_02"])
 
             result = _compute_metrics_worker(b"fake_data", ".step")
@@ -137,7 +140,7 @@ class TestMultiBodyMetricsComputation:
 
     def test_metrics_includes_body_count(self, three_body_meshes):
         """Body count should be reported in metrics."""
-        with patch("src.core.geometry._load_cad_with_cascadio") as mock_cascadio:
+        with patch("src.core.geometry._load_cad_with_cascadio_isolated") as mock_cascadio:
             mock_cascadio.return_value = (three_body_meshes, b"fake_glb", 3, ["Body_01", "Body_02", "Body_03"])
 
             result = _compute_metrics_worker(b"fake_data", ".step")
@@ -146,7 +149,7 @@ class TestMultiBodyMetricsComputation:
 
     def test_metrics_exports_per_body_stl_bytes(self, two_body_meshes):
         """Should return dict mapping body_id to STL bytes."""
-        with patch("src.core.geometry._load_cad_with_cascadio") as mock_cascadio:
+        with patch("src.core.geometry._load_cad_with_cascadio_isolated") as mock_cascadio:
             mock_cascadio.return_value = (two_body_meshes, b"fake_glb", 2, ["Body_01", "Body_02"])
 
             result = _compute_metrics_worker(b"fake_data", ".step")
@@ -159,7 +162,7 @@ class TestMultiBodyMetricsComputation:
 
     def test_metrics_preserves_backward_compat_field(self, two_body_meshes):
         """Legacy mesh_stl_bytes field should contain first body."""
-        with patch("src.core.geometry._load_cad_with_cascadio") as mock_cascadio:
+        with patch("src.core.geometry._load_cad_with_cascadio_isolated") as mock_cascadio:
             mock_cascadio.return_value = (two_body_meshes, b"fake_glb", 2, ["Body_01", "Body_02"])
 
             result = _compute_metrics_worker(b"fake_data", ".step")
@@ -171,7 +174,7 @@ class TestMultiBodyMetricsComputation:
 
     def test_metrics_handles_empty_mesh_list(self):
         """Empty mesh list should raise ValueError."""
-        with patch("src.core.geometry._load_cad_with_cascadio") as mock_cascadio:
+        with patch("src.core.geometry._load_cad_with_cascadio_isolated") as mock_cascadio:
             mock_cascadio.return_value = ([], b"", 0, [])
 
             with pytest.raises(ValueError, match="FILE_CORRUPT"):
@@ -388,7 +391,7 @@ class TestMultiBodyErrorHandling:
 
     def test_empty_mesh_dict_in_metrics(self):
         """Empty mesh list should raise error."""
-        with patch("src.core.geometry._load_cad_with_cascadio") as mock_cascadio:
+        with patch("src.core.geometry._load_cad_with_cascadio_isolated") as mock_cascadio:
             mock_cascadio.return_value = ([], b"", 0, [])
 
             with pytest.raises(ValueError, match="FILE_CORRUPT"):
@@ -430,7 +433,7 @@ class TestMultiBodyPerformance:
         """Metrics computation should handle 12+ bodies efficiently."""
         import time
 
-        with patch("src.core.geometry._load_cad_with_cascadio") as mock_cascadio:
+        with patch("src.core.geometry._load_cad_with_cascadio_isolated") as mock_cascadio:
             mock_cascadio.return_value = (many_body_meshes, b"fake_glb", 12, [f"Body_{i+1:02d}" for i in range(12)])
 
             start = time.time()

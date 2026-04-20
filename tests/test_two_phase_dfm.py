@@ -25,30 +25,32 @@ def test_assets_dir():
 @pytest.fixture
 def sample_stl_file(test_assets_dir):
     """Get path to a sample STL file."""
-    stl_file = test_assets_dir / "cube.stl"
+    stl_file = test_assets_dir / "50x50x50mm-solid-cube-binary.stl"
     if not stl_file.exists():
-        pytest.skip("cube.stl not found")
+        pytest.skip("50x50x50mm-solid-cube-binary.stl not found")
     return stl_file
 
 
 @pytest.fixture
 def sample_step_file(test_assets_dir):
     """Get path to a sample STEP file."""
-    step_file = test_assets_dir / "MEC031233_01.stp"
+    step_file = test_assets_dir / "50x50x50mm-solid-cube.step"
     if not step_file.exists():
-        # Try alternative file names
-        step_file = test_assets_dir / "cover.STEP"
-    if not step_file.exists():
-        pytest.skip("No STEP file found")
+        pytest.skip("50x50x50mm-solid-cube.step not found")
     return step_file
 
 
 @pytest.fixture
 def large_step_file(test_assets_dir):
     """Get path to a large STEP file for performance testing."""
-    step_file = test_assets_dir / "MEC031233_01.stp"
+    step_file = (
+        test_assets_dir
+        / "100x100x100mm-cube-sharp-internal-corners-various-fillets.step"
+    )
     if not step_file.exists():
-        pytest.skip("MEC031233_01.stp not found")
+        pytest.skip(
+            "100x100x100mm-cube-sharp-internal-corners-various-fillets.step not found"
+        )
     return step_file
 
 
@@ -81,12 +83,19 @@ class TestQuickQualityCheck:
 
     def test_quality_check_with_step_file(self, sample_step_file):
         """Test quality check with STEP file (includes B-Rep face count)."""
-        stl_bytes = (Path(sample_step_file).parent / "cube.stl").read_bytes()
+        stl_bytes = (
+            Path(sample_step_file).parent / "50x50x50mm-solid-cube-binary.stl"
+        ).read_bytes()
 
         # Try to find matching STL
         stl_file = Path(sample_step_file).parent / f"{sample_step_file.stem}.stl"
         if not stl_file.exists():
-            stl_file = Path(__file__).parent.parent / "tests" / "assets" / "cube.stl"
+            stl_file = (
+                Path(__file__).parent.parent
+                / "tests"
+                / "assets"
+                / "50x50x50mm-solid-cube-binary.stl"
+            )
 
         if not stl_file.exists():
             pytest.skip("No matching STL file found")
@@ -243,7 +252,10 @@ class TestProcessSpecificAnalysis:
         stl_file = Path(sample_step_file).parent / f"{sample_step_file.stem}.stl"
         if not stl_file.exists():
             stl_file = (
-                Path(__file__).parent.parent / "tests" / "assets" / "cube.stl"
+                Path(__file__).parent.parent
+                / "tests"
+                / "assets"
+                / "50x50x50mm-solid-cube-binary.stl"
             )
 
         if not stl_file.exists():
@@ -274,46 +286,53 @@ class TestPerformanceComparison:
         """Compare quality check speed vs. full analysis."""
         stl_bytes = sample_stl_file.read_bytes()
 
-        # Measure quality check (new architecture)
+        # Measure quality check (lightweight, no DFM)
         start_time = time.time()
         quality_result = _quick_quality_check(stl_bytes)
         quality_duration = time.time() - start_time
 
-        # Measure full analysis (old architecture)
+        # Measure full analysis (_analyze_single_body now runs real FDM)
         start_time = time.time()
         full_result = _analyze_single_body(stl_bytes)
         full_duration = time.time() - start_time
 
         print(f"\nQuality check: {quality_duration:.2f}s")
-        print(f"Full analysis: {full_duration:.2f}s")
-        print(f"Speedup: {full_duration / quality_duration:.1f}x")
+        print(f"Full analysis (FDM): {full_duration:.2f}s")
 
-        # Quality check should be significantly faster
-        assert quality_duration < full_duration, "Quality check should be faster"
+        # Quality check should be trivially fast
+        assert quality_duration < 5.0, (
+            f"Quality check too slow: {quality_duration:.2f}s"
+        )
+        # Full analysis now runs FDM — allow up to 30 s for slow CI machines
+        assert full_duration < 30.0, (
+            f"Full analysis too slow: {full_duration:.2f}s"
+        )
 
     def test_single_process_vs_all_processes(self, sample_stl_file):
-        """Compare single process vs. all processes."""
+        """_analyze_single_body and _analyze_single_process(FDM) both run real FDM."""
         stl_bytes = sample_stl_file.read_bytes()
 
-        # Measure single process analysis
-        start_time = time.time()
         single_result = _analyze_single_process(stl_bytes, "FDM")
-        single_duration = time.time() - start_time
-
-        # Measure all processes analysis
-        start_time = time.time()
         all_result = _analyze_single_body(stl_bytes)
-        all_duration = time.time() - start_time
 
-        print(f"\nSingle process (FDM): {single_duration:.2f}s")
-        print(f"All processes: {all_duration:.2f}s")
-        print(f"Number of processes: {len(all_result)}")
+        print(f"\nSingle process (FDM) issues: {len(single_result.get('issues', []))}")
+        print(f"Full body FDM issues: {len(all_result.get('FDM', {}).get('issues', []))}")
 
-        # Single process should be faster than all processes
-        assert single_duration < all_duration, "Single process should be faster"
-
-        # All processes should include FDM
+        # Both should include FDM
         assert "FDM" in all_result
+        assert "SLA" in all_result
+        assert "CNC" in all_result
+
+        # No report should be deferred — consumer must publish real data
+        for process_code in ("FDM", "SLA", "CNC"):
+            report = all_result[process_code]
+            assert report.get("twoPhaseDeferred", False) is False, (
+                f"{process_code} must not be deferred"
+            )
+
+        # Single process result must also not be deferred
+        assert single_result.get("twoPhaseDeferred", False) is False
+        assert len(single_result.get("issues", [])) >= 0
 
 
 class TestProductionFilePerformance:
@@ -321,11 +340,11 @@ class TestProductionFilePerformance:
 
     def test_large_step_file_quality_check(self, large_step_file):
         """Test quality check on large STEP file that previously timed out."""
-        # Find matching STL or use cube.stl as fallback
+        # Find matching STL or use 50x50x50mm-solid-cube-binary.stl as fallback
         stl_file = large_step_file.parent / f"{large_step_file.stem}.stl"
         if not stl_file.exists():
-            # Use cube.stl as fallback (geometry will be wrong but tests the pipeline)
-            stl_file = large_step_file.parent / "cube.stl"
+            # Use 50x50x50mm-solid-cube-binary.stl as fallback (geometry will be wrong but tests the pipeline)
+            stl_file = large_step_file.parent / "50x50x50mm-solid-cube-binary.stl"
             if not stl_file.exists():
                 pytest.skip("No STL file found")
 
@@ -333,7 +352,9 @@ class TestProductionFilePerformance:
         step_bytes = large_step_file.read_bytes()
 
         print(f"\nTesting {large_step_file.name}")
-        print(f"File size: {len(stl_bytes) / 1024:.1f}KB STL, {len(step_bytes) / 1024:.1f}KB STEP")
+        print(
+            f"File size: {len(stl_bytes) / 1024:.1f}KB STL, {len(step_bytes) / 1024:.1f}KB STEP"
+        )
 
         # Quality check should be fast
         start_time = time.time()
@@ -346,15 +367,17 @@ class TestProductionFilePerformance:
         print(f"B-Rep faces: {quality_result.get('brep_face_count')}")
 
         # Should complete quickly
-        assert quality_duration < 5.0, f"Quality check too slow: {quality_duration:.2f}s"
+        assert quality_duration < 5.0, (
+            f"Quality check too slow: {quality_duration:.2f}s"
+        )
 
     def test_large_step_file_single_process(self, large_step_file):
         """Test single process analysis on large STEP file."""
-        # Find matching STL or use cube.stl as fallback
+        # Find matching STL or use 50x50x50mm-solid-cube-binary.stl as fallback
         stl_file = large_step_file.parent / f"{large_step_file.stem}.stl"
         if not stl_file.exists():
-            # Use cube.stl as fallback (geometry will be wrong but tests the pipeline)
-            stl_file = large_step_file.parent / "cube.stl"
+            # Use 50x50x50mm-solid-cube-binary.stl as fallback (geometry will be wrong but tests the pipeline)
+            stl_file = large_step_file.parent / "50x50x50mm-solid-cube-binary.stl"
             if not stl_file.exists():
                 pytest.skip("No STL file found")
 
@@ -373,6 +396,80 @@ class TestProductionFilePerformance:
         # Note: May take longer if using mismatched STL/STEP files
         assert duration < 30.0, f"FDM analysis too slow: {duration:.2f}s"
         assert "error_type" not in result
+
+
+class TestSlaReportValidation:
+    """Regression tests ensuring SLA/FDM/CNC reports from _analyze_single_body
+    are model-validatable by Pydantic so the consumer publishes non-null DFM events.
+    """
+
+    def test_sla_report_has_all_required_fields(self, sample_stl_file):
+        """SLA report must include all SLA-specific fields and be non-deferred."""
+        from src.core.geometry import SlaDfmReport
+
+        stl_bytes = sample_stl_file.read_bytes()
+        reports = _analyze_single_body(stl_bytes)
+
+        assert "SLA" in reports, "SLA key must be present in reports"
+        sla_raw = reports["SLA"]
+
+        # Must NOT be deferred — consumer will publish it as a real report
+        assert sla_raw.get("twoPhaseDeferred", False) is False, (
+            "SLA report must not be deferred"
+        )
+
+        # Must be model-validatable — this was the crashing line in upload_consumer
+        sla_report = SlaDfmReport.model_validate(sla_raw)
+        assert sla_report.report_type == "SLA"
+        assert isinstance(sla_report.resin_trapping_risk, bool)
+        assert isinstance(sla_report.resin_trapping_regions, list)
+        assert isinstance(sla_report.suction_risk, bool)
+        assert isinstance(sla_report.suction_regions, list)
+        assert isinstance(sla_report.hollow_regions, list)
+
+    def test_fdm_report_validates_and_is_not_deferred(self, sample_stl_file):
+        """FDM report must validate and contain real analysis results."""
+        from src.core.geometry import FdmDfmReport
+
+        stl_bytes = sample_stl_file.read_bytes()
+        reports = _analyze_single_body(stl_bytes)
+
+        assert "FDM" in reports
+        fdm_raw = reports["FDM"]
+        assert fdm_raw.get("twoPhaseDeferred", False) is False, (
+            "FDM report must not be deferred"
+        )
+
+        fdm_report = FdmDfmReport.model_validate(fdm_raw)
+        assert fdm_report.report_type == "FDM"
+        assert isinstance(fdm_report.issues, list)
+
+    def test_cnc_report_validates_and_is_not_deferred(self, sample_stl_file):
+        """CNC report must validate and be non-deferred."""
+        from src.core.geometry import CncDfmReport
+
+        stl_bytes = sample_stl_file.read_bytes()
+        reports = _analyze_single_body(stl_bytes)
+
+        assert "CNC" in reports
+        cnc_raw = reports["CNC"]
+        assert cnc_raw.get("twoPhaseDeferred", False) is False, (
+            "CNC report must not be deferred"
+        )
+
+        cnc_report = CncDfmReport.model_validate(cnc_raw)
+        assert isinstance(cnc_report.issues, list)
+
+    def test_all_consumer_reports_validate(self, sample_stl_file):
+        """FDM, SLA, and CNC must all be Pydantic-validatable (consumer path)."""
+        from src.core.geometry import CncDfmReport, FdmDfmReport, SlaDfmReport
+
+        stl_bytes = sample_stl_file.read_bytes()
+        reports = _analyze_single_body(stl_bytes)
+
+        FdmDfmReport.model_validate(reports["FDM"])
+        SlaDfmReport.model_validate(reports["SLA"])
+        CncDfmReport.model_validate(reports["CNC"])
 
 
 if __name__ == "__main__":

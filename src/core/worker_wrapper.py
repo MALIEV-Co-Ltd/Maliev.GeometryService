@@ -91,38 +91,52 @@ def setup_worker_diagnostics(
     os.makedirs(log_dir, exist_ok=True)
     log_file = os.path.join(log_dir, f"worker_{worker_id}.log")
 
-    # Configure file handler for worker-specific logging
-    file_handler = logging.FileHandler(log_file)
-    file_handler.setLevel(logging.DEBUG)
-    file_handler.setFormatter(
-        logging.Formatter(
-            "%(asctime)s %(levelname)s %(name)s: %(message)s",
-            datefmt="%Y-%m-%dT%H:%M:%SZ"
-        )
-    )
-
-    # Add handler to root logger so all modules log to this file
+    # Configure file handler for worker-specific logging.
+    # Guard against duplicate handlers: if this worker process already has a
+    # FileHandler attached (e.g., because setup_worker_diagnostics was called
+    # twice on the same worker process), skip adding another one.
     root_logger = logging.getLogger()
-    root_logger.addHandler(file_handler)
-    root_logger.setLevel(logging.DEBUG)
+    already_has_file_handler = any(
+        isinstance(h, logging.FileHandler) for h in root_logger.handlers
+    )
+    if not already_has_file_handler:
+        file_handler = logging.FileHandler(log_file)
+        file_handler.setLevel(logging.DEBUG)
+        file_handler.setFormatter(
+            logging.Formatter(
+                "%(asctime)s %(levelname)s %(name)s: %(message)s",
+                datefmt="%Y-%m-%dT%H:%M:%SZ"
+            )
+        )
+        root_logger.addHandler(file_handler)
+        root_logger.setLevel(logging.DEBUG)
+        logger.info(f"Worker {worker_id} initialized, logging to {log_file}")
+    else:
+        logger.debug(f"Worker {worker_id} re-entering diagnostics setup — skipping duplicate handler")
 
-    logger.info(f"Worker {worker_id} initialized, logging to {log_file}")
-
-    # Enable faulthandler to catch segfaults
+    # Enable faulthandler to catch segfaults (idempotent — safe to call multiple times)
     try:
         import faulthandler
         faulthandler.enable(file=sys.stderr, all_threads=True)
-        logger.info(f"Faulthandler enabled for worker {worker_id}")
     except Exception as e:
         logger.warning(f"Failed to enable faulthandler: {e}")
 
-    # Start memory monitoring thread
-    monitor_thread = threading.Thread(
-        target=_monitor_memory,
-        args=(worker_id, memory_warning_mb, memory_critical_mb),
-        daemon=True,
-    )
-    monitor_thread.start()
+    # Start memory monitoring thread only if one isn't already running for this process.
+    # Each daemon thread persists for the worker's lifetime; adding a second one just
+    # doubles the log noise without adding information.
+    _monitor_sentinel = f"_worker_monitor_started_{os.getpid()}"
+    if not getattr(threading.current_thread(), _monitor_sentinel, False):
+        monitor_thread = threading.Thread(
+            target=_monitor_memory,
+            args=(worker_id, memory_warning_mb, memory_critical_mb),
+            daemon=True,
+        )
+        monitor_thread.start()
+        # Mark that a monitor is running on this process (best-effort; attribute on main thread)
+        try:
+            setattr(threading.main_thread(), _monitor_sentinel, True)
+        except Exception:
+            pass
 
     return worker_id
 
@@ -135,13 +149,21 @@ def _monitor_memory(
 ) -> None:
     """Background thread that monitors worker memory usage.
 
-    Logs warnings when memory exceeds thresholds.
+    Logs warnings when memory exceeds thresholds.  Uses exponential backoff
+    when the process stays in a critical state to avoid log flooding: the first
+    violation logs immediately, subsequent continuous violations double the
+    silence window up to 120 s.  Resets back to normal polling once memory
+    drops below the critical threshold.
+
+    Self-terminates the worker process (via os._exit) when RSS exceeds 3×
+    critical_mb — at that point the OS is likely to OOM-kill us anyway, and a
+    clean exit lets the pool spawn a fresh worker.
 
     Args:
         worker_id: Unique identifier for this worker
         warning_mb: Log warning when RSS exceeds this
         critical_mb: Log critical when RSS exceeds this
-        interval_seconds: How often to check memory usage
+        interval_seconds: Normal polling interval
     """
     try:
         import psutil
@@ -150,25 +172,57 @@ def _monitor_memory(
         return
 
     process = psutil.Process()
+    kill_threshold_mb = critical_mb * 3.0   # force-exit at 3× critical (e.g. 6 GB)
+    backoff = interval_seconds               # current sleep between critical logs
+    max_backoff = 120.0                      # cap at 2 minutes of silence
+    in_critical = False
 
     while True:
         try:
-            # Get RSS (resident set size) in MB
             rss_mb = process.memory_info().rss / 1024 / 1024
 
-            if rss_mb > critical_mb:
+            if rss_mb > kill_threshold_mb:
+                # Past the point of no return — exit cleanly so the pool can
+                # spawn a fresh worker rather than waiting for an OOM kill.
                 logger.critical(
-                    f"Worker {worker_id} memory critical: {rss_mb:.1f} MB "
-                    f"(threshold: {critical_mb} MB)"
+                    "Worker %s RSS %.0f MB exceeds kill threshold %.0f MB — "
+                    "terminating worker process to free memory",
+                    worker_id, rss_mb, kill_threshold_mb,
                 )
+                os._exit(1)
+
+            elif rss_mb > critical_mb:
+                if not in_critical:
+                    # First time crossing threshold — log immediately, reset backoff
+                    logger.critical(
+                        "Worker %s memory critical: %.1f MB (threshold: %.0f MB)",
+                        worker_id, rss_mb, critical_mb,
+                    )
+                    backoff = interval_seconds
+                    in_critical = True
+                else:
+                    # Still in critical — log once per backoff window, then double
+                    logger.critical(
+                        "Worker %s memory still critical: %.1f MB (will recheck in %.0fs)",
+                        worker_id, rss_mb, min(backoff * 2, max_backoff),
+                    )
+                    backoff = min(backoff * 2, max_backoff)
+                time.sleep(backoff)
+                continue  # skip normal sleep below
+
             elif rss_mb > warning_mb:
                 logger.warning(
-                    f"Worker {worker_id} memory high: {rss_mb:.1f} MB "
-                    f"(threshold: {warning_mb} MB)"
+                    "Worker %s memory high: %.1f MB (threshold: %.0f MB)",
+                    worker_id, rss_mb, warning_mb,
                 )
+                in_critical = False
+                backoff = interval_seconds
+
+            else:
+                in_critical = False
+                backoff = interval_seconds
 
         except (psutil.NoSuchProcess, psutil.AccessDenied):
-            # Process died or we lost access
             break
 
         time.sleep(interval_seconds)
@@ -316,6 +370,7 @@ class DiagnosticExecutor(ProcessPoolExecutor):
         enable_diagnostics: bool = True,
         memory_warning_mb: float = 1000.0,
         memory_critical_mb: float = 2000.0,
+        max_tasks_per_child: int | None = None,
         **kwargs,
     ):
         """Initialize the diagnostic executor.
@@ -326,16 +381,34 @@ class DiagnosticExecutor(ProcessPoolExecutor):
             enable_diagnostics: Whether to enable diagnostic wrapping
             memory_warning_mb: Memory threshold for warnings
             memory_critical_mb: Memory threshold for critical alerts
+            max_tasks_per_child: Recycle workers after this many tasks (Python 3.11+).
+                Set to a small number (e.g. 5) to bound RSS growth in long-running
+                services that process many large files.  None = workers live forever.
             **kwargs: Additional arguments passed to ProcessPoolExecutor
         """
         self.enable_diagnostics = enable_diagnostics
         self.memory_warning_mb = memory_warning_mb
         self.memory_critical_mb = memory_critical_mb
+        self.max_tasks_per_child = max_tasks_per_child  # stored for introspection
+
+        if max_tasks_per_child is not None:
+            if sys.version_info >= (3, 11):
+                kwargs["max_tasks_per_child"] = max_tasks_per_child
+            else:
+                logger.warning(
+                    "max_tasks_per_child=%d ignored: Python %d.%d < 3.11 "
+                    "does not support it on ProcessPoolExecutor. "
+                    "Use PoolExecutorWrapper for worker recycling on Python 3.10.",
+                    max_tasks_per_child,
+                    sys.version_info.major,
+                    sys.version_info.minor,
+                )
 
         super().__init__(max_workers=max_workers, mp_context=mp_context, **kwargs)
 
         logger.info(
             f"DiagnosticExecutor initialized with {max_workers} workers, "
+            f"max_tasks_per_child={max_tasks_per_child}, "
             f"diagnostics={'enabled' if enable_diagnostics else 'disabled'}"
         )
 
