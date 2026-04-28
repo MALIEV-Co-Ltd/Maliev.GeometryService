@@ -455,6 +455,23 @@ async def analyze_for_process(
                 await http_download.close()
 
         except Exception as e:
+            from src.infrastructure.storage import PermanentDownloadError
+
+            if isinstance(e, PermanentDownloadError):
+                logger.warning(
+                    f"Permanent download failure for {upload_id} — file is gone from storage: {e}",
+                    extra={"upload_id": upload_id},
+                )
+                return JSONResponse(
+                    content={
+                        "upload_id": upload_id,
+                        "status": "file_missing",
+                        "error_type": "FileMissing",
+                        "message": "The file is no longer in storage. Please re-upload.",
+                    },
+                    status_code=410,
+                )
+
             logger.error(
                 f"Failed to re-download file for {upload_id}: {e}",
                 extra={"upload_id": upload_id},
@@ -479,117 +496,115 @@ async def analyze_for_process(
 
         # OPTIMIZATION: Check cache for existing results
         cached = get_cached_result(stl_bytes, process_code)
+        cache_status = "hit" if cached is not None else "cold"
+
         if cached is not None:
             logger.info(
-                f"Cache hit for {upload_id}/{process_code} - returning cached result",
+                f"Cache hit for {upload_id}/{process_code} - skipping re-analysis",
                 extra={
                     "upload_id": upload_id,
                     "process_code": process_code,
                     "cache_status": "hit",
                 },
             )
-            return JSONResponse(
-                content={
-                    "upload_id": upload_id,
-                    "process_code": process_code,
-                    "status": "analysis_complete",
-                    "dfm_report": cached,
-                    "cache_status": "hit",
-                }
-            )
+            result = cached
+        else:
+            # Run process-specific analysis with timeout
+            loop = asyncio.get_event_loop()
 
-        # Run process-specific analysis with timeout
-        loop = asyncio.get_event_loop()
-
-        # Use run_in_executor to run in thread pool (prevents blocking)
-        # with timeout to prevent indefinite hangs
-        result = await asyncio.wait_for(
-            loop.run_in_executor(
-                None,
-                lambda: _analyze_single_process(
-                    stl_bytes, process_code, cad_bytes, cad_extension
-                ),
-            ),
-            timeout=timeout,
-        )
-
-        # Check if analysis failed
-        if "error_type" in result:
-            logger.error(
-                f"Process analysis failed for {upload_id}/{process_code}: {result.get('message')}",
-                extra={
-                    "upload_id": upload_id,
-                    "process_code": process_code,
-                    "error_type": result.get("error_type"),
-                },
-            )
-            return JSONResponse(
-                content={
-                    "upload_id": upload_id,
-                    "process_code": process_code,
-                    "status": "error",
-                    **result,
-                },
-                status_code=500,
-            )
-
-        logger.info(
-            f"Process analysis completed for {upload_id}/{process_code}",
-            extra={
-                "upload_id": upload_id,
-                "process_code": process_code,
-                "issues_count": len(result.get("issues", [])),
-                "analysis_time_seconds": result.get("analysis_time_seconds"),
-            },
-        )
-
-        # OPTIMIZATION: Cache the result for future use
-        cache_result(stl_bytes, process_code, result)
-        logger.info(
-            f"Cached result for {upload_id}/{process_code}",
-            extra={
-                "upload_id": upload_id,
-                "process_code": process_code,
-                "cache_status": "cached",
-            },
-        )
-
-        # Generate overlays if GLB path is available
-        overlay_paths: dict[str, str] | None = None
-        if storage_path:
-            try:
-                # Check if we have a GLB path (use storage_path as base, replace extension with .glb)
-                import os
-
-                glb_path = f"{os.path.splitext(storage_path)[0]}.glb"
-
-                # Build reports dict for overlay generation
-                reports: dict[str, dict] = {process_code: result}
-
-                # Generate and upload overlays (120 s hard cap so slow overlay
-                # generation never blocks the HTTP response indefinitely).
-                overlay_paths = await asyncio.wait_for(
-                    generate_and_upload_overlays(
-                        glb_path=glb_path,
-                        reports=reports,
-                        storage_path=storage_path,
-                        storage_service=HttpDownloadService(),
-                        upload_id=upload_id,
+            # Use run_in_executor to run in thread pool (prevents blocking)
+            # with timeout to prevent indefinite hangs
+            result = await asyncio.wait_for(
+                loop.run_in_executor(
+                    None,
+                    lambda: _analyze_single_process(
+                        stl_bytes, process_code, cad_bytes, cad_extension
                     ),
-                    timeout=120,
+                ),
+                timeout=timeout,
+            )
+
+            # Check if analysis failed
+            if "error_type" in result:
+                logger.error(
+                    f"Process analysis failed for {upload_id}/{process_code}: {result.get('message')}",
+                    extra={
+                        "upload_id": upload_id,
+                        "process_code": process_code,
+                        "error_type": result.get("error_type"),
+                    },
                 )
-            except asyncio.TimeoutError:
-                logger.warning(
-                    f"Overlay generation timed out after 120 s for {upload_id}/{process_code}; "
-                    "returning analysis result without overlays",
-                    extra={"upload_id": upload_id, "process_code": process_code},
+                return JSONResponse(
+                    content={
+                        "upload_id": upload_id,
+                        "process_code": process_code,
+                        "status": "error",
+                        **result,
+                    },
+                    status_code=500,
                 )
-            except Exception as e:
-                logger.warning(
-                    f"Failed to generate overlays for {upload_id}/{process_code}: {e}",
-                    extra={"upload_id": upload_id, "process_code": process_code},
-                    exc_info=True,
-                )
+
+            logger.info(
+                f"Process analysis completed for {upload_id}/{process_code}",
+                extra={
+                    "upload_id": upload_id,
+                    "process_code": process_code,
+                    "issues_count": len(result.get("issues", [])),
+                    "analysis_time_seconds": result.get("analysis_time_seconds"),
+                },
+            )
+
+            # Cache the result for future use
+            cache_result(stl_bytes, process_code, result)
+            logger.info(
+                f"Cached result for {upload_id}/{process_code}",
+                extra={
+                    "upload_id": upload_id,
+                    "process_code": process_code,
+                    "cache_status": "cached",
+                },
+            )
+
+        # Generate overlays — prefer cached STL bytes (always available in-memory)
+        # over loading a GLB from a GCS path (which requires a local file).
+        overlay_paths: dict[str, str] | None = None
+        try:
+            import os
+
+            glb_path = f"{os.path.splitext(storage_path)[0]}.glb" if storage_path else ""
+
+            # Build reports dict for overlay generation
+            reports: dict[str, dict] = {process_code: result}
+
+            # Pass the already-cached STL bytes so overlay generation never
+            # needs to load a GLB file from disk/GCS.
+            cached_stl_bytes = file_data.get("stl_bytes")
+
+            # Generate and upload overlays (120 s hard cap so slow overlay
+            # generation never blocks the HTTP response indefinitely).
+            overlay_paths = await asyncio.wait_for(
+                generate_and_upload_overlays(
+                    glb_path=glb_path,
+                    reports=reports,
+                    storage_path=storage_path or "",
+                    storage_service=HttpDownloadService(),
+                    upload_id=upload_id,
+                    stl_bytes=cached_stl_bytes,
+                ),
+                timeout=120,
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                f"Overlay generation timed out after 120 s for {upload_id}/{process_code}; "
+                "returning analysis result without overlays",
+                extra={"upload_id": upload_id, "process_code": process_code},
+            )
+        except Exception as e:
+            logger.warning(
+                f"Failed to generate overlays for {upload_id}/{process_code}: {e}",
+                extra={"upload_id": upload_id, "process_code": process_code},
+                exc_info=True,
+            )
 
         # Publish DfmAnalysisReadyEvent
         try:
@@ -668,7 +683,8 @@ async def analyze_for_process(
                 "process_code": process_code,
                 "status": "analysis_complete",
                 "dfm_report": result,
-                "cache_status": "cold",  # First-time computation
+                "overlay_paths": overlay_paths or {},
+                "cache_status": cache_status,
             }
         )
 
