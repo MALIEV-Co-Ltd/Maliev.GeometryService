@@ -4,38 +4,38 @@ These tests establish performance baselines and flag regressions.
 Tests are designed to be repeatable and provide actionable metrics.
 """
 
-import pytest
 import time
+
 import psutil
-from pathlib import Path
-from typing import Dict, Any, List
+import pytest
 
-from src.core.geometry import (
-    load_cascadio_geometry,
+pytestmark = pytest.mark.slow
+
+from src.core.geometry import (  # noqa: E402
     compute_dfm_analysis_for_stl,
+    load_cascadio_geometry,
 )
-from tests.test_utils import (
-    monitor_resources,
-    measure_performance,
+from tests.test_utils import (  # noqa: E402
     check_for_orphaned_processes,
+    measure_performance,
+    monitor_resources,
 )
-
 
 # Performance thresholds (in seconds)
 CASCADIO_LOAD_TIMEOUTS = {
-    "tiny": 5.0,      # < 100KB
-    "small": 10.0,    # 100KB - 1MB
-    "medium": 20.0,   # 1MB - 5MB
-    "large": 30.0,    # 5MB - 10MB
-    "huge": 60.0,     # > 10MB
+    "tiny": 5.0,  # < 100KB
+    "small": 10.0,  # 100KB - 1MB
+    "medium": 20.0,  # 1MB - 5MB
+    "large": 30.0,  # 5MB - 10MB
+    "huge": 60.0,  # > 10MB
 }
 
 DFM_ANALYSIS_TIMEOUTS = {
-    "tiny": 5.0,      # < 1K vertices
-    "small": 10.0,    # 1K - 10K vertices
-    "medium": 30.0,   # 10K - 50K vertices
-    "large": 60.0,    # 50K - 100K vertices
-    "huge": 90.0,     # > 100K vertices
+    "tiny": 5.0,  # < 1K vertices
+    "small": 10.0,  # 1K - 10K vertices
+    "medium": 30.0,  # 10K - 50K vertices
+    "large": 60.0,  # 50K - 100K vertices
+    "huge": 90.0,  # > 100K vertices
 }
 
 MEMORY_THRESHOLDS_MB = {
@@ -49,7 +49,9 @@ class TestCascadioPerformance:
 
     def test_cascadio_performance_baseline_tiny(self, test_assets_dir):
         """Test cascadio load performance for tiny files (< 100KB)."""
-        step_files = list(test_assets_dir.glob("*.step")) + list(test_assets_dir.glob("*.stp"))
+        step_files = list(test_assets_dir.glob("*.step")) + list(
+            test_assets_dir.glob("*.stp")
+        )
 
         # Find tiny file
         tiny_file = None
@@ -73,19 +75,25 @@ class TestCascadioPerformance:
 
         # Check performance
         threshold = CASCADIO_LOAD_TIMEOUTS["tiny"]
-        assert perf["duration_seconds"] < threshold, \
-            f"Tiny file load took {perf['duration_seconds']:.2f}s, exceeds {threshold}s threshold"
+        assert (
+            perf["duration_seconds"] < threshold
+        ), f"Tiny file load took {perf['duration_seconds']:.2f}s, exceeds {threshold}s threshold"  # noqa: E501
 
         # Check memory
-        assert perf["rss_mb_delta"] < MEMORY_THRESHOLDS_MB["cascadio_load"], \
-            f"Memory usage {perf['rss_mb_delta']:.1f}MB exceeds threshold"
+        assert (
+            perf["rss_mb_delta"] < MEMORY_THRESHOLDS_MB["cascadio_load"]
+        ), f"Memory usage {perf['rss_mb_delta']:.1f}MB exceeds threshold"
 
-        print(f"\nTiny file ({len(step_bytes)} bytes): {perf['duration_seconds']:.2f}s, "
-              f"{perf['rss_mb_delta']:.1f}MB")
+        print(
+            f"\nTiny file ({len(step_bytes)} bytes): {perf['duration_seconds']:.2f}s, "
+            f"{perf['rss_mb_delta']:.1f}MB"
+        )
 
     def test_cascadio_performance_baseline_small(self, test_assets_dir):
         """Test cascadio load performance for small files (100KB - 1MB)."""
-        step_files = list(test_assets_dir.glob("*.step")) + list(test_assets_dir.glob("*.stp"))
+        step_files = list(test_assets_dir.glob("*.step")) + list(
+            test_assets_dir.glob("*.stp")
+        )
 
         # Find small file
         small_file = None
@@ -109,15 +117,19 @@ class TestCascadioPerformance:
 
         # Check performance
         threshold = CASCADIO_LOAD_TIMEOUTS["small"]
-        assert perf["duration_seconds"] < threshold, \
-            f"Small file load took {perf['duration_seconds']:.2f}s, exceeds {threshold}s threshold"
+        assert (
+            perf["duration_seconds"] < threshold
+        ), f"Small file load took {perf['duration_seconds']:.2f}s, exceeds {threshold}s threshold"  # noqa: E501
 
         # Check memory
-        assert perf["rss_mb_delta"] < MEMORY_THRESHOLDS_MB["cascadio_load"], \
-            f"Memory usage {perf['rss_mb_delta']:.1f}MB exceeds threshold"
+        assert (
+            perf["rss_mb_delta"] < MEMORY_THRESHOLDS_MB["cascadio_load"]
+        ), f"Memory usage {perf['rss_mb_delta']:.1f}MB exceeds threshold"
 
-        print(f"\nSmall file ({len(step_bytes)} bytes): {perf['duration_seconds']:.2f}s, "
-              f"{perf['rss_mb_delta']:.1f}MB")
+        print(
+            f"\nSmall file ({len(step_bytes)} bytes): {perf['duration_seconds']:.2f}s, "
+            f"{perf['rss_mb_delta']:.1f}MB"
+        )
 
     def test_cascadio_performance_regression(self, test_assets_dir):
         """Test for cascadio performance regression over time."""
@@ -140,13 +152,15 @@ class TestCascadioPerformance:
         avg_time = sum(times) / len(times)
 
         # Should complete in reasonable time
-        assert avg_time < 15.0, \
-            f"Average load time {avg_time:.2f}s indicates performance regression"
+        assert (
+            avg_time < 15.0
+        ), f"Average load time {avg_time:.2f}s indicates performance regression"
 
         # Variance should be low (consistent performance)
         variance = max(times) - min(times)
-        assert variance < 5.0, \
-            f"High variance {variance:.2f}s indicates inconsistent performance"
+        assert (
+            variance < 5.0
+        ), f"High variance {variance:.2f}s indicates inconsistent performance"
 
         print(f"\nCascadio load times: {times}")
         print(f"Average: {avg_time:.2f}s, variance: {variance:.2f}s")
@@ -187,16 +201,20 @@ class TestDFMPerformance:
 
         # Check performance
         threshold = DFM_ANALYSIS_TIMEOUTS["tiny"]
-        assert perf["duration_seconds"] < threshold, \
-            f"Tiny mesh DFM took {perf['duration_seconds']:.2f}s, exceeds {threshold}s threshold"
+        assert (
+            perf["duration_seconds"] < threshold
+        ), f"Tiny mesh DFM took {perf['duration_seconds']:.2f}s, exceeds {threshold}s threshold"  # noqa: E501
 
         # Check memory
-        assert perf["rss_mb_delta"] < MEMORY_THRESHOLDS_MB["dfm_analysis"], \
-            f"Memory usage {perf['rss_mb_delta']:.1f}MB exceeds threshold"
+        assert (
+            perf["rss_mb_delta"] < MEMORY_THRESHOLDS_MB["dfm_analysis"]
+        ), f"Memory usage {perf['rss_mb_delta']:.1f}MB exceeds threshold"
 
         vertices = self.estimate_vertex_count(stl_bytes)
-        print(f"\nTiny mesh (~{vertices} vertices): {perf['duration_seconds']:.2f}s, "
-              f"{perf['rss_mb_delta']:.1f}MB")
+        print(
+            f"\nTiny mesh (~{vertices} vertices): {perf['duration_seconds']:.2f}s, "
+            f"{perf['rss_mb_delta']:.1f}MB"
+        )
 
     def test_dfm_performance_baseline_small(self, test_assets_dir):
         """Test DFM performance for small meshes (1K - 10K vertices)."""
@@ -225,12 +243,15 @@ class TestDFMPerformance:
 
         # Check performance
         threshold = DFM_ANALYSIS_TIMEOUTS["small"]
-        assert perf["duration_seconds"] < threshold, \
-            f"Small mesh DFM took {perf['duration_seconds']:.2f}s, exceeds {threshold}s threshold"
+        assert (
+            perf["duration_seconds"] < threshold
+        ), f"Small mesh DFM took {perf['duration_seconds']:.2f}s, exceeds {threshold}s threshold"  # noqa: E501
 
         vertices = self.estimate_vertex_count(stl_bytes)
-        print(f"\nSmall mesh (~{vertices} vertices): {perf['duration_seconds']:.2f}s, "
-              f"{perf['rss_mb_delta']:.1f}MB")
+        print(
+            f"\nSmall mesh (~{vertices} vertices): {perf['duration_seconds']:.2f}s, "
+            f"{perf['rss_mb_delta']:.1f}MB"
+        )
 
     def test_dfm_performance_baseline_medium(self, test_assets_dir):
         """Test DFM performance for medium meshes (10K - 50K vertices)."""
@@ -259,12 +280,15 @@ class TestDFMPerformance:
 
         # Check performance
         threshold = DFM_ANALYSIS_TIMEOUTS["medium"]
-        assert perf["duration_seconds"] < threshold, \
-            f"Medium mesh DFM took {perf['duration_seconds']:.2f}s, exceeds {threshold}s threshold"
+        assert (
+            perf["duration_seconds"] < threshold
+        ), f"Medium mesh DFM took {perf['duration_seconds']:.2f}s, exceeds {threshold}s threshold"  # noqa: E501
 
         vertices = self.estimate_vertex_count(stl_bytes)
-        print(f"\nMedium mesh (~{vertices} vertices): {perf['duration_seconds']:.2f}s, "
-              f"{perf['rss_mb_delta']:.1f}MB")
+        print(
+            f"\nMedium mesh (~{vertices} vertices): {perf['duration_seconds']:.2f}s, "
+            f"{perf['rss_mb_delta']:.1f}MB"
+        )
 
     def test_dfm_performance_regression(self, test_assets_dir):
         """Test for DFM performance regression over time."""
@@ -287,13 +311,15 @@ class TestDFMPerformance:
         avg_time = sum(times) / len(times)
 
         # Should complete in reasonable time
-        assert avg_time < 10.0, \
-            f"Average DFM time {avg_time:.2f}s indicates performance regression"
+        assert (
+            avg_time < 10.0
+        ), f"Average DFM time {avg_time:.2f}s indicates performance regression"
 
         # Variance should be low
         variance = max(times) - min(times)
-        assert variance < 3.0, \
-            f"High variance {variance:.2f}s indicates inconsistent performance"
+        assert (
+            variance < 3.0
+        ), f"High variance {variance:.2f}s indicates inconsistent performance"
 
         print(f"\nDFM times: {times}")
         print(f"Average: {avg_time:.2f}s, variance: {variance:.2f}s")
@@ -320,6 +346,7 @@ class TestMemoryCleanup:
 
         # Force cleanup
         import gc
+
         gc.collect()
         time.sleep(0.5)
 
@@ -328,8 +355,9 @@ class TestMemoryCleanup:
         rss_growth = rss_final - rss_baseline
 
         # Growth should be modest (some caching is acceptable)
-        assert rss_growth < 200, \
-            f"Memory growth {rss_growth:.1f}MB after multiple loads indicates leak"
+        assert (
+            rss_growth < 200
+        ), f"Memory growth {rss_growth:.1f}MB after multiple loads indicates leak"
 
         print(f"\nMemory growth after 3 loads: {rss_growth:.1f}MB")
 
@@ -351,6 +379,7 @@ class TestMemoryCleanup:
 
         # Force cleanup
         import gc
+
         gc.collect()
         time.sleep(0.5)
 
@@ -359,8 +388,9 @@ class TestMemoryCleanup:
         rss_growth = rss_final - rss_baseline
 
         # Growth should be modest
-        assert rss_growth < 150, \
-            f"Memory growth {rss_growth:.1f}MB after multiple DFM analyses indicates leak"
+        assert (
+            rss_growth < 150
+        ), f"Memory growth {rss_growth:.1f}MB after multiple DFM analyses indicates leak"  # noqa: E501
 
         print(f"\nMemory growth after 3 DFM analyses: {rss_growth:.1f}MB")
 
@@ -385,8 +415,9 @@ class TestMemoryCleanup:
         orphaned_after = check_for_orphaned_processes()
         orphaned_count = len(orphaned_after) - len(orphaned_before)
 
-        assert orphaned_count == 0, \
-            f"Found {orphaned_count} orphaned processes after load"
+        assert (
+            orphaned_count == 0
+        ), f"Found {orphaned_count} orphaned processes after load"
 
     def test_no_orphaned_processes_after_dfm(self, test_assets_dir):
         """Test that no orphaned processes remain after DFM analysis."""
@@ -409,8 +440,9 @@ class TestMemoryCleanup:
         orphaned_after = check_for_orphaned_processes()
         orphaned_count = len(orphaned_after) - len(orphaned_before)
 
-        assert orphaned_count == 0, \
-            f"Found {orphaned_count} orphaned processes after DFM"
+        assert (
+            orphaned_count == 0
+        ), f"Found {orphaned_count} orphaned processes after DFM"
 
 
 class TestResourceMonitoring:
@@ -434,7 +466,7 @@ class TestResourceMonitoring:
         final_memory = monitor.get_final_memory()
         memory_growth = monitor.get_memory_growth()
 
-        print(f"\nCascadio resource profile:")
+        print("\nCascadio resource profile:")
         print(f"  Peak memory: {peak_memory:.1f}MB")
         print(f"  Final memory: {final_memory:.1f}MB")
         print(f"  Memory growth: {memory_growth:.1f}MB")
@@ -462,7 +494,7 @@ class TestResourceMonitoring:
         final_memory = monitor.get_final_memory()
         memory_growth = monitor.get_memory_growth()
 
-        print(f"\nDFM resource profile:")
+        print("\nDFM resource profile:")
         print(f"  Peak memory: {peak_memory:.1f}MB")
         print(f"  Final memory: {final_memory:.1f}MB")
         print(f"  Memory growth: {memory_growth:.1f}MB")

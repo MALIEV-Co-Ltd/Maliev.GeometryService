@@ -77,7 +77,7 @@ def setup_observability(app: FastAPI | None = None) -> None:
 
         # Configure root logger to include the OTel handler
         root_logger = logging.getLogger()
-        root_logger.setLevel(logging.INFO)   # root defaults to WARNING; must be INFO
+        root_logger.setLevel(logging.INFO)  # root defaults to WARNING; must be INFO
         if not any(isinstance(h, LoggingHandler) for h in root_logger.handlers):
             root_logger.addHandler(otel_handler)
 

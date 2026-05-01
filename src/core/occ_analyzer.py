@@ -14,7 +14,7 @@ Falls back gracefully if cadquery is not installed.
 
 from __future__ import annotations
 
-import io
+import contextlib
 import logging
 import tempfile
 from dataclasses import dataclass, field
@@ -79,19 +79,23 @@ def analyze_step_brep(
         import cadquery as cq
         from OCP.BRep import BRep_Tool
         from OCP.BRepAdaptor import BRepAdaptor_Surface
+        from OCP.BRepGProp import BRepGProp
         from OCP.BRepMesh import BRepMesh_IncrementalMesh
         from OCP.GeomAbs import (
+            GeomAbs_Cone,
             GeomAbs_Cylinder,
             GeomAbs_Plane,
             GeomAbs_Torus,
-            GeomAbs_Cone,
         )
-        from OCP.gp import gp_Dir, gp_Pnt
-        from OCP.TopAbs import TopAbs_FACE, TopAbs_FORWARD, TopAbs_REVERSED
+        from OCP.gp import gp_Dir, gp_Pnt  # noqa: F401
+        from OCP.GProp import GProp_GProps
+        from OCP.TopAbs import (  # noqa: F401
+            TopAbs_FACE,
+            TopAbs_FORWARD,
+            TopAbs_REVERSED,
+        )
         from OCP.TopExp import TopExp_Explorer
         from OCP.TopoDS import TopoDS
-        from OCP.BRepGProp import BRepGProp
-        from OCP.GProp import GProp_GProps
     except ImportError as _import_err:
         logger.warning(
             "cadquery / OCP not available — skipping OCC B-Rep analysis. "
@@ -118,10 +122,9 @@ def analyze_step_brep(
             shape = cq.importers.importShape(tmp_path)
 
         import os
-        try:
-            os.unlink(tmp_path)
-        except OSError:
-            pass
+
+        with contextlib.suppress(OSError):
+            os.unlink(tmp_path)  # noqa: PTH108
 
         if shape is None:
             return [], {}
@@ -143,6 +146,7 @@ def analyze_step_brep(
             f"process={process_code or 'DEFAULT'})"
         )
         import time
+
         start_time = time.time()
         try:
             # Adaptive tessellation: CNC needs high precision, printing can be coarser
@@ -166,7 +170,9 @@ def analyze_step_brep(
                     f"disabling B-Rep analysis for this file or using mesh-only DFM"
                 )
         except Exception as mesh_err:
-            logger.warning(f"OCC: Tessellation failed after {time.time() - start_time:.1f}s: {mesh_err}")
+            logger.warning(
+                f"OCC: Tessellation failed after {time.time() - start_time:.1f}s: {mesh_err}"  # noqa: E501
+            )
             # Fall back to empty results rather than crashing
             return [], {}
 
@@ -209,28 +215,26 @@ def analyze_step_brep(
                 cylinder = adaptor.Cylinder()
                 radius_mm = float(cylinder.Radius())
                 axis_dir = cylinder.Axis().Direction()
-                ax = [float(axis_dir.X()), float(axis_dir.Y()),
-                      float(axis_dir.Z())]
+                ax = [float(axis_dir.X()), float(axis_dir.Y()), float(axis_dir.Z())]
 
                 # Hole: inward-facing cylinder (concave = reversed normal)
-                if is_reversed:
-                    feat_type = "hole"
-                else:
-                    feat_type = "fillet"
+                feat_type = "hole" if is_reversed else "fillet"
 
-                features.append(OccFeature(
-                    feature_type=feat_type,
-                    parameters={
-                        "radius_mm": radius_mm,
-                        "diameter_mm": radius_mm * 2.0,
-                        "axis": ax,
-                        "concave": is_reversed,
-                    },
-                    face_tag=face_tag,
-                    centroid=centroid,
-                    normal=ax,
-                    area_mm2=area_mm2,
-                ))
+                features.append(
+                    OccFeature(
+                        feature_type=feat_type,
+                        parameters={
+                            "radius_mm": radius_mm,
+                            "diameter_mm": radius_mm * 2.0,
+                            "axis": ax,
+                            "concave": is_reversed,
+                        },
+                        face_tag=face_tag,
+                        centroid=centroid,
+                        normal=ax,
+                        area_mm2=area_mm2,
+                    )
+                )
 
             elif surf_type == GeomAbs_Plane:
                 plane = adaptor.Plane()
@@ -248,68 +252,80 @@ def analyze_step_brep(
                     xs = [triangulation.Node(i).X() for i in range(1, nb + 1)]
                     ys = [triangulation.Node(i).Y() for i in range(1, nb + 1)]
                     zs = [triangulation.Node(i).Z() for i in range(1, nb + 1)]
-                    extents = sorted([
-                        max(xs) - min(xs),
-                        max(ys) - min(ys),
-                        max(zs) - min(zs),
-                    ])
+                    extents = sorted(
+                        [
+                            max(xs) - min(xs),
+                            max(ys) - min(ys),
+                            max(zs) - min(zs),
+                        ]
+                    )
                     # extents[0] ≈ 0 (the face-normal direction for a planar face).
                     # extents[1] is the short side; extents[2] is the long side.
-                    planar_bbox_min_mm = float(extents[1]) if extents[1] > 1e-3 else float(extents[2])
+                    planar_bbox_min_mm = (
+                        float(extents[1]) if extents[1] > 1e-3 else float(extents[2])
+                    )
 
-                features.append(OccFeature(
-                    feature_type="planar_face",
-                    parameters={
-                        "normal": normal,
-                        "area_mm2": area_mm2,
-                        "is_reversed": is_reversed,
-                    },
-                    face_tag=face_tag,
-                    centroid=centroid,
-                    normal=normal,
-                    area_mm2=area_mm2,
-                    bbox_min_mm=planar_bbox_min_mm,
-                ))
+                features.append(
+                    OccFeature(
+                        feature_type="planar_face",
+                        parameters={
+                            "normal": normal,
+                            "area_mm2": area_mm2,
+                            "is_reversed": is_reversed,
+                        },
+                        face_tag=face_tag,
+                        centroid=centroid,
+                        normal=normal,
+                        area_mm2=area_mm2,
+                        bbox_min_mm=planar_bbox_min_mm,
+                    )
+                )
 
             elif surf_type == GeomAbs_Torus:
                 torus = adaptor.Torus()
                 major_r = float(torus.MajorRadius())
                 minor_r = float(torus.MinorRadius())
-                features.append(OccFeature(
-                    feature_type="fillet",
-                    parameters={
-                        "radius_mm": minor_r,
-                        "major_radius_mm": major_r,
-                        "is_torus": True,
-                    },
-                    face_tag=face_tag,
-                    centroid=centroid,
-                    area_mm2=area_mm2,
-                ))
+                features.append(
+                    OccFeature(
+                        feature_type="fillet",
+                        parameters={
+                            "radius_mm": minor_r,
+                            "major_radius_mm": major_r,
+                            "is_torus": True,
+                        },
+                        face_tag=face_tag,
+                        centroid=centroid,
+                        area_mm2=area_mm2,
+                    )
+                )
 
             elif surf_type == GeomAbs_Cone:
                 cone = adaptor.Cone()
                 half_angle = math.degrees(float(cone.SemiAngle()))
-                features.append(OccFeature(
-                    feature_type="cone",
-                    parameters={
-                        "half_angle_deg": half_angle,
-                        "apex_radius_mm": float(cone.RefRadius()),
-                    },
-                    face_tag=face_tag,
-                    centroid=centroid,
-                    area_mm2=area_mm2,
-                ))
+                features.append(
+                    OccFeature(
+                        feature_type="cone",
+                        parameters={
+                            "half_angle_deg": half_angle,
+                            "apex_radius_mm": float(cone.RefRadius()),
+                        },
+                        face_tag=face_tag,
+                        centroid=centroid,
+                        area_mm2=area_mm2,
+                    )
+                )
 
             else:
                 # BSpline, BezierSurface, etc. — store as generic
-                features.append(OccFeature(
-                    feature_type="freeform",
-                    parameters={"surface_type": int(surf_type)},
-                    face_tag=face_tag,
-                    centroid=centroid,
-                    area_mm2=area_mm2,
-                ))
+                features.append(
+                    OccFeature(
+                        feature_type="freeform",
+                        parameters={"surface_type": int(surf_type)},
+                        face_tag=face_tag,
+                        centroid=centroid,
+                        area_mm2=area_mm2,
+                    )
+                )
 
         # ── Post-process: detect holes with depth, pockets, etc. ──────────
         features = _post_process_features(features, face_tag_to_tri)
@@ -327,8 +343,11 @@ def _post_process_features(
 ) -> list[OccFeature]:
     """Enrich raw surface features with depth, pocket geometry, etc."""
     # Group cylinders by axis direction and centroid proximity to determine depth
-    cylinders = [f for f in features if f.feature_type in ("hole", "fillet")
-                 and not f.parameters.get("is_torus")]
+    cylinders = [
+        f
+        for f in features
+        if f.feature_type in ("hole", "fillet") and not f.parameters.get("is_torus")
+    ]
 
     # For each hole (reversed cylinder), estimate depth from bounding z-range
     # This is approximate — proper depth needs edge analysis

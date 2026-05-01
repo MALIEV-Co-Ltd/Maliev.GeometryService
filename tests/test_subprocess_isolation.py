@@ -76,7 +76,7 @@ def test_subprocess_isolation_crash_recovery():
     """Test that a simulated crash is caught and doesn't kill the main process."""
     try:
         _run_in_isolated_subprocess(_simulate_os_exit, timeout=5)
-        assert False, "Expected RuntimeError from simulated crash"
+        raise AssertionError("Expected RuntimeError from simulated crash")
     except RuntimeError as e:
         assert "Simulated crash" in str(e)
         print("[PASS] Crash is caught as exception")
@@ -91,7 +91,7 @@ def test_subprocess_isolation_timeout():
     """Test that timeouts work correctly."""
     try:
         _run_in_isolated_subprocess(_hang, timeout=1)
-        assert False, "Expected TimeoutError"
+        raise AssertionError("Expected TimeoutError")
     except TimeoutError:
         print("[PASS] Timeout works correctly")
 

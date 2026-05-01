@@ -20,7 +20,7 @@ from .dfm_models import (
     InternalRadiusFeature,
     ToolAccessReport,
 )
-from .dfm_thresholds import MILLING_RULES, TOOL_DIAMETER_TABLE, get_tool_for_radius
+from .dfm_thresholds import MILLING_RULES
 
 logger = logging.getLogger(__name__)
 
@@ -31,7 +31,7 @@ logger = logging.getLogger(__name__)
 
 
 def detect_internal_radii(
-    mesh: "trimesh.Trimesh",  # type: ignore[name-defined]
+    mesh: trimesh.Trimesh,  # type: ignore[name-defined]  # noqa: F821
 ) -> list[InternalRadiusFeature]:
     """Detect concave corners and estimate their fillet radius.
 
@@ -55,8 +55,10 @@ def detect_internal_radii(
         edge_to_faces: dict[tuple[int, int], list[int]] = {}
         for fidx, face in enumerate(mesh.faces):
             for k in range(3):
-                key = (min(int(face[k]), int(face[(k + 1) % 3])),
-                       max(int(face[k]), int(face[(k + 1) % 3])))
+                key = (
+                    min(int(face[k]), int(face[(k + 1) % 3])),
+                    max(int(face[k]), int(face[(k + 1) % 3])),
+                )
                 edge_to_faces.setdefault(key, []).append(fidx)
 
         face_normals = mesh.face_normals
@@ -94,7 +96,7 @@ def detect_internal_radii(
         cluster_radius = 3.0  # mm — group nearby concave edges into one feature
         used: set[int] = set()
 
-        for i, (edge_key, mid_i) in enumerate(concave_edges):
+        for i, (_edge_key, mid_i) in enumerate(concave_edges):
             if i in used:
                 continue
 
@@ -111,8 +113,9 @@ def detect_internal_radii(
             # Estimate local radius from curvature of edge arc
             # Approximate: radius ≈ 0 for sharp corners (no fillet)
             # For fillets, the adjacent triangles span a distance ≈ 2×radius
-            span = float(np.linalg.norm(cluster_mids.max(axis=0) -
-                                        cluster_mids.min(axis=0)))
+            span = float(
+                np.linalg.norm(cluster_mids.max(axis=0) - cluster_mids.min(axis=0))
+            )
             estimated_radius = span / 2.0
 
             # Gather face indices for overlay
@@ -121,13 +124,18 @@ def detect_internal_radii(
                 ek = concave_edges[int(eidx)][0]
                 face_idxs.extend(edge_to_faces.get(ek, []))
 
-            results.append(InternalRadiusFeature(
-                radius_mm=estimated_radius,
-                centroid=[float(centroid[0]), float(centroid[1]),
-                          float(centroid[2])],
-                depth_mm=0.0,  # depth filled in by cavity analysis
-                face_indices=list(set(face_idxs))[:50],
-            ))
+            results.append(
+                InternalRadiusFeature(
+                    radius_mm=estimated_radius,
+                    centroid=[
+                        float(centroid[0]),
+                        float(centroid[1]),
+                        float(centroid[2]),
+                    ],
+                    depth_mm=0.0,  # depth filled in by cavity analysis
+                    face_indices=list(set(face_idxs))[:50],
+                )
+            )
 
     except Exception as exc:
         logger.warning("internal radius detection failed: %s", exc)
@@ -141,7 +149,7 @@ def detect_internal_radii(
 
 
 def detect_cavities(
-    mesh: "trimesh.Trimesh",  # type: ignore[name-defined]
+    mesh: trimesh.Trimesh,  # type: ignore[name-defined]  # noqa: F821
 ) -> list[CavityFeature]:
     """Detect pocket / cavity features and measure depth vs. width.
 
@@ -182,7 +190,7 @@ def detect_cavities(
         for i in range(len(floor_indices)):
             if i in used:
                 continue
-            fi = int(floor_indices[i])
+            int(floor_indices[i])
             ci = floor_centroids[i]
             dists = np.linalg.norm(floor_centroids - ci, axis=1)
             cluster_mask = dists < cluster_dist
@@ -224,13 +232,18 @@ def detect_cavities(
             if depth < 1.0:
                 continue
 
-            cavities.append(CavityFeature(
-                width_mm=max(width, 1.0),
-                depth_mm=depth,
-                centroid=[float(centroid[0]), float(centroid[1]),
-                          float(centroid[2])],
-                face_indices=[int(f) for f in cluster_face_indices[:50]],
-            ))
+            cavities.append(
+                CavityFeature(
+                    width_mm=max(width, 1.0),
+                    depth_mm=depth,
+                    centroid=[
+                        float(centroid[0]),
+                        float(centroid[1]),
+                        float(centroid[2]),
+                    ],
+                    face_indices=[int(f) for f in cluster_face_indices[:50]],
+                )
+            )
 
     except Exception as exc:
         logger.warning("cavity detection failed: %s", exc)
@@ -244,7 +257,7 @@ def detect_cavities(
 
 
 def detect_tool_access(
-    mesh: "trimesh.Trimesh",  # type: ignore[name-defined]
+    mesh: trimesh.Trimesh,  # type: ignore[name-defined]  # noqa: F821
 ) -> ToolAccessReport:
     """Determine the minimum number of CNC axes required to reach all faces.
 
@@ -273,11 +286,17 @@ def detect_tool_access(
         normals = mesh.face_normals  # (N, 3)
 
         # 3-axis setup directions (6 standard orientations)
-        dirs_3axis = np.array([
-            [0, 0, 1], [0, 0, -1],
-            [1, 0, 0], [-1, 0, 0],
-            [0, 1, 0], [0, -1, 0],
-        ], dtype=float)
+        dirs_3axis = np.array(
+            [
+                [0, 0, 1],
+                [0, 0, -1],
+                [1, 0, 0],
+                [-1, 0, 0],
+                [0, 1, 0],
+                [0, -1, 0],
+            ],
+            dtype=float,
+        )
 
         # A face is accessible in 3-axis if any standard direction yields
         # dot product > 0 with the face normal (normal points toward tool)
@@ -316,9 +335,7 @@ def detect_tool_access(
             minimum_axes=5,
             inaccessible_face_count=int(len(inaccessible_after_4)),
             inaccessible_face_indices=inaccessible_after_4[:100].tolist(),
-            details=(
-                f"{len(inaccessible_after_4)} face(s) require 5-axis machining"
-            ),
+            details=(f"{len(inaccessible_after_4)} face(s) require 5-axis machining"),
         )
 
     except Exception as exc:
@@ -337,7 +354,7 @@ def detect_tool_access(
 
 
 def detect_chatter_risk(
-    mesh: "trimesh.Trimesh",  # type: ignore[name-defined]
+    mesh: trimesh.Trimesh,  # type: ignore[name-defined]  # noqa: F821
     min_area_cm2: float = 4.0,
     max_thickness_mm: float = 3.0,
 ) -> tuple[int, list[list[float]], list[int]]:
@@ -442,7 +459,7 @@ def detect_deep_narrow_cavities(
 
 
 def _compute_z_slice_profile(
-    mesh: "trimesh.Trimesh",  # type: ignore[name-defined]
+    mesh: trimesh.Trimesh,  # type: ignore[name-defined]  # noqa: F821
     n_slices: int = 100,
 ) -> tuple[list[float], list[float], list[float], list[float]]:
     """Compute per-slice (z, mean_r, std_r, max_r) using section_multiplane.
@@ -462,9 +479,11 @@ def _compute_z_slice_profile(
         if total_length < 1.0:
             return [], [], [], []
 
-        heights = np.linspace(z_min + total_length / (2 * n_slices),
-                              z_max - total_length / (2 * n_slices),
-                              n_slices)
+        heights = np.linspace(
+            z_min + total_length / (2 * n_slices),
+            z_max - total_length / (2 * n_slices),
+            n_slices,
+        )
         plane_normal = np.array([0.0, 0.0, 1.0])
         plane_orig = np.array([0.0, 0.0, 0.0])
 
@@ -474,7 +493,7 @@ def _compute_z_slice_profile(
             heights=heights,
         )
 
-        for z, section in zip(heights, sections):
+        for z, section in zip(heights, sections, strict=False):
             if section is None:
                 continue
             try:
@@ -506,10 +525,10 @@ def _compute_z_slice_profile(
 
 
 def detect_axial_symmetry(
-    mesh: "trimesh.Trimesh",  # type: ignore[name-defined]
+    mesh: trimesh.Trimesh,  # type: ignore[name-defined]  # noqa: F821
     n_slices: int = 20,
     symmetry_threshold: float = 0.15,
-    slice_profile: "tuple[list, list, list, list] | None" = None,
+    slice_profile: tuple[list, list, list, list] | None = None,
 ) -> AxisSymmetryReport:
     """Determine if the part is a surface of revolution (suitable for turning).
 
@@ -530,7 +549,7 @@ def detect_axial_symmetry(
     """
     import trimesh
 
-    _FAIL = AxisSymmetryReport(
+    _FAIL = AxisSymmetryReport(  # noqa: N806
         is_turnable=False,
         primary_axis=None,
         axis_vector=[0.0, 0.0, 1.0],
@@ -556,8 +575,14 @@ def detect_axial_symmetry(
 
         # Sample every k-th slice when profile has more than n_slices entries
         step = max(1, len(z_vals) // n_slices)
-        deviations = [std_rs[i] / mean_rs[i] for i in range(0, len(z_vals), step) if mean_rs[i] > 0]
-        radii_at_slices = [mean_rs[i] for i in range(0, len(z_vals), step) if mean_rs[i] > 0]
+        deviations = [
+            std_rs[i] / mean_rs[i]
+            for i in range(0, len(z_vals), step)
+            if mean_rs[i] > 0
+        ]
+        radii_at_slices = [
+            mean_rs[i] for i in range(0, len(z_vals), step) if mean_rs[i] > 0
+        ]
 
         if not deviations:
             return _FAIL
@@ -592,9 +617,9 @@ def detect_axial_symmetry(
 
 
 def detect_grooves(
-    mesh: "trimesh.Trimesh",  # type: ignore[name-defined]
+    mesh: trimesh.Trimesh,  # type: ignore[name-defined]  # noqa: F821
     n_slices: int = 100,
-    slice_profile: "tuple[list, list, list, list] | None" = None,
+    slice_profile: tuple[list, list, list, list] | None = None,
 ) -> list[GrooveFeature]:
     """Detect circumferential grooves on a turned part.
 
@@ -621,7 +646,9 @@ def detect_grooves(
         if slice_profile is not None:
             z_values, _mean_rs, _std_rs, outer_radii = slice_profile
         else:
-            z_values, _mean_rs, _std_rs, outer_radii = _compute_z_slice_profile(mesh, n_slices)
+            z_values, _mean_rs, _std_rs, outer_radii = _compute_z_slice_profile(
+                mesh, n_slices
+            )
 
         if len(outer_radii) < 5:
             return grooves
@@ -631,7 +658,7 @@ def detect_grooves(
         mean_r = float(radii_arr.mean())
 
         # Find local minima (grooves = dips below mean)
-        GROOVE_DEPTH_THRESH = mean_r * 0.05  # at least 5% dip
+        GROOVE_DEPTH_THRESH = mean_r * 0.05  # at least 5% dip  # noqa: N806
 
         in_groove = False
         groove_start_z = 0.0
@@ -651,13 +678,15 @@ def detect_grooves(
                     width = groove_end_z - groove_start_z
                     depth = mean_r - groove_min_r
                     centroid_z = (groove_start_z + groove_end_z) / 2.0
-                    grooves.append(GrooveFeature(
-                        width_mm=width,
-                        depth_mm=depth,
-                        diameter_at_groove_mm=groove_min_r * 2.0,
-                        centroid=[0.0, 0.0, centroid_z],
-                        face_indices=[],
-                    ))
+                    grooves.append(
+                        GrooveFeature(
+                            width_mm=width,
+                            depth_mm=depth,
+                            diameter_at_groove_mm=groove_min_r * 2.0,
+                            centroid=[0.0, 0.0, centroid_z],
+                            face_indices=[],
+                        )
+                    )
                     in_groove = False
 
     except Exception as exc:
@@ -672,7 +701,7 @@ def detect_grooves(
 
 
 def compute_sharp_corner_analysis(
-    mesh: "trimesh.Trimesh",  # type: ignore[name-defined]
+    mesh: trimesh.Trimesh,  # type: ignore[name-defined]  # noqa: F821
     threshold_deg: float = 45.0,
 ) -> tuple[int, list[list[float]], list[int]]:
     """Detect sharp internal corners unsuitable for standard CNC endmills.
@@ -726,8 +755,7 @@ def compute_sharp_corner_analysis(
             # Concavity: both normals point toward each other across the edge.
             diff = cj - ci
             if not (
-                float(np.dot(ni, diff)) < -0.05
-                and float(np.dot(nj, -diff)) < -0.05
+                float(np.dot(ni, diff)) < -0.05 and float(np.dot(nj, -diff)) < -0.05
             ):
                 continue  # convex or boundary edge
 

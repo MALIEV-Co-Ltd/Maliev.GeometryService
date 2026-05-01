@@ -29,17 +29,27 @@ BASELINES = Path(__file__).parent / "assets" / "baselines"
 
 # Fields whose values must match exactly (ints + booleans)
 EXACT_INT_FIELDS = {
-    "thinWallCount", "overhangFaceCount",
-    "sharpCornerCount", "drillHoleCount", "chatterRiskCount",
+    "thinWallCount",
+    "overhangFaceCount",
+    "sharpCornerCount",
+    "drillHoleCount",
+    "chatterRiskCount",
 }
 EXACT_BOOL_FIELDS = {
-    "supportRequired", "isManifold", "hasDrillHoles",
-    "hasUndercuts", "requiresEdm", "requiresGrinding",
-    "resinTrappingRisk", "suctionRisk",
+    "supportRequired",
+    "isManifold",
+    "hasDrillHoles",
+    "hasUndercuts",
+    "requiresEdm",
+    "requiresGrinding",
+    "resinTrappingRisk",
+    "suctionRisk",
 }
 # Float fields allowed 1% relative tolerance
 FLOAT_FIELDS = {
-    "overhangAreaCm2", "estimatedSupportVolumeCm3", "minimumFeatureSizeMm",
+    "overhangAreaCm2",
+    "estimatedSupportVolumeCm3",
+    "minimumFeatureSizeMm",
     "smallDetailCount",
 }
 
@@ -63,7 +73,11 @@ def _normalize_report(report: dict) -> dict:
 
 
 def _issues_key(issue: dict) -> tuple:
-    return (issue.get("category", ""), issue.get("severity", ""), issue.get("title", ""))
+    return (
+        issue.get("category", ""),
+        issue.get("severity", ""),
+        issue.get("title", ""),
+    )
 
 
 def _load_cases() -> list[tuple[Path, str, Path]]:
@@ -91,9 +105,9 @@ def test_dfm_parity(parity_case: tuple[Path, str, Path]) -> None:
     baseline = json.loads(baseline_path.read_text())
 
     result = _analyze_single_process(stl_bytes, process_code)
-    assert "error_type" not in result, (
-        f"Analysis failed for {stl_path.name} [{process_code}]: {result}"
-    )
+    assert (
+        "error_type" not in result
+    ), f"Analysis failed for {stl_path.name} [{process_code}]: {result}"
 
     current = _normalize_report(result)
 
@@ -119,13 +133,13 @@ def test_dfm_parity(parity_case: tuple[Path, str, Path]) -> None:
             got = current.get(field)
             exp = baseline[field]
             if abs(exp) < 0.01:
-                assert got == pytest.approx(exp, abs=0.05), (
-                    f"{stl_path.name} [{process_code}] {field}: got {got}, expected {exp}"
-                )
+                assert (
+                    got == pytest.approx(exp, abs=0.05)
+                ), f"{stl_path.name} [{process_code}] {field}: got {got}, expected {exp}"  # noqa: E501
             else:
-                assert got == pytest.approx(exp, rel=0.05), (
-                    f"{stl_path.name} [{process_code}] {field}: got {got}, expected {exp}"
-                )
+                assert (
+                    got == pytest.approx(exp, rel=0.05)
+                ), f"{stl_path.name} [{process_code}] {field}: got {got}, expected {exp}"  # noqa: E501
 
     # --- Issues list — compare by (category, severity, title) ---
     if "issues" in baseline:

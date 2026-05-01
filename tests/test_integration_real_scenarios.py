@@ -4,24 +4,34 @@ These tests simulate actual usage patterns and verify the entire
 pipeline works correctly from file upload through DFM analysis.
 """
 
-import pytest
 import time
-import tempfile
-from pathlib import Path
-from typing import List, Dict, Any
 
-from src.core.geometry import (
-    load_cascadio_geometry,  # noqa: F401 – used in all test methods below
+import pytest
+
+pytestmark = pytest.mark.slow
+
+_cascadio_available = True
+try:
+    import cascadio  # noqa: F401
+except ImportError:
+    _cascadio_available = False
+
+requires_cascadio = pytest.mark.skipif(
+    not _cascadio_available, reason="cascadio not installed"
+)
+
+from src.core.geometry import (  # noqa: E402
     compute_dfm_analysis_for_stl,
     compute_multi_body_dfm_analysis,
+    load_cascadio_geometry,  # noqa: F401 – used in all test methods below
 )
-from tests.test_utils import (
-    monitor_resources,
+from tests.test_utils import (  # noqa: E402
     check_for_orphaned_processes,
     cleanup_temp_files,
 )
 
 
+@requires_cascadio
 class TestFullPipeline:
     """Test complete pipeline from file upload to overlays."""
 
@@ -37,9 +47,9 @@ class TestFullPipeline:
         cascadio_result = load_cascadio_geometry(step_bytes, timeout_seconds=30)
 
         assert cascadio_result is not None, "Cascadio loading failed"
-        assert cascadio_result.get("success") is not False, (
-            "Cascadio loading indicated failure"
-        )
+        assert (
+            cascadio_result.get("success") is not False
+        ), "Cascadio loading indicated failure"
 
         if not cascadio_result.get("success"):
             # If cascadio failed, we can't continue
@@ -165,9 +175,9 @@ class TestConcurrentOperations:
                     pytest.fail(f"Concurrent load failed: {e}")
 
         # Verify all completed
-        assert len(results) == num_concurrent, (
-            f"Only {len(results)}/{num_concurrent} uploads completed"
-        )
+        assert (
+            len(results) == num_concurrent
+        ), f"Only {len(results)}/{num_concurrent} uploads completed"
 
         # Verify no orphaned processes
         time.sleep(1.0)  # Give time for cleanup
@@ -210,9 +220,9 @@ class TestConcurrentOperations:
                     pytest.fail(f"Concurrent DFM failed: {e}")
 
         # Verify all completed
-        assert len(results) == num_concurrent, (
-            f"Only {len(results)}/{num_concurrent} analyses completed"
-        )
+        assert (
+            len(results) == num_concurrent
+        ), f"Only {len(results)}/{num_concurrent} analyses completed"
 
         # Verify no orphaned processes
         time.sleep(1.0)  # Give time for cleanup
@@ -352,7 +362,7 @@ class TestResourceManagement:
     def test_temp_file_cleanup_after_operations(self, test_assets_dir):
         """Test that temp files are cleaned up after operations."""
         # Clean up any existing temp files
-        cleaned_before = cleanup_temp_files(prefix="geom_")
+        cleanup_temp_files(prefix="geom_")
 
         # Perform operations
         step_file = test_assets_dir / "50x50x50mm-solid-cube.step"
@@ -374,15 +384,16 @@ class TestResourceManagement:
         # Check temp files again
         # Note: There might be some temp files from other processes
         # The key is that we're not accumulating them
-        cleaned_after = cleanup_temp_files(prefix="geom_")
+        cleanup_temp_files(prefix="geom_")
 
         # We don't assert specific counts, but we verify cleanup doesn't crash
         assert True  # If we get here, cleanup worked
 
     def test_memory_stability_under_load(self, test_assets_dir):
         """Test memory stability under repeated operations."""
-        import psutil
         import gc
+
+        import psutil
 
         step_file = test_assets_dir / "cube.step"
         if not step_file.exists():
@@ -397,7 +408,7 @@ class TestResourceManagement:
         for i in range(5):
             rss_before = process.memory_info().rss / 1024 / 1024
 
-            result = load_cascadio_geometry(step_bytes, timeout_seconds=30)
+            load_cascadio_geometry(step_bytes, timeout_seconds=30)
 
             # Force cleanup
             gc.collect()
@@ -419,18 +430,18 @@ class TestResourceManagement:
 
         # Average delta should be reasonable
         avg_delta = sum(deltas) / len(deltas)
-        assert avg_delta < 100, (
-            f"Average memory growth {avg_delta:.1f}MB indicates leak"
-        )
+        assert (
+            avg_delta < 100
+        ), f"Average memory growth {avg_delta:.1f}MB indicates leak"
 
         # Last iteration should not be significantly higher than first
         first_delta = deltas[0]
         last_delta = deltas[-1]
         delta_growth = last_delta - first_delta
 
-        assert delta_growth < 50, (
-            f"Memory delta grew by {delta_growth:.1f}MB across iterations, indicating leak"
-        )
+        assert (
+            delta_growth < 50
+        ), f"Memory delta grew by {delta_growth:.1f}MB across iterations, indicating leak"  # noqa: E501
 
         print(f"\nMemory stability: {[f'{d:.1f}' for d in deltas]} MB")
 
@@ -474,14 +485,14 @@ class TestRealWorldScenarios:
         total_time = time.time() - start_time
 
         # All should complete
-        assert len(results) == num_operations, (
-            f"Only {len(results)}/{num_operations} operations completed"
-        )
+        assert (
+            len(results) == num_operations
+        ), f"Only {len(results)}/{num_operations} operations completed"
 
         # Should complete in reasonable time
         # (allowing 30s per operation plus overhead)
-        assert total_time < num_operations * 35, (
-            f"Sequential operations took {total_time:.1f}s, too slow"
-        )
+        assert (
+            total_time < num_operations * 35
+        ), f"Sequential operations took {total_time:.1f}s, too slow"
 
         print(f"\nRapid sequential: {num_operations} operations in {total_time:.1f}s")

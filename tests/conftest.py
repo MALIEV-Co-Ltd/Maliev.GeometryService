@@ -1,9 +1,9 @@
 """Shared test fixtures for multi-body testing."""
 
+from pathlib import Path
+
 import pytest
 import trimesh
-import numpy as np
-from pathlib import Path
 
 
 @pytest.fixture
@@ -15,8 +15,7 @@ def test_assets_dir():
 @pytest.fixture
 def single_body_cube():
     """Single box mesh - baseline for comparison."""
-    mesh = trimesh.creation.box([10, 10, 10])
-    return mesh
+    return trimesh.creation.box([10, 10, 10])
 
 
 @pytest.fixture
@@ -190,3 +189,17 @@ def sample_dfm_report_multi():
     }
 
     return {0: body1_report, 1: body2_report}
+
+
+@pytest.fixture(scope="module")
+def geometry_processor():
+    """Shared GeometryProcessor — one process pool reused across all tests in a module.
+
+    Use this fixture in slow tests instead of creating a GeometryProcessor inline,
+    to avoid spawning a new subprocess pool for every test method.
+    """
+    from src.core.geometry import GeometryProcessor
+
+    p = GeometryProcessor(enable_diagnostics=False)
+    yield p
+    p.shutdown(timeout=30)

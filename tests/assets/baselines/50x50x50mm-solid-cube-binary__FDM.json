@@ -1,26 +1,7 @@
 {
-  "analysis_time_seconds": 0.0209,
+  "analysis_time_seconds": 0.068,
   "estimatedSupportVolumeCm3": null,
-  "issues": [
-    {
-      "category": "bridge",
-      "centroid": [
-        8.3333,
-        -8.3333,
-        0.0
-      ],
-      "description": "2 bridge span(s) exceed the 10.0mm limit for FDM.",
-      "faceIndices": [
-        10,
-        11
-      ],
-      "metadata": {},
-      "severity": "warning",
-      "threshold": 10.0,
-      "title": "Long Bridges (2 spans)",
-      "value": 2.0
-    }
-  ],
+  "issues": [],
   "overhangAreaCm2": 0.0,
   "overhangFaceCount": 0,
   "overhangRegions": [],

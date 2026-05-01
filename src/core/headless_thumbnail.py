@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 def _render_with_trimesh(
     glb_bytes: bytes,
     size: int,
-    format: str,
+    format: str,  # noqa: A002, ARG001
 ) -> bytes | None:
     """Render a lit, shaded thumbnail using trimesh's built-in scene rendering.
 
@@ -88,7 +88,7 @@ def _render_with_trimesh(
 def _render_with_pyvista(
     glb_bytes: bytes,
     size: int,
-    format: str,
+    format: str,  # noqa: A002
 ) -> bytes | None:
     """Render thumbnail using PyVista with proper lighting and shading.
 
@@ -97,10 +97,11 @@ def _render_with_pyvista(
     overly shiny surfaces.
     """
     try:
-        import trimesh
-        import pyvista as pv
-        import numpy as np
         import math
+
+        import numpy as np
+        import pyvista as pv
+        import trimesh
 
         # Ensure off-screen rendering
         pv.OFF_SCREEN = True
@@ -128,7 +129,7 @@ def _render_with_pyvista(
         vertices = tmesh.vertices
         faces = tmesh.faces  # shape (N, 3) — trimesh triangles, no count prefix
 
-        # PyVista PolyData requires faces as flat array: [3, v0, v1, v2, 3, v0, v1, v2, ...]
+        # PyVista PolyData requires faces as flat array: [3, v0, v1, v2, 3, v0, v1, v2, ...]  # noqa: E501
         faces_pv = np.hstack(
             [np.full((len(faces), 1), 3, dtype=np.int32), faces]
         ).flatten()
@@ -235,7 +236,7 @@ def _render_with_pyvista(
 def render_thumbnail_from_glb_headless(
     glb_bytes: bytes,
     size: int = 256,
-    format: str = "png",
+    format: str = "png",  # noqa: A002
 ) -> bytes | None:
     """Render a thumbnail from GLB bytes.
 
@@ -261,6 +262,7 @@ def render_thumbnail_from_glb_headless(
     # T4d: fallback to trimesh native rendering only — do NOT retry PyVista
     # (the original code called _render_with_pyvista a second time as a dead
     # fallback after the first attempt already failed).
+    logger.info("PyVista unavailable or failed — falling back to trimesh renderer")
     return _render_with_trimesh(glb_bytes, size, format)
 
 
@@ -323,7 +325,7 @@ def test_headless_rendering():
 
         thumbnail = render_thumbnail_from_glb_headless(glb_bytes, size=256)
         if thumbnail:
-            with open("test_headless_thumbnail.png", "wb") as f:
+            with open("test_headless_thumbnail.png", "wb") as f:  # noqa: PTH123
                 f.write(thumbnail)
             print(f"✓ Rendered {len(thumbnail)} bytes → test_headless_thumbnail.png")
             return True

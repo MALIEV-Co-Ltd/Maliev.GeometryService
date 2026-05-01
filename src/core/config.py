@@ -17,6 +17,11 @@ class Settings(BaseSettings):
     SERVICE_NAME: str = "maliev-geometryservice"
 
     MAX_FILE_SIZE_MB: int = 200
+    GEOMETRY_MAIN_WORKERS: int | None = None
+    GEOMETRY_DFM_WORKERS: int = 2
+    GEOMETRY_PREVIEW_RENDER_WORKERS: int = 8
+    GEOMETRY_DFM_BODY_WORKERS: int = 4
+    GEOMETRY_RABBITMQ_PREFETCH: int = 2
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 

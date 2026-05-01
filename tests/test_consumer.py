@@ -61,7 +61,7 @@ def consumer(mock_storage, mock_processor):
 
 
 @pytest.mark.asyncio
-async def test_process_message_success(consumer, mock_storage, mock_processor):
+async def test_process_message_success(consumer, mock_storage, mock_processor):  # noqa: ARG001
     # Setup
     correlation_id = uuid4()
     file_id = str(uuid4())
@@ -113,7 +113,7 @@ async def test_process_message_success(consumer, mock_storage, mock_processor):
     async def _coro_phase2():
         return _FAKE_ARTIFACTS_RESULT
 
-    def fake_run_in_executor(executor, fn, *args):
+    def fake_run_in_executor(executor, fn, *args):  # noqa: ARG001
         nonlocal run_in_executor_call_count
         run_in_executor_call_count += 1
         if run_in_executor_call_count == 1:
@@ -123,7 +123,9 @@ async def test_process_message_success(consumer, mock_storage, mock_processor):
     mock_loop = MagicMock(wraps=real_loop)
     mock_loop.run_in_executor = fake_run_in_executor
 
-    with patch("src.consumers.upload_consumer.asyncio.get_running_loop", return_value=mock_loop):
+    with patch(
+        "src.consumers.upload_consumer.asyncio.get_running_loop", return_value=mock_loop
+    ):
         await consumer.process_message(message)
 
     # Assert at least one publish_event call happened
@@ -140,7 +142,8 @@ async def test_process_message_success(consumer, mock_storage, mock_processor):
 
     # Verify correlation_id propagation on the analysis.completed event
     completed_call = next(
-        c for c in consumer.publish_event.call_args_list
+        c
+        for c in consumer.publish_event.call_args_list
         if c[0][1] == "maliev.geometryservice.v1.analysis.completed"
     )
     success_event = completed_call[0][0]
@@ -150,7 +153,7 @@ async def test_process_message_success(consumer, mock_storage, mock_processor):
 
 @pytest.mark.asyncio
 async def test_process_message_with_deferred_sla_report_does_not_crash(
-    consumer, mock_storage, mock_processor
+    consumer, mock_storage, mock_processor  # noqa: ARG001
 ):
     """Regression: deferred SLA reports (twoPhaseDeferred=True) must not cause
     pydantic ValidationError in the consumer (missing resinTrappingRisk etc.)."""
@@ -184,7 +187,7 @@ async def test_process_message_with_deferred_sla_report_does_not_crash(
 
     # Deferred SLA/FDM reports — missing SLA-specific required fields — the
     # consumer must skip them rather than calling model_validate and crashing.
-    _DEFERRED_METRICS = {
+    _DEFERRED_METRICS = {  # noqa: N806
         **_FAKE_METRICS_RESULT,
         "dfmReports": {
             "FDM": {
@@ -236,7 +239,7 @@ async def test_process_message_with_deferred_sla_report_does_not_crash(
     async def _coro_phase2():
         return _FAKE_ARTIFACTS_RESULT
 
-    def fake_run_in_executor(executor, fn, *args):
+    def fake_run_in_executor(executor, fn, *args):  # noqa: ARG001
         nonlocal run_in_executor_call_count
         run_in_executor_call_count += 1
         if run_in_executor_call_count == 1:
@@ -246,7 +249,9 @@ async def test_process_message_with_deferred_sla_report_does_not_crash(
     mock_loop = MagicMock(wraps=real_loop)
     mock_loop.run_in_executor = fake_run_in_executor
 
-    with patch("src.consumers.upload_consumer.asyncio.get_running_loop", return_value=mock_loop):
+    with patch(
+        "src.consumers.upload_consumer.asyncio.get_running_loop", return_value=mock_loop
+    ):
         # Must not raise pydantic ValidationError
         await consumer.process_message(message)
 
@@ -256,7 +261,8 @@ async def test_process_message_with_deferred_sla_report_does_not_crash(
 
     # analysis.completed must still be published with dfm_report=None
     completed_call = next(
-        c for c in consumer.publish_event.call_args_list
+        c
+        for c in consumer.publish_event.call_args_list
         if c[0][1] == "maliev.geometryservice.v1.analysis.completed"
     )
     completed_event = completed_call[0][0]

@@ -250,7 +250,7 @@ def generate_support_tower_overlay_glb(
     """
     import trimesh
 
-    SUPPORT_CLEARANCE = 0.2  # mm gap above mesh face so pillar doesn't z-fight
+    support_clearance = 0.2  # mm gap above mesh face so pillar doesn't z-fight
 
     try:
         if not isinstance(mesh, trimesh.Trimesh):
@@ -301,7 +301,7 @@ def generate_support_tower_overlay_glb(
                     hz = float(loc[2])
                     if hz < z_top - 0.05 and hz > best:
                         best = hz
-                return best + SUPPORT_CLEARANCE if best > z_min else z_min
+                return best + support_clearance if best > z_min else z_min
             except Exception:
                 return z_min
 
@@ -372,13 +372,23 @@ def generate_support_tower_overlay_glb(
         # X-direction walls: span full X range, thin in Y. Ray at x_mid for each y.
         for y_pos in y_lines:
             local_z = _ray_z_bot(x_mid, float(y_pos))
-            _add_wall(x_lo, x_hi, float(y_pos) - wall_half, float(y_pos) + wall_half, local_z)
+            _add_wall(
+                x_lo,
+                x_hi,
+                float(y_pos) - wall_half,
+                float(y_pos) + wall_half,
+                local_z,
+            )
 
         # Y-direction walls: span full Y range, thin in X. Ray at y_mid for each x.
         for x_pos in x_lines:
             local_z = _ray_z_bot(float(x_pos), y_mid)
             _add_wall(
-                float(x_pos) - wall_half, float(x_pos) + wall_half, y_lo_full, y_hi_full, local_z
+                float(x_pos) - wall_half,
+                float(x_pos) + wall_half,
+                y_lo_full,
+                y_hi_full,
+                local_z,
             )
 
         if not all_verts_list:

@@ -11,7 +11,6 @@ import trimesh
 
 from src.core.geometry import GeometryProcessor
 
-
 ASSETS_DIR = pytest.importorskip("pathlib").Path(__file__).parent / "assets"
 
 

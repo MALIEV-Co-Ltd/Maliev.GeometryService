@@ -4,24 +4,43 @@ These tests verify that cascadio loading works correctly with ProcessPoolExecuto
 handles timeouts gracefully, and properly cleans up resources.
 """
 
-import pytest
-import os
+import contextlib
 import time
-import psutil
-from pathlib import Path
 from concurrent.futures import (
     ProcessPoolExecutor,
     ThreadPoolExecutor,
+)
+from concurrent.futures import (
     TimeoutError as FuturesTimeout,
 )
 
+import psutil
+import pytest
+
 from src.core.geometry import GeometryProcessor, load_cascadio_geometry
 from tests.test_utils import (
-    monitor_resources,
     check_for_orphaned_processes,
-    wait_for_condition,
     measure_performance,
+    monitor_resources,
 )
+
+pytestmark = pytest.mark.slow
+
+_cascadio_available = True
+try:
+    import cascadio  # noqa: F401
+except ImportError:
+    _cascadio_available = False
+
+requires_cascadio = pytest.mark.skipif(
+    not _cascadio_available, reason="cascadio not installed"
+)
+
+
+def _sleep_100s():
+    """Module-level sleep function — must be at module scope to be picklable."""
+    time.sleep(100)
+    return "completed"
 
 
 @pytest.fixture
@@ -48,6 +67,7 @@ def multi_body_step_file(test_assets_dir):
     return test_assets_dir / "50x50x50mm-solid-cube.step"
 
 
+@requires_cascadio
 class TestCascadioIntegration:
     """Test cascadio integration with ProcessPoolExecutor."""
 
@@ -73,9 +93,9 @@ class TestCascadioIntegration:
 
             # Check memory usage is reasonable
             peak_memory = monitor.get_peak_memory()
-            assert peak_memory < 1000, (
-                f"Peak memory usage {peak_memory}MB exceeds 1000MB"
-            )
+            assert (
+                peak_memory < 1000
+            ), f"Peak memory usage {peak_memory}MB exceeds 1000MB"
         finally:
             processor.shutdown()
 
@@ -103,9 +123,9 @@ class TestCascadioIntegration:
 
         # Verify result indicates failure
         assert result is not None, "Result should not be None on timeout"
-        assert result.get("success") is False, (
-            "Result should indicate failure on timeout"
-        )
+        assert (
+            result.get("success") is False
+        ), "Result should indicate failure on timeout"
 
         # Wait for cleanup to complete
         time.sleep(1.0)
@@ -117,9 +137,9 @@ class TestCascadioIntegration:
         orphaned_after = check_for_orphaned_processes()
         orphaned_count = len(orphaned_after) - len(orphaned_before)
 
-        assert orphaned_count == 0, (
-            f"Found {orphaned_count} orphaned processes after timeout"
-        )
+        assert (
+            orphaned_count == 0
+        ), f"Found {orphaned_count} orphaned processes after timeout"
 
         # Verify children were cleaned up (may have some, but not excessive)
         child_growth = children_after - children_before
@@ -177,9 +197,9 @@ class TestCascadioIntegration:
                     pytest.fail("Concurrent load timed out")
 
         # Verify all completed
-        assert len(results) == num_concurrent, (
-            f"Only {len(results)}/{num_concurrent} loads completed"
-        )
+        assert (
+            len(results) == num_concurrent
+        ), f"Only {len(results)}/{num_concurrent} loads completed"
 
         # Verify all succeeded (or at least didn't crash)
         for i, result in enumerate(results):
@@ -194,7 +214,7 @@ class TestCascadioIntegration:
         rss_before = process.memory_info().rss / 1024 / 1024
 
         # Load the file
-        result = load_cascadio_geometry(step_bytes, timeout_seconds=30)
+        load_cascadio_geometry(step_bytes, timeout_seconds=30)
 
         # Force garbage collection
         import gc
@@ -225,9 +245,9 @@ class TestCascadioIntegration:
         assert perf["success"], f"Load failed: {perf.get('error')}"
 
         # Verify performance is reasonable (< 30 seconds)
-        assert perf["duration_seconds"] < 30, (
-            f"Load took {perf['duration_seconds']:.2f}s, exceeds 30s baseline"
-        )
+        assert (
+            perf["duration_seconds"] < 30
+        ), f"Load took {perf['duration_seconds']:.2f}s, exceeds 30s baseline"
 
         # Log performance for monitoring
         print(
@@ -250,9 +270,9 @@ class TestCascadioIntegration:
             assert result is not None, f"Invalid input {i} returned None"
 
             # Should indicate failure
-            assert result.get("success") is False, (
-                f"Invalid input {i} incorrectly succeeded"
-            )
+            assert (
+                result.get("success") is False
+            ), f"Invalid input {i} incorrectly succeeded"
 
     def test_cascadio_large_file_timeout(self, test_assets_dir):
         """Test timeout behavior with a large file that might timeout."""
@@ -292,14 +312,8 @@ class TestCascadioCleanup:
 
     def test_processpool_terminates_on_timeout(self):
         """Test that ProcessPoolExecutor properly terminates workers on timeout."""
-
-        # Create a function that will timeout
-        def slow_function():
-            time.sleep(100)  # Sleep for a long time
-            return "completed"
-
         with ProcessPoolExecutor(max_workers=1) as executor:
-            future = executor.submit(slow_function)
+            future = executor.submit(_sleep_100s)
 
             # Wait with short timeout
             with pytest.raises(FuturesTimeout):
@@ -308,11 +322,8 @@ class TestCascadioCleanup:
             # Cancel the future
             future.cancel()
 
-            # Shutdown executor
-            executor.shutdown(wait=True, timeout=2)
-
-        # Give time for cleanup
-        time.sleep(0.5)
+            # Terminate workers immediately (cancel_futures terminates running processes)  # noqa: E501
+            executor.shutdown(wait=True, cancel_futures=True)
 
         # Check for orphaned processes
         orphaned = check_for_orphaned_processes()
@@ -320,22 +331,14 @@ class TestCascadioCleanup:
 
     def test_threadpool_vs_processpool_cleanup(self):
         """Compare ThreadPoolExecutor vs ProcessPoolExecutor cleanup."""
-
-        # Note: This test documents why we use ProcessPoolExecutor
-        def hang_function():
-            time.sleep(100)
-            return "done"
-
         # Test ThreadPoolExecutor (threads can't be forcefully terminated)
         orphaned_before = check_for_orphaned_processes()
 
         with ThreadPoolExecutor(max_workers=1) as executor:
-            future = executor.submit(hang_function)
+            future = executor.submit(_sleep_100s)
 
-            try:
+            with contextlib.suppress(FuturesTimeout):
                 future.result(timeout=0.5)
-            except FuturesTimeout:
-                pass
 
             # Shutdown without waiting
             executor.shutdown(wait=False)
@@ -350,12 +353,10 @@ class TestCascadioCleanup:
         orphaned_before = check_for_orphaned_processes()
 
         with ProcessPoolExecutor(max_workers=1) as executor:
-            future = executor.submit(hang_function)
+            future = executor.submit(_sleep_100s)
 
-            try:
+            with contextlib.suppress(FuturesTimeout):
                 future.result(timeout=0.5)
-            except FuturesTimeout:
-                pass
 
             # Shutdown without waiting
             executor.shutdown(wait=False)

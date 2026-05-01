@@ -11,8 +11,7 @@ Sources:
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-
+from dataclasses import dataclass
 
 # ---------------------------------------------------------------------------
 # 3D Printing Design Rules
@@ -111,13 +110,13 @@ PRINTING_RULES: dict[str, PrintingDesignRules] = {
     "SLS": PrintingDesignRules(
         supported_wall_mm=0.7,
         unsupported_wall_mm=None,  # powder bed self-supports
-        max_overhang_deg=None,     # no overhangs/supports concern
+        max_overhang_deg=None,  # no overhangs/supports concern
         embossed_width_mm=1.0,
         embossed_height_mm=1.0,
         bridge_span_mm=None,
         min_hole_diameter_mm=1.5,
-        connecting_clearance_mm=0.3,   # moving parts clearance
-        escape_hole_diameter_mm=5.0,   # powder removal
+        connecting_clearance_mm=0.3,  # moving parts clearance
+        escape_hole_diameter_mm=5.0,  # powder removal
         min_feature_mm=0.8,
         pin_diameter_mm=0.8,
         tolerance_percent=0.3,
@@ -222,17 +221,17 @@ class MillingDesignRules:
     # Hole constraints
     min_hole_diameter_mm: float = 1.0
     # Hole depth limits (multiples of nominal diameter)
-    hole_depth_recommended_ratio: float = 4.0    # standard
-    hole_depth_typical_ratio: float = 10.0       # achievable
-    hole_depth_feasible_ratio: float = 40.0      # requires special tooling
+    hole_depth_recommended_ratio: float = 4.0  # standard
+    hole_depth_typical_ratio: float = 10.0  # achievable
+    hole_depth_feasible_ratio: float = 40.0  # requires special tooling
 
     # Thread constraints
     min_thread_nominal_diameter_mm: float = 2.5  # M2.5
-    thread_length_min_ratio: float = 1.5         # min engaged length = 1.5× nominal
-    thread_length_recommended_ratio: float = 3.0 # recommended = 3× nominal
+    thread_length_min_ratio: float = 1.5  # min engaged length = 1.5× nominal
+    thread_length_recommended_ratio: float = 3.0  # recommended = 3× nominal
 
     # Text and lettering
-    min_text_height_mm: float = 5.0              # prefer emboss over deboss
+    min_text_height_mm: float = 5.0  # prefer emboss over deboss
 
     # Undercut constraints (T-slots, dovetails)
     undercut_min_width_mm: float = 3.0
@@ -244,19 +243,19 @@ MILLING_RULES = MillingDesignRules()
 
 
 # Tool diameter reference table.
-# Each entry: (tool_diameter_mm, standard_length_mm, max_length_mm, min_corner_radius_mm)
+# Each entry: (tool_diameter_mm, standard_length_mm, max_length_mm, min_corner_radius_mm)  # noqa: E501
 # Source: standard endmill tooling specifications.
 # Higher lengths possible with tool holder extensions (not recommended).
 TOOL_DIAMETER_TABLE: list[tuple[float, float, float, float]] = [
-    (2.0,  8.0,   10.0,  1.5),
-    (3.0,  12.0,  15.0,  2.0),
-    (4.0,  15.0,  20.0,  2.5),
-    (6.0,  25.0,  30.0,  3.5),
-    (8.0,  35.0,  40.0,  4.5),
-    (10.0, 45.0,  50.0,  5.5),
-    (12.0, 55.0,  60.0,  6.5),
-    (16.0, 75.0,  80.0,  8.5),
-    (20.0, 95.0,  100.0, 10.5),
+    (2.0, 8.0, 10.0, 1.5),
+    (3.0, 12.0, 15.0, 2.0),
+    (4.0, 15.0, 20.0, 2.5),
+    (6.0, 25.0, 30.0, 3.5),
+    (8.0, 35.0, 40.0, 4.5),
+    (10.0, 45.0, 50.0, 5.5),
+    (12.0, 55.0, 60.0, 6.5),
+    (16.0, 75.0, 80.0, 8.5),
+    (20.0, 95.0, 100.0, 10.5),
     (25.0, 120.0, 125.0, 13.0),
     (32.0, 155.0, 160.0, 17.0),
     (50.0, 240.0, 250.0, 27.0),
@@ -282,8 +281,10 @@ def get_min_radius_for_depth(cavity_depth_mm: float) -> float:
 
     Rule: internal radius ≥ max(1.0mm, 1/3 × cavity depth)
     """
-    return max(MILLING_RULES.min_internal_radius_mm,
-               cavity_depth_mm * MILLING_RULES.internal_radius_depth_ratio)
+    return max(
+        MILLING_RULES.min_internal_radius_mm,
+        cavity_depth_mm * MILLING_RULES.internal_radius_depth_ratio,
+    )
 
 
 # ---------------------------------------------------------------------------

@@ -12,11 +12,15 @@ async def test_lifespan():
 
     # Mock dependencies that lifespan uses
     with (
+        patch("src.main.register_iam_permissions", new_callable=AsyncMock) as mock_iam,
         patch("src.main.HttpDownloadService") as mock_storage,
         patch("src.main.GeometryProcessor") as mock_geometry,
         patch("src.main.UploadConsumer") as mock_consumer_class,
         patch("asyncio.create_task") as mock_create_task,
     ):
+        # register_iam_permissions must not make real network calls
+        mock_iam.return_value = True
+
         # Setup mock instances
         mock_storage_instance = mock_storage.return_value
         mock_storage_instance.close = AsyncMock()
@@ -35,6 +39,7 @@ async def test_lifespan():
 
         async with lifespan(app_mock):
             # Startup happened
+            mock_iam.assert_called_once()
             mock_storage.assert_called_once()
             mock_geometry.assert_called_once()
             mock_consumer_class.assert_called_once()

@@ -4,15 +4,16 @@ Tests the new API functions for lazy evaluation without requiring full FastAPI s
 """
 
 import base64
-import pytest
 import time
 from pathlib import Path
 
+import pytest
+
 from src.main import (
-    quality_check,
+    _file_analysis_cache,
     analyze_for_process,
     cleanup_upload,
-    _file_analysis_cache,
+    quality_check,
 )
 
 

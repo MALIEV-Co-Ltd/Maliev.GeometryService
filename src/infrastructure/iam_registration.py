@@ -46,7 +46,7 @@ class IAMRegistrationClient:
             except Exception as e:
                 if attempt == max_retries - 1:
                     logger.error(
-                        f"Failed to connect to RabbitMQ after {max_retries} attempts: {e}"
+                        f"Failed to connect to RabbitMQ after {max_retries} attempts: {e}"  # noqa: E501
                     )
                     raise
                 delay = min(base_delay * (2**attempt), max_delay)
@@ -131,7 +131,6 @@ async def register_iam_permissions() -> bool:
     client = IAMRegistrationClient()
     try:
         await client.connect()
-        success = await client.register_permissions()
-        return success
+        return await client.register_permissions()
     finally:
         await client.close()

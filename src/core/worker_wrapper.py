@@ -5,17 +5,18 @@ CPU-intensive geometry tasks. It captures detailed error information including
 stack traces, memory usage, and timing data when workers crash.
 """
 
+import contextlib
+import logging
 import os
 import sys
-import logging
-import traceback
 import threading
 import time
+import traceback
 import uuid
-from dataclasses import dataclass, asdict
-from typing import Any, Callable, Optional
+from collections.abc import Callable
 from concurrent.futures import ProcessPoolExecutor
-import multiprocessing
+from dataclasses import asdict, dataclass
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -33,7 +34,8 @@ class WorkerErrorResult:
         timing_info: Dict with duration_seconds, timeout_seconds if applicable
         context: Additional context (body_id, file_path, etc.)
         resource_info: Dict with temp_file_count, child_process_count
-    """
+    """  # noqa: E501
+
     error_type: str
     error_message: str
     stack_trace: str
@@ -88,8 +90,8 @@ def setup_worker_diagnostics(
 
     # Create dedicated log file for this worker
     log_dir = "/tmp"
-    os.makedirs(log_dir, exist_ok=True)
-    log_file = os.path.join(log_dir, f"worker_{worker_id}.log")
+    os.makedirs(log_dir, exist_ok=True)  # noqa: PTH103
+    log_file = os.path.join(log_dir, f"worker_{worker_id}.log")  # noqa: PTH118
 
     # Configure file handler for worker-specific logging.
     # Guard against duplicate handlers: if this worker process already has a
@@ -105,18 +107,21 @@ def setup_worker_diagnostics(
         file_handler.setFormatter(
             logging.Formatter(
                 "%(asctime)s %(levelname)s %(name)s: %(message)s",
-                datefmt="%Y-%m-%dT%H:%M:%SZ"
+                datefmt="%Y-%m-%dT%H:%M:%SZ",
             )
         )
         root_logger.addHandler(file_handler)
         root_logger.setLevel(logging.DEBUG)
         logger.info(f"Worker {worker_id} initialized, logging to {log_file}")
     else:
-        logger.debug(f"Worker {worker_id} re-entering diagnostics setup — skipping duplicate handler")
+        logger.debug(
+            f"Worker {worker_id} re-entering diagnostics setup — skipping duplicate handler"  # noqa: E501
+        )
 
     # Enable faulthandler to catch segfaults (idempotent — safe to call multiple times)
     try:
         import faulthandler
+
         faulthandler.enable(file=sys.stderr, all_threads=True)
     except Exception as e:
         logger.warning(f"Failed to enable faulthandler: {e}")
@@ -132,11 +137,9 @@ def setup_worker_diagnostics(
             daemon=True,
         )
         monitor_thread.start()
-        # Mark that a monitor is running on this process (best-effort; attribute on main thread)
-        try:
+        # Mark that a monitor is running on this process (best-effort; attribute on main thread)  # noqa: E501
+        with contextlib.suppress(Exception):
             setattr(threading.main_thread(), _monitor_sentinel, True)
-        except Exception:
-            pass
 
     return worker_id
 
@@ -172,9 +175,9 @@ def _monitor_memory(
         return
 
     process = psutil.Process()
-    kill_threshold_mb = critical_mb * 3.0   # force-exit at 3× critical (e.g. 6 GB)
-    backoff = interval_seconds               # current sleep between critical logs
-    max_backoff = 120.0                      # cap at 2 minutes of silence
+    kill_threshold_mb = critical_mb * 3.0  # force-exit at 3× critical (e.g. 6 GB)
+    backoff = interval_seconds  # current sleep between critical logs
+    max_backoff = 120.0  # cap at 2 minutes of silence
     in_critical = False
 
     while True:
@@ -187,7 +190,9 @@ def _monitor_memory(
                 logger.critical(
                     "Worker %s RSS %.0f MB exceeds kill threshold %.0f MB — "
                     "terminating worker process to free memory",
-                    worker_id, rss_mb, kill_threshold_mb,
+                    worker_id,
+                    rss_mb,
+                    kill_threshold_mb,
                 )
                 os._exit(1)
 
@@ -196,15 +201,19 @@ def _monitor_memory(
                     # First time crossing threshold — log immediately, reset backoff
                     logger.critical(
                         "Worker %s memory critical: %.1f MB (threshold: %.0f MB)",
-                        worker_id, rss_mb, critical_mb,
+                        worker_id,
+                        rss_mb,
+                        critical_mb,
                     )
                     backoff = interval_seconds
                     in_critical = True
                 else:
                     # Still in critical — log once per backoff window, then double
                     logger.critical(
-                        "Worker %s memory still critical: %.1f MB (will recheck in %.0fs)",
-                        worker_id, rss_mb, min(backoff * 2, max_backoff),
+                        "Worker %s memory still critical: %.1f MB (will recheck in %.0fs)",  # noqa: E501
+                        worker_id,
+                        rss_mb,
+                        min(backoff * 2, max_backoff),
                     )
                     backoff = min(backoff * 2, max_backoff)
                 time.sleep(backoff)
@@ -213,7 +222,9 @@ def _monitor_memory(
             elif rss_mb > warning_mb:
                 logger.warning(
                     "Worker %s memory high: %.1f MB (threshold: %.0f MB)",
-                    worker_id, rss_mb, warning_mb,
+                    worker_id,
+                    rss_mb,
+                    warning_mb,
                 )
                 in_critical = False
                 backoff = interval_seconds
@@ -255,6 +266,7 @@ def wrap_worker(
             # ... DFM analysis logic ...
             return reports
     """
+
     def decorator(func: Callable) -> Callable:
         def wrapped(*args, **kwargs) -> Any:
             # Setup diagnostics
@@ -275,9 +287,12 @@ def wrap_worker(
                 # Record final memory usage and resource tracking
                 try:
                     import psutil
+
                     process = psutil.Process()
                     memory_info["rss_mb"] = process.memory_info().rss / 1024 / 1024
-                    memory_info["peak_mb"] = memory_info["rss_mb"]  # psutil doesn't track peak easily
+                    memory_info["peak_mb"] = memory_info[
+                        "rss_mb"
+                    ]  # psutil doesn't track peak easily
                 except ImportError:
                     pass
 
@@ -298,6 +313,7 @@ def wrap_worker(
                 resource_info = {}
                 try:
                     import psutil
+
                     process = psutil.Process()
                     memory_info["rss_mb"] = process.memory_info().rss / 1024 / 1024
                     memory_info["peak_mb"] = memory_info["rss_mb"]
@@ -308,13 +324,19 @@ def wrap_worker(
                         "child_process_count": len(process.children()),
                     }
                 except ImportError:
-                    resource_info = {"temp_file_count": _count_temp_files(), "child_process_count": 0}
+                    resource_info = {
+                        "temp_file_count": _count_temp_files(),
+                        "child_process_count": 0,
+                    }
                 except Exception:
-                    resource_info = {"temp_file_count": _count_temp_files(), "child_process_count": 0}
+                    resource_info = {
+                        "temp_file_count": _count_temp_files(),
+                        "child_process_count": 0,
+                    }
 
                 # Log the error with full context
                 logger.error(
-                    f"Worker {worker_id} failed after {duration:.2f}s: {type(e).__name__}: {e}\n"
+                    f"Worker {worker_id} failed after {duration:.2f}s: {type(e).__name__}: {e}\n"  # noqa: E501
                     f"Stack trace:\n{traceback.format_exc()}",
                     extra={
                         "worker_id": worker_id,
@@ -323,7 +345,7 @@ def wrap_worker(
                         "rss_mb": memory_info.get("rss_mb", 0),
                         "temp_files": resource_info.get("temp_file_count", 0),
                         "child_processes": resource_info.get("child_process_count", 0),
-                    }
+                    },
                 )
 
                 # Return structured error result
@@ -345,6 +367,7 @@ def wrap_worker(
                 return error_result.to_dict()
 
         return wrapped
+
     return decorator
 
 
@@ -424,6 +447,6 @@ class DiagnosticExecutor(ProcessPoolExecutor):
 
         # Wrap the function with diagnostics
         # Note: We need to be careful about pickling here
-        # For now, we'll rely on the functions themselves to call setup_worker_diagnostics
+        # For now, we'll rely on the functions themselves to call setup_worker_diagnostics  # noqa: E501
         # The decorator approach doesn't work well with pickling
         return super().submit(fn, *args, **kwargs)

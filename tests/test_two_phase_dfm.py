@@ -5,14 +5,17 @@ Tests the new lazy evaluation approach:
 - Phase 2: Process-specific DFM analysis (<15 seconds per process)
 """
 
-import pytest
 import time
 from pathlib import Path
 
-from src.core.geometry import (
-    _quick_quality_check,
-    _analyze_single_process,
+import pytest
+
+pytestmark = pytest.mark.slow
+
+from src.core.geometry import (  # noqa: E402
     _analyze_single_body,
+    _analyze_single_process,
+    _quick_quality_check,
 )
 
 
@@ -207,13 +210,14 @@ class TestProcessSpecificAnalysis:
 
     def test_single_process_with_shared_precomputed(self, sample_stl_file):
         """Test that shared pre-computed data avoids redundant computation."""
-        from src.core.mesh_analyzers import detect_hollow_regions, detect_holes_mesh
+        from src.core.mesh_analyzers import detect_holes_mesh, detect_hollow_regions
 
         stl_bytes = sample_stl_file.read_bytes()
 
         # Pre-compute shared data
-        import trimesh
         import io
+
+        import trimesh
 
         mesh = trimesh.load(io.BytesIO(stl_bytes), file_type="stl", force="mesh")
         hollow_centroids, _ = detect_hollow_regions(mesh)
@@ -288,25 +292,23 @@ class TestPerformanceComparison:
 
         # Measure quality check (lightweight, no DFM)
         start_time = time.time()
-        quality_result = _quick_quality_check(stl_bytes)
+        _quick_quality_check(stl_bytes)
         quality_duration = time.time() - start_time
 
         # Measure full analysis (_analyze_single_body now runs real FDM)
         start_time = time.time()
-        full_result = _analyze_single_body(stl_bytes)
+        _analyze_single_body(stl_bytes)
         full_duration = time.time() - start_time
 
         print(f"\nQuality check: {quality_duration:.2f}s")
         print(f"Full analysis (FDM): {full_duration:.2f}s")
 
         # Quality check should be trivially fast
-        assert quality_duration < 5.0, (
-            f"Quality check too slow: {quality_duration:.2f}s"
-        )
+        assert (
+            quality_duration < 5.0
+        ), f"Quality check too slow: {quality_duration:.2f}s"
         # Full analysis now runs FDM — allow up to 30 s for slow CI machines
-        assert full_duration < 30.0, (
-            f"Full analysis too slow: {full_duration:.2f}s"
-        )
+        assert full_duration < 30.0, f"Full analysis too slow: {full_duration:.2f}s"
 
     def test_single_process_vs_all_processes(self, sample_stl_file):
         """_analyze_single_body and _analyze_single_process(FDM) both run real FDM."""
@@ -316,7 +318,9 @@ class TestPerformanceComparison:
         all_result = _analyze_single_body(stl_bytes)
 
         print(f"\nSingle process (FDM) issues: {len(single_result.get('issues', []))}")
-        print(f"Full body FDM issues: {len(all_result.get('FDM', {}).get('issues', []))}")
+        print(
+            f"Full body FDM issues: {len(all_result.get('FDM', {}).get('issues', []))}"
+        )
 
         # Both should include FDM
         assert "FDM" in all_result
@@ -326,9 +330,9 @@ class TestPerformanceComparison:
         # No report should be deferred — consumer must publish real data
         for process_code in ("FDM", "SLA", "CNC"):
             report = all_result[process_code]
-            assert report.get("twoPhaseDeferred", False) is False, (
-                f"{process_code} must not be deferred"
-            )
+            assert (
+                report.get("twoPhaseDeferred", False) is False
+            ), f"{process_code} must not be deferred"
 
         # Single process result must also not be deferred
         assert single_result.get("twoPhaseDeferred", False) is False
@@ -343,7 +347,7 @@ class TestProductionFilePerformance:
         # Find matching STL or use 50x50x50mm-solid-cube-binary.stl as fallback
         stl_file = large_step_file.parent / f"{large_step_file.stem}.stl"
         if not stl_file.exists():
-            # Use 50x50x50mm-solid-cube-binary.stl as fallback (geometry will be wrong but tests the pipeline)
+            # Use 50x50x50mm-solid-cube-binary.stl as fallback (geometry will be wrong but tests the pipeline)  # noqa: E501
             stl_file = large_step_file.parent / "50x50x50mm-solid-cube-binary.stl"
             if not stl_file.exists():
                 pytest.skip("No STL file found")
@@ -353,7 +357,7 @@ class TestProductionFilePerformance:
 
         print(f"\nTesting {large_step_file.name}")
         print(
-            f"File size: {len(stl_bytes) / 1024:.1f}KB STL, {len(step_bytes) / 1024:.1f}KB STEP"
+            f"File size: {len(stl_bytes) / 1024:.1f}KB STL, {len(step_bytes) / 1024:.1f}KB STEP"  # noqa: E501
         )
 
         # Quality check should be fast
@@ -367,16 +371,16 @@ class TestProductionFilePerformance:
         print(f"B-Rep faces: {quality_result.get('brep_face_count')}")
 
         # Should complete quickly
-        assert quality_duration < 5.0, (
-            f"Quality check too slow: {quality_duration:.2f}s"
-        )
+        assert (
+            quality_duration < 5.0
+        ), f"Quality check too slow: {quality_duration:.2f}s"
 
     def test_large_step_file_single_process(self, large_step_file):
         """Test single process analysis on large STEP file."""
         # Find matching STL or use 50x50x50mm-solid-cube-binary.stl as fallback
         stl_file = large_step_file.parent / f"{large_step_file.stem}.stl"
         if not stl_file.exists():
-            # Use 50x50x50mm-solid-cube-binary.stl as fallback (geometry will be wrong but tests the pipeline)
+            # Use 50x50x50mm-solid-cube-binary.stl as fallback (geometry will be wrong but tests the pipeline)  # noqa: E501
             stl_file = large_step_file.parent / "50x50x50mm-solid-cube-binary.stl"
             if not stl_file.exists():
                 pytest.skip("No STL file found")
@@ -414,9 +418,9 @@ class TestSlaReportValidation:
         sla_raw = reports["SLA"]
 
         # Must NOT be deferred — consumer will publish it as a real report
-        assert sla_raw.get("twoPhaseDeferred", False) is False, (
-            "SLA report must not be deferred"
-        )
+        assert (
+            sla_raw.get("twoPhaseDeferred", False) is False
+        ), "SLA report must not be deferred"
 
         # Must be model-validatable — this was the crashing line in upload_consumer
         sla_report = SlaDfmReport.model_validate(sla_raw)
@@ -436,9 +440,9 @@ class TestSlaReportValidation:
 
         assert "FDM" in reports
         fdm_raw = reports["FDM"]
-        assert fdm_raw.get("twoPhaseDeferred", False) is False, (
-            "FDM report must not be deferred"
-        )
+        assert (
+            fdm_raw.get("twoPhaseDeferred", False) is False
+        ), "FDM report must not be deferred"
 
         fdm_report = FdmDfmReport.model_validate(fdm_raw)
         assert fdm_report.report_type == "FDM"
@@ -453,9 +457,9 @@ class TestSlaReportValidation:
 
         assert "CNC" in reports
         cnc_raw = reports["CNC"]
-        assert cnc_raw.get("twoPhaseDeferred", False) is False, (
-            "CNC report must not be deferred"
-        )
+        assert (
+            cnc_raw.get("twoPhaseDeferred", False) is False
+        ), "CNC report must not be deferred"
 
         cnc_report = CncDfmReport.model_validate(cnc_raw)
         assert isinstance(cnc_report.issues, list)

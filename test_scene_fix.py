@@ -3,31 +3,51 @@
 Test script to verify Scene object handling fix for multi-body GLB files.
 This addresses the critical bug: 'Scene' object has no attribute 'vertices'
 """
-import sys
+
 import io
+import sys
+
 
 def test_scene_object_handling():
     """Test that we properly handle Scene objects from trimesh.load()"""
     try:
-        import trimesh
         import numpy as np
+        import trimesh
 
         print("PASS: Successfully imported trimesh")
 
         # Create multiple meshes to simulate multi-body GLB
-        mesh1_vertices = np.array([
-            [0, 0, 0], [1, 0, 0], [1, 1, 0], [0, 1, 0],
-            [0, 0, 1], [1, 0, 1], [1, 1, 1], [0, 1, 1]
-        ], dtype=np.float32)
+        mesh1_vertices = np.array(
+            [
+                [0, 0, 0],
+                [1, 0, 0],
+                [1, 1, 0],
+                [0, 1, 0],
+                [0, 0, 1],
+                [1, 0, 1],
+                [1, 1, 1],
+                [0, 1, 1],
+            ],
+            dtype=np.float32,
+        )
 
-        mesh1_faces = np.array([
-            [3, 0, 1, 2], [3, 0, 2, 3],  # Bottom
-            [3, 4, 5, 6], [3, 4, 6, 7],  # Top
-            [3, 0, 1, 5], [3, 1, 5, 6],  # Front
-            [3, 2, 3, 7], [3, 3, 7, 6],  # Back
-            [3, 0, 3, 4], [3, 3, 4, 7],  # Left
-            [3, 1, 2, 6], [3, 2, 6, 5]  # Right
-        ], dtype=np.int32)
+        mesh1_faces = np.array(
+            [
+                [3, 0, 1, 2],
+                [3, 0, 2, 3],  # Bottom
+                [3, 4, 5, 6],
+                [3, 4, 6, 7],  # Top
+                [3, 0, 1, 5],
+                [3, 1, 5, 6],  # Front
+                [3, 2, 3, 7],
+                [3, 3, 7, 6],  # Back
+                [3, 0, 3, 4],
+                [3, 3, 4, 7],  # Left
+                [3, 1, 2, 6],
+                [3, 2, 6, 5],  # Right
+            ],
+            dtype=np.int32,
+        )
 
         mesh2_vertices = mesh1_vertices + 2  # Offset second body
         mesh2_faces = mesh1_faces.copy()
@@ -36,7 +56,9 @@ def test_scene_object_handling():
         mesh1 = trimesh.Trimesh(vertices=mesh1_vertices, faces=mesh1_faces)
         mesh2 = trimesh.Trimesh(vertices=mesh2_vertices, faces=mesh2_faces)
 
-        print(f"PASS: Created test meshes: {len(mesh1.vertices)} and {len(mesh2.vertices)} vertices")
+        print(
+            f"PASS: Created test meshes: {len(mesh1.vertices)} and {len(mesh2.vertices)} vertices"  # noqa: E501
+        )
 
         # Create a Scene with multiple geometries (simulates multi-body GLB)
         scene = trimesh.Scene()
@@ -46,11 +68,11 @@ def test_scene_object_handling():
         print(f"PASS: Created Scene with {len(scene.geometry)} geometries")
 
         # Export to GLB and reload (this is what happens in production)
-        glb_bytes = scene.export(file_type='glb')
+        glb_bytes = scene.export(file_type="glb")
         print(f"PASS: Exported Scene to GLB: {len(glb_bytes)} bytes")
 
         # Reload the GLB - this should return a Scene object
-        loaded_scene = trimesh.load(io.BytesIO(glb_bytes), file_type='glb')
+        loaded_scene = trimesh.load(io.BytesIO(glb_bytes), file_type="glb")
         print(f"PASS: Loaded GLB, type={type(loaded_scene).__name__}")
 
         # Test the fix: Check if it's a Scene and handle it properly
@@ -70,7 +92,9 @@ def test_scene_object_handling():
                 # Test multi-body concatenation
                 try:
                     concatenated = trimesh.util.concatenate(geometries)
-                    print(f"PASS: Concatenated {len(geometries)} meshes: {len(concatenated.vertices)} total vertices")
+                    print(
+                        f"PASS: Concatenated {len(geometries)} meshes: {len(concatenated.vertices)} total vertices"  # noqa: E501
+                    )
                     mesh = concatenated
                 except Exception as e:
                     print(f"FAIL: Concatenation failed: {e}")
@@ -80,13 +104,13 @@ def test_scene_object_handling():
             print(f"PASS: Single Trimesh object: {len(mesh.vertices)} vertices")
 
         # Verify we can now access mesh attributes
-        if hasattr(mesh, 'vertices'):
+        if hasattr(mesh, "vertices"):
             print(f"PASS: Mesh has {len(mesh.vertices)} vertices")
         else:
             print("FAIL: Mesh has no vertices attribute")
             return False
 
-        if hasattr(mesh, 'faces'):
+        if hasattr(mesh, "faces"):
             print(f"PASS: Mesh has {len(mesh.faces)} faces")
         else:
             print("FAIL: Mesh has no faces attribute")
@@ -100,50 +124,73 @@ def test_scene_object_handling():
     except Exception as e:
         print(f"FAIL: Test failed: {e}")
         import traceback
+
         traceback.print_exc()
         return False
+
 
 def test_glb_cache_scene_handling():
     """Test that GLB cache properly handles Scene objects"""
     try:
-        import trimesh
-        import numpy as np
         import time
 
-        # Create a simple Scene
-        vertices = np.array([
-            [0, 0, 0], [1, 0, 0], [1, 1, 0], [0, 1, 0],
-            [0, 0, 1], [1, 0, 1], [1, 1, 1], [0, 1, 1]
-        ], dtype=np.float32)
+        import numpy as np
+        import trimesh
 
-        faces = np.array([
-            [3, 0, 1, 2], [3, 0, 2, 3],  # Bottom
-            [3, 4, 5, 6], [3, 4, 6, 7],  # Top
-            [3, 0, 1, 5], [3, 1, 5, 6],  # Front
-            [3, 2, 3, 7], [3, 3, 7, 6],  # Back
-            [3, 0, 3, 4], [3, 3, 4, 7],  # Left
-            [3, 1, 2, 6], [3, 2, 6, 5]  # Right
-        ], dtype=np.int32)
+        # Create a simple Scene
+        vertices = np.array(
+            [
+                [0, 0, 0],
+                [1, 0, 0],
+                [1, 1, 0],
+                [0, 1, 0],
+                [0, 0, 1],
+                [1, 0, 1],
+                [1, 1, 1],
+                [0, 1, 1],
+            ],
+            dtype=np.float32,
+        )
+
+        faces = np.array(
+            [
+                [3, 0, 1, 2],
+                [3, 0, 2, 3],  # Bottom
+                [3, 4, 5, 6],
+                [3, 4, 6, 7],  # Top
+                [3, 0, 1, 5],
+                [3, 1, 5, 6],  # Front
+                [3, 2, 3, 7],
+                [3, 3, 7, 6],  # Back
+                [3, 0, 3, 4],
+                [3, 3, 4, 7],  # Left
+                [3, 1, 2, 6],
+                [3, 2, 6, 5],  # Right
+            ],
+            dtype=np.int32,
+        )
 
         mesh = trimesh.Trimesh(vertices=vertices, faces=faces)
         scene = trimesh.Scene()
         scene.add_geometry(geometry=mesh, node_name="Body_0")
 
-        glb_bytes = scene.export(file_type='glb')
+        glb_bytes = scene.export(file_type="glb")
         print(f"PASS: Created test GLB: {len(glb_bytes)} bytes")
 
         # Test cache can handle Scene objects
         cache = {}
-        scene_data = trimesh.load(io.BytesIO(glb_bytes), file_type='glb')
+        scene_data = trimesh.load(io.BytesIO(glb_bytes), file_type="glb")
 
         # Cache the scene
         cache["test"] = (scene_data, time.time())
-        print(f"PASS: Cached Scene object")
+        print("PASS: Cached Scene object")
 
         # Retrieve and verify type
         cached_obj, timestamp = cache["test"]
         obj_type = "Scene" if isinstance(cached_obj, trimesh.Scene) else "Trimesh"
-        geom_count = len(cached_obj.geometry) if isinstance(cached_obj, trimesh.Scene) else 1
+        geom_count = (
+            len(cached_obj.geometry) if isinstance(cached_obj, trimesh.Scene) else 1
+        )
 
         print(f"PASS: Retrieved from cache: type={obj_type}, geometries={geom_count}")
 
@@ -152,8 +199,10 @@ def test_glb_cache_scene_handling():
     except Exception as e:
         print(f"FAIL: Cache test failed: {e}")
         import traceback
+
         traceback.print_exc()
         return False
+
 
 if __name__ == "__main__":
     print("Testing Scene object handling fixes...")

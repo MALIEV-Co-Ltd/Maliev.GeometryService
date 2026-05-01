@@ -1,15 +1,17 @@
-"""Test utility functions for timeout testing, process monitoring, and memory tracking."""
+"""Test utility functions for timeout testing, process monitoring, and memory tracking."""  # noqa: E501
 
-import os
-import sys
-import time
-import signal
-import threading
-import psutil
 import logging
-from typing import Optional, Callable, Any, Dict, List
+import os
+import signal
+import sys
+import threading
+import time
+from collections.abc import Callable
 from contextlib import contextmanager
 from dataclasses import dataclass
+from typing import Any
+
+import psutil
 
 logger = logging.getLogger(__name__)
 
@@ -17,6 +19,7 @@ logger = logging.getLogger(__name__)
 @dataclass
 class ProcessSnapshot:
     """Snapshot of process state at a point in time."""
+
     timestamp: float
     pid: int
     rss_mb: float
@@ -30,7 +33,7 @@ class ProcessSnapshot:
 class ProcessMonitor:
     """Monitor process state during test execution."""
 
-    def __init__(self, pid: Optional[int] = None, poll_interval: float = 0.5):
+    def __init__(self, pid: int | None = None, poll_interval: float = 0.5):
         """Initialize process monitor.
 
         Args:
@@ -39,9 +42,9 @@ class ProcessMonitor:
         """
         self.pid = pid or os.getpid()
         self.poll_interval = poll_interval
-        self.snapshots: List[ProcessSnapshot] = []
+        self.snapshots: list[ProcessSnapshot] = []
         self._monitoring = False
-        self._monitor_thread: Optional[threading.Thread] = None
+        self._monitor_thread: threading.Thread | None = None
 
     def start(self) -> None:
         """Start monitoring process state."""
@@ -59,7 +62,9 @@ class ProcessMonitor:
         if self._monitor_thread:
             self._monitor_thread.join(timeout=5.0)
             self._monitor_thread = None
-        logger.info(f"Stopped monitoring process {self.pid}, collected {len(self.snapshots)} snapshots")
+        logger.info(
+            f"Stopped monitoring process {self.pid}, collected {len(self.snapshots)} snapshots"  # noqa: E501
+        )
 
     def _monitor_loop(self) -> None:
         """Monitoring loop that runs in background thread."""
@@ -117,7 +122,9 @@ class ProcessMonitor:
         if not self.snapshots:
             return False
         # Check if any snapshot shows children
-        return any(s.children_count > 0 for s in self.snapshots[-5:])  # Last 5 snapshots
+        return any(
+            s.children_count > 0 for s in self.snapshots[-5:]
+        )  # Last 5 snapshots
 
     def get_temp_file_growth(self) -> int:
         """Get temp file count change."""
@@ -175,7 +182,7 @@ class TimeoutTester:
             self._alarm_set = False
         return False
 
-    def _timeout_handler(self, signum, frame):
+    def _timeout_handler(self, signum, frame):  # noqa: ARG002
         """Handle timeout signal on Unix."""
         self.timed_out = True
         raise TimeoutError(f"Operation timed out after {self.timeout_seconds}s")
@@ -209,7 +216,9 @@ def monitor_resources():
         monitor.stop()
 
 
-def check_for_orphaned_processes(expected_parent_pid: Optional[int] = None) -> List[Dict[str, Any]]:
+def check_for_orphaned_processes(
+    expected_parent_pid: int | None = None,
+) -> list[dict[str, Any]]:
     """Check for orphaned processes related to geometry processing.
 
     Args:
@@ -229,14 +238,18 @@ def check_for_orphaned_processes(expected_parent_pid: Optional[int] = None) -> L
             try:
                 # Check if it's a geometry worker process
                 cmd = " ".join(child.cmdline())
-                if any(keyword in cmd.lower() for keyword in ["gmsh", "cascadio", "python"]):
-                    orphans.append({
-                        "pid": child.pid,
-                        "name": child.name(),
-                        "cmdline": cmd,
-                        "rss_mb": child.memory_info().rss / 1024 / 1024,
-                        "create_time": child.create_time(),
-                    })
+                if any(
+                    keyword in cmd.lower() for keyword in ["gmsh", "cascadio", "python"]
+                ):
+                    orphans.append(
+                        {
+                            "pid": child.pid,
+                            "name": child.name(),
+                            "cmdline": cmd,
+                            "rss_mb": child.memory_info().rss / 1024 / 1024,
+                            "create_time": child.create_time(),
+                        }
+                    )
             except (psutil.NoSuchProcess, psutil.AccessDenied):
                 pass
     except psutil.NoSuchProcess:
@@ -299,7 +312,7 @@ def wait_for_condition(
     raise TimeoutError(f"{error_message} (waited {timeout_seconds}s)")
 
 
-def measure_performance(func: Callable[[], Any]) -> Dict[str, Any]:
+def measure_performance(func: Callable[[], Any]) -> dict[str, Any]:
     """Measure execution time and memory usage of a function.
 
     Args:
@@ -347,13 +360,15 @@ class MockCascadioServer:
         self.should_timeout = should_timeout
         self.requests_received = []
 
-    def load_step(self, step_bytes: bytes) -> Dict[str, Any]:
+    def load_step(self, step_bytes: bytes) -> dict[str, Any]:
         """Mock STEP file loading."""
-        self.requests.append({
-            "type": "load_step",
-            "size": len(step_bytes),
-            "timestamp": time.time(),
-        })
+        self.requests.append(
+            {
+                "type": "load_step",
+                "size": len(step_bytes),
+                "timestamp": time.time(),
+            }
+        )
 
         if self.should_timeout:
             # Simulate timeout by sleeping forever

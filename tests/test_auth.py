@@ -12,7 +12,6 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 
 from src.infrastructure.auth import ServiceAccountTokenProvider
 
-
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
 SECURITY_KEY = "a-very-long-test-secret-key-at-least-32-chars!"
@@ -53,7 +52,7 @@ def _reload_provider(
     issuer: str = ISSUER,
     audience: str = AUDIENCE,
 ) -> ServiceAccountTokenProvider:
-    """Reload settings and auth module with the given env vars, return fresh provider."""
+    """Reload settings and auth module with the given env vars, return fresh provider."""  # noqa: E501
     monkeypatch.setenv("JWT_SECURITY_KEY", security_key)
     monkeypatch.setenv("JWT_PRIVATE_KEY", private_key_b64)
     monkeypatch.setenv("JWT_ISSUER", issuer)

@@ -11,7 +11,6 @@ import trimesh
 
 from src.core.geometry import GeometryProcessor
 
-
 ASSETS_DIR = pytest.importorskip("pathlib").Path(__file__).parent / "assets"
 
 
@@ -48,7 +47,7 @@ class TestHoleProcessing:
         file_path = ASSETS_DIR / "70x40x30mm-cube-variuos-holes-binary.stl"
 
         if not file_path.exists():
-            pytest.skip(f"File not found")
+            pytest.skip("File not found")
 
         bytes_data = file_path.read_bytes()
         processor = GeometryProcessor(enable_diagnostics=False)
@@ -75,7 +74,7 @@ class TestHoleDFMReports:
         file_path = ASSETS_DIR / "70x40x30mm-cube-variuos-holes-binary.stl"
 
         if not file_path.exists():
-            pytest.skip(f"File not found")
+            pytest.skip("File not found")
 
         stl_bytes = file_path.read_bytes()
 

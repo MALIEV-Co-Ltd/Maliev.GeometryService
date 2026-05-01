@@ -13,6 +13,17 @@ from pathlib import Path
 import psutil
 import pytest
 
+pytestmark = pytest.mark.slow
+
+_cascadio_available = True
+try:
+    import cascadio  # noqa: F401
+except ImportError:
+    _cascadio_available = False
+
+requires_cascadio = pytest.mark.skipif(
+    not _cascadio_available, reason="cascadio not installed"
+)
 
 ASSETS = Path(__file__).parent / "assets"
 SMALL_STEP = ASSETS / "50x50x50mm-solid-cube.step"
@@ -41,7 +52,9 @@ def small_step_stl_bytes(small_step_bytes):
 # 8 — Rendering worker recycling (integration)
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.slow
+@requires_cascadio
 class TestRenderingWorkerRecycling:
     """Rendering workers must be replaced after max_tasks_per_child=5 jobs."""
 
@@ -86,7 +99,7 @@ class TestRenderingWorkerRecycling:
                 processor.shutdown(timeout=15)
 
         finally:
-            os.unlink(glb_path)
+            os.unlink(glb_path)  # noqa: PTH108
 
         assert len(pids) >= 2, (
             f"Expected worker PIDs to recycle after 5 jobs, "
@@ -98,7 +111,9 @@ class TestRenderingWorkerRecycling:
 # 9 — RSS stability across repeated in-process Phase 1 calls
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.slow
+@requires_cascadio
 class TestRssStability:
     """RSS growth must stay bounded across repeated processing calls."""
 
@@ -109,7 +124,7 @@ class TestRssStability:
         proc = psutil.Process()
         rss_deltas = []
 
-        for i in range(8):
+        for _i in range(8):
             rss_before = proc.memory_info().rss / 1024 / 1024
             _compute_metrics_worker(small_step_bytes, ".step")
             rss_after = proc.memory_info().rss / 1024 / 1024
@@ -150,6 +165,7 @@ class TestRssStability:
 # 10 — DFM cache bounds enforced end-to-end via public API
 # ---------------------------------------------------------------------------
 
+
 class TestDfmCacheBoundsEndToEnd:
     """Drive cache_result / get_cached_result with realistic report objects."""
 
@@ -177,31 +193,34 @@ class TestDfmCacheBoundsEndToEnd:
         for i in range(10):
             cache.set(f"key_{i}", big_payload)
 
-        assert cache.total_bytes <= 50_000, (
-            f"Cache total_bytes {cache.total_bytes} exceeds 50 000-byte cap"
-        )
+        assert (
+            cache.total_bytes <= 50_000
+        ), f"Cache total_bytes {cache.total_bytes} exceeds 50 000-byte cap"
 
 
 # ---------------------------------------------------------------------------
 # 11 — _file_analysis_cache module-level instance starts bounded
 # ---------------------------------------------------------------------------
 
+
 class TestFileAnalysisCacheModuleInstance:
     """The module-level _file_analysis_cache must start bounded."""
 
     def test_default_instance_is_bounded(self):
-        from src.main import _file_analysis_cache, _BoundedFileCache
-        assert isinstance(_file_analysis_cache, _BoundedFileCache), (
-            "_file_analysis_cache must be a _BoundedFileCache instance, not a bare dict"
-        )
+        from src.main import _BoundedFileCache, _file_analysis_cache
+
+        assert isinstance(
+            _file_analysis_cache, _BoundedFileCache
+        ), "_file_analysis_cache must be a _BoundedFileCache instance, not a bare dict"
         assert _file_analysis_cache.max_entries == 20
         assert _file_analysis_cache.max_bytes == 500 * 1024 * 1024
-        assert _file_analysis_cache.ttl_seconds == 600
+        assert _file_analysis_cache.ttl_seconds == 3600
 
     def test_default_dfm_cache_is_bounded(self):
-        from src.core.geometry_optimizations import _cache, _BoundedDfmCache
-        assert isinstance(_cache, _BoundedDfmCache), (
-            "_cache must be a _BoundedDfmCache instance, not a bare dict"
-        )
+        from src.core.geometry_optimizations import _BoundedDfmCache, _cache
+
+        assert isinstance(
+            _cache, _BoundedDfmCache
+        ), "_cache must be a _BoundedDfmCache instance, not a bare dict"
         assert _cache.max_entries == 50
         assert _cache.max_bytes == 200 * 1024 * 1024

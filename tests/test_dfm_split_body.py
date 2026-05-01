@@ -1,9 +1,10 @@
 """Tests for split-by-body DFM analysis with fault tolerance."""
 
-import pytest
-import tempfile
 import os
-from unittest.mock import Mock, patch
+import tempfile
+
+import pytest
+
 from src.core.geometry import _compute_dfm_single_body
 
 
@@ -34,7 +35,7 @@ class TestSingleBodyDfm:
             # It might succeed with a minimal report or return an error dict
             assert len(result) > 0 or "error_type" in result
         finally:
-            os.unlink(stl_path)
+            os.unlink(stl_path)  # noqa: PTH108
 
     def test_single_body_error_handling(self):
         """Test that single body returns structured error on failure."""
@@ -60,14 +61,13 @@ class TestMultiBodyFaultTolerance:
         """Test concept for parallel execution (simplified)."""
         # This is a conceptual test - actual parallel execution requires
         # pytest-asyncio which may not be installed
-        import asyncio
 
         # Create mock STL paths
         stl_paths = {i: f"/tmp/body_{i}.stl" for i in range(3)}
 
         # Verify the structure is correct for parallel execution
         assert len(stl_paths) == 3
-        assert all(isinstance(k, int) for k in stl_paths.keys())
+        assert all(isinstance(k, int) for k in stl_paths)
         assert all(isinstance(v, str) for v in stl_paths.values())
 
     def test_one_body_crash_concept(self):
@@ -98,7 +98,7 @@ class TestBodyExtraction:
         test_result = {0: "/tmp/body_0.stl", 1: "/tmp/body_1.stl"}
 
         assert isinstance(test_result, dict)
-        assert all(isinstance(k, int) for k in test_result.keys())
+        assert all(isinstance(k, int) for k in test_result)
         assert all(isinstance(v, str) for v in test_result.values())
 
 
@@ -109,12 +109,13 @@ class TestWorkerDiagnostics:
         """Test that missing worker logs are handled gracefully."""
         # Skip this test if psutil is not available (required by upload_consumer)
         try:
-            import psutil
+            import psutil  # noqa: F401
         except ImportError:
             pytest.skip("psutil not available")
 
-        from src.consumers.upload_consumer import _extract_worker_diagnostics
         from uuid import uuid4
+
+        from src.consumers.upload_consumer import _extract_worker_diagnostics
 
         # Test with a random UUID (no logs exist)
         result = _extract_worker_diagnostics(uuid4())

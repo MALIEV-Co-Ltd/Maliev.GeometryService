@@ -513,7 +513,9 @@ def detect_bridges(
     """Detect horizontal unsupported spans (bridges) exceeding max_span_mm.
 
     Strategy: find downward-facing faces (normal.z < 0) with no mesh geometry
-    directly below them within the bridge distance. Uses vertical ray casting.
+    directly below them within the bridge distance. Faces resting on the build
+    plate are excluded because they are supported by the printer bed, not by
+    mesh geometry. Uses vertical ray casting.
 
     Returns:
         (bridge_count, centroids, face_indices)
@@ -531,8 +533,17 @@ def detect_bridges(
         face_normals = mesh.face_normals
         face_centroids_arr = mesh.triangles_center
 
-        # Only consider downward-facing faces (overhangs)
-        downward_mask = face_normals[:, 2] < -0.5
+        global_min_z = float(mesh.vertices[:, 2].min())
+        part_height = float(mesh.vertices[:, 2].max()) - global_min_z
+        build_plate_band = max(1.0, part_height * 0.01)
+        build_plate_cutoff = global_min_z + build_plate_band
+
+        # Only consider downward-facing faces above the build-plate contact band.
+        # Bottom caps on parts placed on the floor have no mesh below them, but
+        # they are not bridges because the printer bed supports them.
+        downward_mask = (face_normals[:, 2] < -0.5) & (
+            face_centroids_arr[:, 2] >= build_plate_cutoff
+        )
 
         if not np.any(downward_mask):
             return 0, [], []
@@ -560,15 +571,58 @@ def detect_bridges(
                 if existing is None or dist < existing:
                     hit_distances[int(ridx)] = dist
 
+        bridge_face_set: set[int] = set()
         for i, didx in enumerate(downward_indices):
             # If no hit below OR hit is farther than max_span_mm → bridge
             dist = hit_distances.get(i)
             is_bridge = dist is None or dist > max_span_mm
             if is_bridge:
-                c = face_centroids_arr[didx]
-                bridge_centroids.append([float(c[0]), float(c[1]), float(c[2])])
-                face_indices.append(int(didx))
-                bridge_count += 1
+                bridge_face_set.add(int(didx))
+
+        if not bridge_face_set:
+            return 0, [], []
+
+        # Report bridge spans as connected regions instead of raw triangle count.
+        edge_to_faces: dict[tuple[int, int], list[int]] = {}
+        for fidx in bridge_face_set:
+            face = mesh.faces[fidx]
+            for k in range(3):
+                key = (
+                    min(int(face[k]), int(face[(k + 1) % 3])),
+                    max(int(face[k]), int(face[(k + 1) % 3])),
+                )
+                edge_to_faces.setdefault(key, []).append(fidx)
+
+        face_adj: dict[int, list[int]] = {f: [] for f in bridge_face_set}
+        for neighbors in edge_to_faces.values():
+            for a in neighbors:
+                for b in neighbors:
+                    if a != b:
+                        face_adj[a].append(b)
+
+        visited: set[int] = set()
+        for start in bridge_face_set:
+            if start in visited:
+                continue
+            cluster: list[int] = []
+            queue = [start]
+            while queue:
+                cur = queue.pop()
+                if cur in visited:
+                    continue
+                visited.add(cur)
+                cluster.append(cur)
+                for nxt in face_adj.get(cur, []):
+                    if nxt not in visited:
+                        queue.append(nxt)
+
+            cluster_centroids = np.array([face_centroids_arr[f] for f in cluster])
+            centroid = cluster_centroids.mean(axis=0)
+            bridge_centroids.append(
+                [float(centroid[0]), float(centroid[1]), float(centroid[2])]
+            )
+            face_indices.extend(cluster)
+            bridge_count += 1
 
     except Exception as exc:
         logger.warning("bridge detection failed: %s", exc)

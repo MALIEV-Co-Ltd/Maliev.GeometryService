@@ -5,14 +5,13 @@ and that errors are handled gracefully.
 """
 
 import base64
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import httpx
 import pytest
 import respx
 
 from src.consumers.upload_consumer import UploadConsumer
-
 
 # ── Fixtures ─────────────────────────────────────────────────────────────────
 

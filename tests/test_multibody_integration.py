@@ -1,29 +1,35 @@
 """Integration tests for multi-body handling in geometry processing pipeline."""
 
-import pytest
 import io
-import numpy as np
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock, patch
 
+import numpy as np
+import pytest
 import trimesh
 
 from src.core.geometry import (
-    _load_cad_with_cascadio,
-    _compute_metrics_worker,
-    _compute_dfm_worker,
     _aggregate_dfm_reports,
+    _compute_dfm_worker,
+    _compute_metrics_worker,
     _generate_overlays_worker,
+    _load_cad_with_cascadio,
+    _quick_quality_check,
 )
+
+pytestmark = pytest.mark.slow
 
 
 # =============================================================================
 # Test Class 1: Cascadio Multi-Body Loading
 # =============================================================================
 
+
 class TestCascadioMultiBodyLoading:
     """Test _load_cad_with_cascadio returns list of meshes, not concatenated."""
 
-    @pytest.mark.skip(reason="Requires cascadio installation - tested indirectly via metrics worker")
+    @pytest.mark.skip(
+        reason="Requires cascadio installation - tested indirectly via metrics worker"
+    )
     def test_single_body_step_returns_single_mesh_in_list(self, single_body_cube):
         """Single-body STEP should return list with one mesh."""
         # Mock cascadio import to avoid dependency
@@ -45,7 +51,9 @@ class TestCascadioMultiBodyLoading:
                 assert body_count == 1
                 assert isinstance(mesh_list[0], trimesh.Trimesh)
 
-    @pytest.mark.skip(reason="Requires cascadio installation - tested indirectly via metrics worker")
+    @pytest.mark.skip(
+        reason="Requires cascadio installation - tested indirectly via metrics worker"
+    )
     def test_multi_body_step_returns_multiple_meshes(self, two_body_meshes):
         """Multi-body STEP should return list with all meshes."""
         # Mock cascadio import to avoid dependency
@@ -66,7 +74,9 @@ class TestCascadioMultiBodyLoading:
                 assert body_count == 2
                 assert all(isinstance(m, trimesh.Trimesh) for m in mesh_list)
 
-    @pytest.mark.skip(reason="Requires cascadio installation - tested indirectly via metrics worker")
+    @pytest.mark.skip(
+        reason="Requires cascadio installation - tested indirectly via metrics worker"
+    )
     def test_multi_body_preserves_body_separation(self, two_body_meshes):
         """Bodies should remain separate, not concatenated."""
         # Mock cascadio import to avoid dependency
@@ -88,7 +98,9 @@ class TestCascadioMultiBodyLoading:
                 distance = np.linalg.norm(center1 - center2)
                 assert distance > 20  # Should be ~25mm apart
 
-    @pytest.mark.skip(reason="Requires cascadio installation - tested indirectly via metrics worker")
+    @pytest.mark.skip(
+        reason="Requires cascadio installation - tested indirectly via metrics worker"
+    )
     def test_many_bodies_still_separated(self, many_body_meshes):
         """Many-body assembly should preserve all bodies."""
         # Mock cascadio import to avoid dependency
@@ -112,6 +124,7 @@ class TestCascadioMultiBodyLoading:
 # Test Class 2: Metrics Computation Multi-Body
 # =============================================================================
 
+
 class TestMultiBodyMetricsComputation:
     """Test metrics worker correctly handles multi-body meshes."""
 
@@ -121,17 +134,33 @@ class TestMultiBodyMetricsComputation:
     def test_metrics_aggregates_volume_across_bodies(self, two_body_meshes):
         """Volume should be sum of all body volumes."""
         # Each box is 10x10x10 = 1000 mm³, total should be 2000 mm³
-        with patch("src.core.geometry._load_cad_with_cascadio_isolated") as mock_cascadio:
-            mock_cascadio.return_value = (two_body_meshes, b"fake_glb", 2, ["Body_01", "Body_02"])
+        with patch(
+            "src.core.geometry._load_cad_with_cascadio_isolated"
+        ) as mock_cascadio:
+            mock_cascadio.return_value = (
+                two_body_meshes,
+                b"fake_glb",
+                2,
+                ["Body_01", "Body_02"],
+            )
 
             result = _compute_metrics_worker(b"fake_data", ".step")
 
-            assert result["volume_cm3"] == pytest.approx(2.0, rel=0.01)  # 2000 mm³ = 2 cm³
+            assert result["volume_cm3"] == pytest.approx(
+                2.0, rel=0.01
+            )  # 2000 mm³ = 2 cm³
 
     def test_metrics_aggregates_surface_area(self, two_body_meshes):
         """Surface area should be sum of all body areas."""
-        with patch("src.core.geometry._load_cad_with_cascadio_isolated") as mock_cascadio:
-            mock_cascadio.return_value = (two_body_meshes, b"fake_glb", 2, ["Body_01", "Body_02"])
+        with patch(
+            "src.core.geometry._load_cad_with_cascadio_isolated"
+        ) as mock_cascadio:
+            mock_cascadio.return_value = (
+                two_body_meshes,
+                b"fake_glb",
+                2,
+                ["Body_01", "Body_02"],
+            )
 
             result = _compute_metrics_worker(b"fake_data", ".step")
 
@@ -140,8 +169,15 @@ class TestMultiBodyMetricsComputation:
 
     def test_metrics_includes_body_count(self, three_body_meshes):
         """Body count should be reported in metrics."""
-        with patch("src.core.geometry._load_cad_with_cascadio_isolated") as mock_cascadio:
-            mock_cascadio.return_value = (three_body_meshes, b"fake_glb", 3, ["Body_01", "Body_02", "Body_03"])
+        with patch(
+            "src.core.geometry._load_cad_with_cascadio_isolated"
+        ) as mock_cascadio:
+            mock_cascadio.return_value = (
+                three_body_meshes,
+                b"fake_glb",
+                3,
+                ["Body_01", "Body_02", "Body_03"],
+            )
 
             result = _compute_metrics_worker(b"fake_data", ".step")
 
@@ -149,8 +185,15 @@ class TestMultiBodyMetricsComputation:
 
     def test_metrics_exports_per_body_stl_bytes(self, two_body_meshes):
         """Should return dict mapping body_id to STL bytes."""
-        with patch("src.core.geometry._load_cad_with_cascadio_isolated") as mock_cascadio:
-            mock_cascadio.return_value = (two_body_meshes, b"fake_glb", 2, ["Body_01", "Body_02"])
+        with patch(
+            "src.core.geometry._load_cad_with_cascadio_isolated"
+        ) as mock_cascadio:
+            mock_cascadio.return_value = (
+                two_body_meshes,
+                b"fake_glb",
+                2,
+                ["Body_01", "Body_02"],
+            )
 
             result = _compute_metrics_worker(b"fake_data", ".step")
 
@@ -162,8 +205,15 @@ class TestMultiBodyMetricsComputation:
 
     def test_metrics_preserves_backward_compat_field(self, two_body_meshes):
         """Legacy mesh_stl_bytes field should contain first body."""
-        with patch("src.core.geometry._load_cad_with_cascadio_isolated") as mock_cascadio:
-            mock_cascadio.return_value = (two_body_meshes, b"fake_glb", 2, ["Body_01", "Body_02"])
+        with patch(
+            "src.core.geometry._load_cad_with_cascadio_isolated"
+        ) as mock_cascadio:
+            mock_cascadio.return_value = (
+                two_body_meshes,
+                b"fake_glb",
+                2,
+                ["Body_01", "Body_02"],
+            )
 
             result = _compute_metrics_worker(b"fake_data", ".step")
 
@@ -174,16 +224,42 @@ class TestMultiBodyMetricsComputation:
 
     def test_metrics_handles_empty_mesh_list(self):
         """Empty mesh list should raise ValueError."""
-        with patch("src.core.geometry._load_cad_with_cascadio_isolated") as mock_cascadio:
+        with patch(
+            "src.core.geometry._load_cad_with_cascadio_isolated"
+        ) as mock_cascadio:
             mock_cascadio.return_value = ([], b"", 0, [])
 
             with pytest.raises(ValueError, match="FILE_CORRUPT"):
                 _compute_metrics_worker(b"fake_data", ".step")
 
+    def test_metrics_splits_disconnected_stl_into_bodies(self, two_body_meshes):
+        """Disconnected bodies inside one STL should remain separate."""
+        combined = trimesh.util.concatenate(two_body_meshes)
+        stl_bytes = combined.export(file_type="stl")
+
+        result = _compute_metrics_worker(stl_bytes, ".stl")
+
+        assert result["body_count"] == 2
+        assert len(result["mesh_stl_bytes_dict"]) == 2
+
+        glb = trimesh.load(io.BytesIO(result["cad_glb_bytes"]), file_type="glb")
+        assert isinstance(glb, trimesh.Scene)
+        assert len(glb.geometry) == 2
+
+    def test_quick_quality_reports_disconnected_stl_body_count(self, two_body_meshes):
+        """The fast DFM cache path should not collapse multi-body STL to one."""
+        combined = trimesh.util.concatenate(two_body_meshes)
+        stl_bytes = combined.export(file_type="stl")
+
+        result = _quick_quality_check(stl_bytes)
+
+        assert result["body_count"] == 2
+
 
 # =============================================================================
 # Test Class 3: DFM Analysis Multi-Body
 # =============================================================================
+
 
 class TestMultiBodyDFMAnalysis:
     """Test DFM worker performs per-body analysis and aggregation."""
@@ -202,7 +278,9 @@ class TestMultiBodyDFMAnalysis:
             assert "body_count" in result
             assert result["body_count"] == 2
 
-    def test_dfm_worker_analyzes_each_body_independently(self, multibody_stl_bytes_dict):
+    def test_dfm_worker_analyzes_each_body_independently(
+        self, multibody_stl_bytes_dict
+    ):
         """Should call _analyze_single_body once per body."""
         with patch("src.core.geometry._analyze_single_body") as mock_analyze:
             mock_analyze.return_value = {
@@ -270,20 +348,25 @@ class TestMultiBodyDFMAnalysis:
 # Test Class 4: Overlay Generation Multi-Body
 # =============================================================================
 
+
 class TestMultiBodyOverlayGeneration:
     """Test overlay worker uses pre-split bodies efficiently."""
 
     def test_overlay_accepts_dict_input(self, multibody_stl_bytes_dict):
         """Should accept dict mapping body_id to STL bytes."""
-        with patch("src.core.overlay_generator.generate_multi_body_overlay_glb") as mock_multi:
-            with patch("src.core.overlay_generator.generate_overlay_glb") as mock_single:
-                mock_multi.return_value = b"multi_body_glb"
-                mock_single.return_value = b"overlay_glb"
+        with (
+            patch(
+                "src.core.overlay_generator.generate_multi_body_overlay_glb"
+            ) as mock_multi,
+            patch("src.core.overlay_generator.generate_overlay_glb") as mock_single,
+        ):
+            mock_multi.return_value = b"multi_body_glb"
+            mock_single.return_value = b"overlay_glb"
 
-                reports = {"FDM": {"reportType": "FDM", "issues": []}}
-                result = _generate_overlays_worker(multibody_stl_bytes_dict, reports)
+            reports = {"FDM": {"reportType": "FDM", "issues": []}}
+            result = _generate_overlays_worker(multibody_stl_bytes_dict, reports)
 
-                assert isinstance(result, dict)
+            assert isinstance(result, dict)
 
     def test_overlay_generates_multi_body_key(self, multibody_stl_bytes_dict):
         """Should generate GENERAL__multi_body overlay for multi-body input."""
@@ -310,7 +393,9 @@ class TestMultiBodyOverlayGeneration:
             # Load should be called for each body separately
             mock_load.return_value = trimesh.creation.box([10, 10, 10])
 
-            with patch("src.core.overlay_generator.generate_multi_body_overlay_glb") as mock_multi:
+            with patch(
+                "src.core.overlay_generator.generate_multi_body_overlay_glb"
+            ) as mock_multi:
                 mock_multi.return_value = b"multi_glb"
 
                 reports = {}
@@ -327,7 +412,9 @@ class TestMultiBodyOverlayGeneration:
         with patch("src.core.geometry.trimesh.load") as mock_load:
             mock_load.return_value = single_body
 
-            with patch("src.core.overlay_generator.generate_multi_body_overlay_glb") as mock_multi:
+            with patch(
+                "src.core.overlay_generator.generate_multi_body_overlay_glb"
+            ) as mock_multi:
                 mock_multi.return_value = b"multi_glb"
 
                 reports = {}
@@ -339,6 +426,7 @@ class TestMultiBodyOverlayGeneration:
 # =============================================================================
 # Test Class 5: Backward Compatibility
 # =============================================================================
+
 
 class TestBackwardCompatibility:
     """Ensure legacy single-body paths still work correctly."""
@@ -386,12 +474,15 @@ class TestBackwardCompatibility:
 # Test Class 6: Error Handling
 # =============================================================================
 
+
 class TestMultiBodyErrorHandling:
     """Test graceful error handling for edge cases."""
 
     def test_empty_mesh_dict_in_metrics(self):
         """Empty mesh list should raise error."""
-        with patch("src.core.geometry._load_cad_with_cascadio_isolated") as mock_cascadio:
+        with patch(
+            "src.core.geometry._load_cad_with_cascadio_isolated"
+        ) as mock_cascadio:
             mock_cascadio.return_value = ([], b"", 0, [])
 
             with pytest.raises(ValueError, match="FILE_CORRUPT"):
@@ -425,6 +516,7 @@ class TestMultiBodyErrorHandling:
 # Test Class 7: Performance & Stress Tests
 # =============================================================================
 
+
 class TestMultiBodyPerformance:
     """Performance tests for multi-body handling (marked as slow)."""
 
@@ -433,8 +525,15 @@ class TestMultiBodyPerformance:
         """Metrics computation should handle 12+ bodies efficiently."""
         import time
 
-        with patch("src.core.geometry._load_cad_with_cascadio_isolated") as mock_cascadio:
-            mock_cascadio.return_value = (many_body_meshes, b"fake_glb", 12, [f"Body_{i+1:02d}" for i in range(12)])
+        with patch(
+            "src.core.geometry._load_cad_with_cascadio_isolated"
+        ) as mock_cascadio:
+            mock_cascadio.return_value = (
+                many_body_meshes,
+                b"fake_glb",
+                12,
+                [f"Body_{i+1:02d}" for i in range(12)],
+            )
 
             start = time.time()
             result = _compute_metrics_worker(b"fake_data", ".step")

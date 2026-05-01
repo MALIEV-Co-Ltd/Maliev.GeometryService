@@ -5,7 +5,6 @@ import io
 import json
 import logging
 import os
-import psutil
 import sys
 import tempfile
 import threading
@@ -15,8 +14,10 @@ from pathlib import Path
 from typing import Any, cast
 from uuid import UUID, uuid4
 
+import psutil
+
 # Fix PYTHONPATH for child processes spawned by ProcessPoolExecutor
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))  # noqa: PTH118, PTH120
 
 import aio_pika
 import aio_pika.abc
@@ -36,7 +37,6 @@ from src.core.geometry import (
 from src.core.observability import tracer
 from src.core.schemas import (
     BodyInfo,
-    BoundingBox as SchemaBoundingBox,
     FileAnalysisFailedEvent,
     FileAnalysisFailedMessageBody,
     FileAnalysisFailedPayload,
@@ -96,12 +96,16 @@ def _check_rss_and_maybe_gc(label: str) -> float:
 # T5d: single source of truth for Phase 2 task budgets.
 # All per-task timeouts are derived from this constant so log messages
 # and actual deadline are always in sync.
-_THUMBNAIL_BUDGET_S = 180   # single/multi-body thumbnail
-_GLB_BUDGET_S = 180         # viewer GLB export
-_PREVIEW_BUDGET_S = 60      # 7-view preview generation (reduced for faster failure detection)
+_THUMBNAIL_BUDGET_S = 180  # single/multi-body thumbnail
+_GLB_BUDGET_S = 180  # viewer GLB export
+_PREVIEW_BUDGET_S = (
+    60  # 7-view preview generation (reduced for faster failure detection)
+)
 
 
-def _shutdown_executor_gracefully(processor: "GeometryProcessor", timeout_seconds: int = 10) -> None:
+def _shutdown_executor_gracefully(
+    processor: "GeometryProcessor", timeout_seconds: int = 10
+) -> None:
     """Gracefully shutdown a GeometryProcessor's executors with timeout.
 
     This function ensures that executors are properly shut down with a timeout,
@@ -112,29 +116,26 @@ def _shutdown_executor_gracefully(processor: "GeometryProcessor", timeout_second
         processor: The GeometryProcessor to shutdown
         timeout_seconds: Maximum time to wait for shutdown to complete
     """
+
     def _do_shutdown():
         try:
             # First, try to shutdown with wait=True but with timeout
-            if hasattr(processor, 'executor'):
+            if hasattr(processor, "executor"):
                 try:
                     processor.executor.shutdown(wait=True, timeout=timeout_seconds)
                 except Exception as e:
                     logger.warning(f"Executor shutdown failed: {e}")
                     # Force shutdown if graceful fails
-                    try:
+                    with contextlib.suppress(Exception):
                         processor.executor.shutdown(wait=False)
-                    except Exception:
-                        pass
 
-            if hasattr(processor, 'dfm_executor'):
+            if hasattr(processor, "dfm_executor"):
                 try:
                     processor.dfm_executor.shutdown(wait=True, timeout=timeout_seconds)
                 except Exception as e:
                     logger.warning(f"DFM executor shutdown failed: {e}")
-                    try:
+                    with contextlib.suppress(Exception):
                         processor.dfm_executor.shutdown(wait=False)
-                    except Exception:
-                        pass
         except Exception as e:
             logger.warning(f"Exception during shutdown: {e}")
 
@@ -146,7 +147,9 @@ def _shutdown_executor_gracefully(processor: "GeometryProcessor", timeout_second
     shutdown_thread.join(timeout=timeout_seconds + 5)
 
     if shutdown_thread.is_alive():
-        logger.warning("Shutdown thread still running after timeout - executors may leak")
+        logger.warning(
+            "Shutdown thread still running after timeout - executors may leak"
+        )
 
 
 class UploadConsumer:
@@ -178,7 +181,9 @@ class UploadConsumer:
             try:
                 self.connection = await aio_pika.connect_robust(settings.RABBITMQ_URI)
                 self.channel = await self.connection.channel()
-                await self.channel.set_qos(prefetch_count=2)
+                await self.channel.set_qos(
+                    prefetch_count=max(1, settings.GEOMETRY_RABBITMQ_PREFETCH)
+                )
 
                 self.queue = cast(
                     aio_pika.abc.AbstractRobustQueue,
@@ -269,7 +274,7 @@ class UploadConsumer:
                     if not inner_msg.download_url:
                         raise ValueError("MISSING_DOWNLOAD_URL")
 
-                    # Check Content-Length header to avoid wasting bandwidth on oversized files
+                    # Check Content-Length header to avoid wasting bandwidth on oversized files  # noqa: E501
                     file_size_valid = await self.validate_file_size_before_download(
                         inner_msg.download_url
                     )
@@ -293,10 +298,10 @@ class UploadConsumer:
                         data = file_stream.read()
 
                         # 3a. Phase 1 — compute metrics (fast)
-                        # Add total timeout so the consumer never hangs waiting for a dead worker.
-                        # The cascadio thread-based timeout in geometry.py abandons the C-extension
-                        # thread after timeout_seconds; this outer timeout is a safety net.
-                        PHASE1_TIMEOUT_SECONDS = (
+                        # Add total timeout so the consumer never hangs waiting for a dead worker.  # noqa: E501
+                        # The cascadio thread-based timeout in geometry.py abandons the C-extension  # noqa: E501
+                        # thread after timeout_seconds; this outer timeout is a safety net.  # noqa: E501
+                        PHASE1_TIMEOUT_SECONDS = (  # noqa: N806
                             300  # 5 minutes max for the whole phase
                         )
                         loop = asyncio.get_running_loop()
@@ -328,7 +333,7 @@ class UploadConsumer:
                             )
                         except asyncio.TimeoutError:
                             logger.error(
-                                f"Phase 1 timed out after {PHASE1_TIMEOUT_SECONDS}s — replacing executor",
+                                f"Phase 1 timed out after {PHASE1_TIMEOUT_SECONDS}s — replacing executor",  # noqa: E501
                                 extra={
                                     "event": "phase1_timeout",
                                     "file_id": str(file_id),
@@ -345,20 +350,22 @@ class UploadConsumer:
                             self.geometry_processor = GeometryProcessor()
                             raise ValueError("GEOMETRY_PROCESS_TIMEOUT") from None
                         except BrokenProcessPool as ex:
-                            # ProcessPoolExecutor worker died unexpectedly (e.g., gmsh crash).
+                            # ProcessPoolExecutor worker died unexpectedly (e.g., gmsh crash).  # noqa: E501
                             # Try trimesh-only fallback so we don't fail the whole job.
                             logger.warning(
-                                f"Phase 1 worker crashed — trying trimesh-only fallback: {ex}",
+                                f"Phase 1 worker crashed — trying trimesh-only fallback: {ex}",  # noqa: E501
                                 extra={
                                     "event": "phase1_worker_crash",
                                     "file_id": str(file_id),
                                 },
                             )
                             _old_broken = self.geometry_processor
-                            _shutdown_executor_gracefully(_old_broken, timeout_seconds=10)
+                            _shutdown_executor_gracefully(
+                                _old_broken, timeout_seconds=10
+                            )
                             self.geometry_processor = GeometryProcessor()
                             executor = self.geometry_processor.executor
-                            # Use trimesh directly in this process (no executor) for metrics only.
+                            # Use trimesh directly in this process (no executor) for metrics only.  # noqa: E501
                             # This is slower but won't crash on problematic STEP files.
                             fallback_stream = io.BytesIO(data)
                             metrics_result = compute_metrics_trimesh_only(
@@ -380,6 +387,10 @@ class UploadConsumer:
                             isManifold=metrics_result["is_manifold"],
                             triangleCount=metrics_result["triangle_count"],
                             eulerNumber=metrics_result["euler_number"],
+                            nonManifoldReason=metrics_result.get("non_manifold_reason"),
+                            nonManifoldFaceCount=metrics_result.get(
+                                "non_manifold_face_count"
+                            ),
                         )
 
                         # Extract body metadata
@@ -387,16 +398,23 @@ class UploadConsumer:
                         body_names = metrics_result.get("body_names", [])
                         body_volumes = metrics_result.get("body_volumes_cm3", [])
                         body_infos: list[BodyInfo] | None = None
-                        if body_count > 1 and body_names:
+                        if body_count > 1:
+                            names = (
+                                body_names
+                                if len(body_names) == body_count
+                                else [f"Body {i + 1}" for i in range(body_count)]
+                            )
                             body_infos = [
                                 BodyInfo(
                                     index=i,
                                     name=name,
-                                    volume_cm3=body_volumes[i] if i < len(body_volumes) else None,
+                                    volume_cm3=body_volumes[i]
+                                    if i < len(body_volumes)
+                                    else None,
                                     bbox_min=None,
                                     bbox_max=None,
                                 )
-                                for i, name in enumerate(body_names)
+                                for i, name in enumerate(names)
                             ]
 
                         # Publish early metrics event
@@ -423,7 +441,7 @@ class UploadConsumer:
                                     storagePath=inner_msg.storage_path,
                                     metrics=metrics,
                                     processedAt=_metrics_now,
-                                    bodyCount=body_count if body_count > 1 else None,
+                                    bodyCount=body_count,
                                     bodies=body_infos,
                                 ),
                             ),
@@ -433,20 +451,24 @@ class UploadConsumer:
                             "maliev.geometryservice.v1.metrics.ready",
                         )
 
-                        # 3b. Phase 2 — 4 independent parallel workers using GLB directly
-                        # For CAD files (STEP/IGES), cascadio produces GLB — use it directly
+                        # 3b. Phase 2 — 4 independent parallel workers using GLB directly  # noqa: E501
+                        # For CAD files (STEP/IGES), cascadio produces GLB — use it directly  # noqa: E501
                         # For pure STL/OBJ uploads, fall back to original bytes
                         cad_glb_bytes = metrics_result.get("cad_glb_bytes")
-                        original_stl_bytes = metrics_result.get("mesh_stl_bytes")  # For pure STL uploads
+                        original_stl_bytes = metrics_result.get(
+                            "mesh_stl_bytes"
+                        )  # For pure STL uploads
                         body_count = metrics_result.get("body_count", 1)
                         body_names = metrics_result.get("body_names", [])
-                        mesh_stl_bytes_dict = metrics_result.get("mesh_stl_bytes_dict", {})  # For DFM only
+                        mesh_stl_bytes_dict = metrics_result.get(
+                            "mesh_stl_bytes_dict", {}
+                        )  # For DFM only
 
                         # Debug logging
                         logger.info(
-                            f"Phase 2 inputs: cad_glb_bytes={len(cad_glb_bytes) if cad_glb_bytes else None}, "
-                            f"original_stl_bytes={len(original_stl_bytes) if original_stl_bytes else None}, "
-                            f"file_ext={file_ext}, body_count={body_count}, has_bodies={bool(mesh_stl_bytes_dict)}"
+                            f"Phase 2 inputs: cad_glb_bytes={len(cad_glb_bytes) if cad_glb_bytes else None}, "  # noqa: E501
+                            f"original_stl_bytes={len(original_stl_bytes) if original_stl_bytes else None}, "  # noqa: E501
+                            f"file_ext={file_ext}, body_count={body_count}, has_bodies={bool(mesh_stl_bytes_dict)}"  # noqa: E501
                         )
 
                         if not cad_glb_bytes and not original_stl_bytes:
@@ -464,7 +486,7 @@ class UploadConsumer:
                                 )
                             except Exception as pub_err:
                                 logger.warning(
-                                    "Failed to publish GEOMETRY_NO_RESULT for Phase 2 skip: %s",
+                                    "Failed to publish GEOMETRY_NO_RESULT for Phase 2 skip: %s",  # noqa: E501
                                     pub_err,
                                 )
                         else:
@@ -477,54 +499,66 @@ class UploadConsumer:
                                 temp_dir = tempfile.mkdtemp(prefix="geom_")
                                 logger.info(
                                     f"Created temp directory for Phase 2: {temp_dir}",
-                                    extra={"event": "phase2_temp_dir", "file_id": str(file_id)},
+                                    extra={
+                                        "event": "phase2_temp_dir",
+                                        "file_id": str(file_id),
+                                    },
                                 )
 
-                                # Write CAD GLB for thumbnail/GLB/previews (fast, multi-body aware)
+                                # Write CAD GLB for thumbnail/GLB/previews (fast, multi-body aware)  # noqa: E501
                                 cad_glb_path: str | None = None
                                 if cad_glb_bytes:
-                                    cad_glb_path = os.path.join(temp_dir, "cad.glb")
-                                    with open(cad_glb_path, "wb") as f:
+                                    cad_glb_path = os.path.join(temp_dir, "cad.glb")  # noqa: PTH118
+                                    with open(cad_glb_path, "wb") as f:  # noqa: PTH123
                                         f.write(cad_glb_bytes)
 
-                                # Write original CAD file for DFM B-Rep analysis (only for STEP/IGES)
+                                # Write original CAD file for DFM B-Rep analysis (only for STEP/IGES)  # noqa: E501
                                 cad_path_for_dfm: str | None = None
                                 cad_ext = file_ext.strip(".")
                                 if cad_ext in ("step", "stp", "igs", "iges") and data:
-                                    cad_path_for_dfm = os.path.join(temp_dir, f"original.{cad_ext}")
-                                    with open(cad_path_for_dfm, "wb") as f:
+                                    cad_path_for_dfm = os.path.join(  # noqa: PTH118
+                                        temp_dir, f"original.{cad_ext}"
+                                    )
+                                    with open(cad_path_for_dfm, "wb") as f:  # noqa: PTH123
                                         f.write(data)
 
-                                # ── Fix: release large in-memory buffers immediately ──────────
-                                # `data` (original uploaded file, 10-200 MB) and `cad_glb_bytes`
-                                # (converted GLB, up to 100 MB) are both now flushed to disk.
-                                # Setting them to None lets GC reclaim the bytes while the four
-                                # Phase 2 tasks run (up to 300 s).  With prefetch_count=2, a
-                                # second large file can arrive before Phase 2 finishes; without
-                                # this release, both payloads co-exist in the parent process.
+                                # ── Fix: release large in-memory buffers immediately ──────────  # noqa: E501
+                                # `data` (original uploaded file, 10-200 MB) and `cad_glb_bytes`  # noqa: E501
+                                # (converted GLB, up to 100 MB) are both now flushed to disk.  # noqa: E501
+                                # Setting them to None lets GC reclaim the bytes while the four  # noqa: E501
+                                # Phase 2 tasks run (up to 300 s).  With prefetch_count=2, a  # noqa: E501
+                                # second large file can arrive before Phase 2 finishes; without  # noqa: E501
+                                # this release, both payloads co-exist in the parent process.  # noqa: E501
                                 #
-                                # DO NOT clear original_stl_bytes here — _run_dfm uses it as an
-                                # early-exit check for pure STL uploads (cad_glb_path = None).
-                                # DO NOT clear mesh_stl_bytes_dict here — _run_dfm reads it to
-                                # write per-body temp STL files; it frees the dict itself after.
+                                # DO NOT clear original_stl_bytes here — _run_dfm uses it as an  # noqa: E501
+                                # early-exit check for pure STL uploads (cad_glb_path = None).  # noqa: E501
+                                # DO NOT clear mesh_stl_bytes_dict here — _run_dfm reads it to  # noqa: E501
+                                # write per-body temp STL files; it frees the dict itself after.  # noqa: E501
                                 data = None  # noqa: F841
                                 cad_glb_bytes = None  # noqa: F841
 
                                 logger.info(
-                                    f"Phase 2 temp files written: CAD GLB={bool(cad_glb_path)}, "
+                                    f"Phase 2 temp files written: CAD GLB={bool(cad_glb_path)}, "  # noqa: E501
                                     f"original CAD={bool(cad_path_for_dfm)}",
-                                    extra={"event": "phase2_temp_files", "file_id": str(file_id)},
+                                    extra={
+                                        "event": "phase2_temp_files",
+                                        "file_id": str(file_id),
+                                    },
                                 )
 
-                                # ------------------------------------------------------------------
-                                # Phase 2 fan-out: 4 independent tasks, each publishes when done
-                                # ------------------------------------------------------------------
+                                # ------------------------------------------------------------------  # noqa: E501
+                                # Phase 2 fan-out: 4 independent tasks, each publishes when done  # noqa: E501
+                                # ------------------------------------------------------------------  # noqa: E501
 
                                 async def _run_small_thumbnail() -> None:
                                     try:
-                                        # Use extended timeout for multi-body files (they have larger GLBs)
-                                        # Multi-body GLBs can be 100MB+ vs 1-5MB for single body
-                                        small_timeout = 180 if (body_count and body_count > 1) else 60
+                                        # Use extended timeout for multi-body files (they have larger GLBs)  # noqa: E501
+                                        # Multi-body GLBs can be 100MB+ vs 1-5MB for single body  # noqa: E501
+                                        small_timeout = (
+                                            180
+                                            if (body_count and body_count > 1)
+                                            else 60
+                                        )
                                         thumb = await asyncio.wait_for(
                                             loop.run_in_executor(
                                                 executor,
@@ -535,13 +569,13 @@ class UploadConsumer:
                                         )
                                         if not thumb:
                                             return
-                                        thumb_path = f"{inner_msg.storage_path}_thumbnail_small.webp"
+                                        thumb_path = f"{inner_msg.storage_path}_thumbnail_small.webp"  # noqa: E501
                                         thumb_uploaded = await self.upload_artifact(
                                             thumb, thumb_path, "image/webp", upload_id
                                         )
                                         if not thumb_uploaded:
                                             logger.warning(
-                                                "Small thumbnail upload failed — skipping event",
+                                                "Small thumbnail upload failed — skipping event",  # noqa: E501
                                                 extra={"file_id": str(file_id)},
                                             )
                                             return
@@ -576,18 +610,27 @@ class UploadConsumer:
                                         )
                                         logger.info(
                                             "Small thumbnail published",
-                                            extra={"event": "thumbnail_small_published", "file_id": str(file_id)},
+                                            extra={
+                                                "event": "thumbnail_small_published",
+                                                "file_id": str(file_id),
+                                            },
                                         )
                                     except asyncio.TimeoutError:
-                                        # Log timeout with actual duration and file details
+                                        # Log timeout with actual duration and file details  # noqa: E501
                                         logger.warning(
-                                            f"Small thumbnail timed out after {small_timeout}s (file: {inner_msg.file_name}, size: {inner_msg.file_size} bytes, bodies: {body_count})",
-                                            extra={"event": "thumbnail_small_timeout", "file_id": str(file_id)},
+                                            f"Small thumbnail timed out after {small_timeout}s (file: {inner_msg.file_name}, size: {inner_msg.file_size} bytes, bodies: {body_count})",  # noqa: E501
+                                            extra={
+                                                "event": "thumbnail_small_timeout",
+                                                "file_id": str(file_id),
+                                            },
                                         )
                                     except Exception as e:
                                         logger.warning(
-                                            f"Small thumbnail task failed (non-fatal): {e}",
-                                            extra={"event": "thumbnail_small_error", "file_id": str(file_id)},
+                                            f"Small thumbnail task failed (non-fatal): {e}",  # noqa: E501
+                                            extra={
+                                                "event": "thumbnail_small_error",
+                                                "file_id": str(file_id),
+                                            },
                                         )
 
                                 async def _run_glb() -> None:
@@ -603,13 +646,18 @@ class UploadConsumer:
                                         )
                                         if not glb:
                                             return
-                                        glb_path = f"{inner_msg.storage_path}_viewer.glb"
+                                        glb_path = (
+                                            f"{inner_msg.storage_path}_viewer.glb"
+                                        )
                                         uploaded = await self.upload_artifact(
-                                            glb, glb_path, "model/gltf-binary", upload_id
+                                            glb,
+                                            glb_path,
+                                            "model/gltf-binary",
+                                            upload_id,
                                         )
                                         if not uploaded:
                                             logger.warning(
-                                                "GLB upload failed — skipping FileAnalyzedEvent",
+                                                "GLB upload failed — skipping FileAnalyzedEvent",  # noqa: E501
                                                 extra={"file_id": str(file_id)},
                                             )
                                             return
@@ -639,7 +687,7 @@ class UploadConsumer:
                                                     thumbnailStoragePath=None,
                                                     storagePath=inner_msg.storage_path,
                                                     dfmReport=None,
-                                                    bodyCount=body_count if body_count > 1 else None,
+                                                    bodyCount=body_count,
                                                     bodies=body_infos,
                                                 ),
                                             ),
@@ -651,17 +699,26 @@ class UploadConsumer:
                                         _glb_published[0] = True
                                         logger.info(
                                             "GLB published",
-                                            extra={"event": "glb_published", "file_id": str(file_id)},
+                                            extra={
+                                                "event": "glb_published",
+                                                "file_id": str(file_id),
+                                            },
                                         )
                                     except asyncio.TimeoutError:
                                         logger.warning(
-                                            f"GLB export timed out after {_GLB_BUDGET_S}s",
-                                            extra={"event": "glb_timeout", "file_id": str(file_id)},
+                                            f"GLB export timed out after {_GLB_BUDGET_S}s",  # noqa: E501
+                                            extra={
+                                                "event": "glb_timeout",
+                                                "file_id": str(file_id),
+                                            },
                                         )
                                     except Exception as e:
                                         logger.warning(
                                             f"GLB task failed (non-fatal): {e}",
-                                            extra={"event": "glb_error", "file_id": str(file_id)},
+                                            extra={
+                                                "event": "glb_error",
+                                                "file_id": str(file_id),
+                                            },
                                         )
 
                                 async def _run_previews() -> None:
@@ -679,10 +736,13 @@ class UploadConsumer:
                                         thumbnail_large_path: str | None = None
 
                                         for side, image_bytes in preview_images.items():
-                                            if side in ("thumbnail_small", "thumbnail_large"):
+                                            if side in (
+                                                "thumbnail_small",
+                                                "thumbnail_large",
+                                            ):
                                                 continue
                                             if image_bytes:
-                                                preview_path = f"{inner_msg.storage_path}_preview_{side}.webp"
+                                                preview_path = f"{inner_msg.storage_path}_preview_{side}.webp"  # noqa: E501
                                                 ok = await self.upload_artifact(
                                                     image_bytes,
                                                     preview_path,
@@ -692,9 +752,11 @@ class UploadConsumer:
                                                 if ok:
                                                     preview_paths[side] = preview_path
 
-                                        thumbnail_large_bytes = preview_images.get("thumbnail_large")
+                                        thumbnail_large_bytes = preview_images.get(
+                                            "thumbnail_large"
+                                        )
                                         if thumbnail_large_bytes:
-                                            thumbnail_large_path = f"{inner_msg.storage_path}_thumbnail_large.webp"
+                                            thumbnail_large_path = f"{inner_msg.storage_path}_thumbnail_large.webp"  # noqa: E501
                                             large_ok = await self.upload_artifact(
                                                 thumbnail_large_bytes,
                                                 thumbnail_large_path,
@@ -725,12 +787,24 @@ class UploadConsumer:
                                                 payload=PreviewImagesGeneratedPayload(
                                                     storagePath=inner_msg.storage_path,
                                                     previewImages=PreviewImagesMessage(
-                                                        frontSmall=preview_paths.get("front_small"),
-                                                        backSmall=preview_paths.get("back_small"),
-                                                        leftSmall=preview_paths.get("left_small"),
-                                                        rightSmall=preview_paths.get("right_small"),
-                                                        topSmall=preview_paths.get("top_small"),
-                                                        bottomSmall=preview_paths.get("bottom_small"),
+                                                        frontSmall=preview_paths.get(
+                                                            "front_small"
+                                                        ),
+                                                        backSmall=preview_paths.get(
+                                                            "back_small"
+                                                        ),
+                                                        leftSmall=preview_paths.get(
+                                                            "left_small"
+                                                        ),
+                                                        rightSmall=preview_paths.get(
+                                                            "right_small"
+                                                        ),
+                                                        topSmall=preview_paths.get(
+                                                            "top_small"
+                                                        ),
+                                                        bottomSmall=preview_paths.get(
+                                                            "bottom_small"
+                                                        ),
                                                         thumbnailSmall=None,
                                                         thumbnailLarge=thumbnail_large_path,
                                                     ),
@@ -744,60 +818,86 @@ class UploadConsumer:
                                         )
                                         logger.info(
                                             "Previews published",
-                                            extra={"event": "previews_published", "file_id": str(file_id)},
+                                            extra={
+                                                "event": "previews_published",
+                                                "file_id": str(file_id),
+                                            },
                                         )
                                     except asyncio.TimeoutError:
                                         logger.warning(
                                             "Previews timed out after 300s",
-                                            extra={"event": "previews_timeout", "file_id": str(file_id)},
+                                            extra={
+                                                "event": "previews_timeout",
+                                                "file_id": str(file_id),
+                                            },
                                         )
                                     except Exception as e:
                                         logger.warning(
                                             f"Previews task failed (non-fatal): {e}",
-                                            extra={"event": "previews_error", "file_id": str(file_id)},
+                                            extra={
+                                                "event": "previews_error",
+                                                "file_id": str(file_id),
+                                            },
                                         )
 
-                                # ------------------------------------------------------------------
-                                # Fan-out: all three tasks start immediately, each publishes
+                                # ------------------------------------------------------------------  # noqa: E501
+                                # Fan-out: all three tasks start immediately, each publishes  # noqa: E501
                                 # when done. 15-minute hard deadline prevents runaway.
-                                # ------------------------------------------------------------------
-                                PHASE2_HARD_DEADLINE_SECONDS = 300  # 5 minutes for all Phase 2 tasks (thumbnail, GLB, previews)
+                                # ------------------------------------------------------------------  # noqa: E501
+                                PHASE2_HARD_DEADLINE_SECONDS = 300  # 5 minutes for all Phase 2 tasks (thumbnail, GLB, previews)  # noqa: N806, E501
                                 logger.info(
-                                    "Phase 2 fan-out starting (thumbnail, GLB, previews)",
-                                    extra={"event": "phase2_fanout_start", "file_id": str(file_id)},
+                                    "Phase 2 fan-out starting (thumbnail, GLB, previews)",  # noqa: E501
+                                    extra={
+                                        "event": "phase2_fanout_start",
+                                        "file_id": str(file_id),
+                                    },
                                 )
 
-                                # Track which tasks have completed for progressive cleanup
+                                # Track which tasks have completed for progressive cleanup  # noqa: E501
                                 completed_tasks = set()
 
-                                async def _run_with_cleanup(task_name: str, task_coro, cleanup_fn=None) -> None:
-                                    """Run a task and optionally clean up resources after completion."""
+                                async def _run_with_cleanup(
+                                    task_name: str, task_coro, cleanup_fn=None
+                                ) -> None:
+                                    """Run a task and optionally clean up resources after completion."""  # noqa: E501
                                     try:
                                         await task_coro
                                         completed_tasks.add(task_name)
                                         logger.info(
-                                            f"Task {task_name} completed ({len(completed_tasks)}/3)",
-                                            extra={"event": f"phase2_task_{task_name}_complete", "file_id": str(file_id)}
+                                            f"Task {task_name} completed ({len(completed_tasks)}/3)",  # noqa: E501
+                                            extra={
+                                                "event": f"phase2_task_{task_name}_complete",  # noqa: E501
+                                                "file_id": str(file_id),
+                                            },
                                         )
 
-                                        # Progressive cleanup: remove temp files as soon as tasks finish
+                                        # Progressive cleanup: remove temp files as soon as tasks finish  # noqa: E501
                                         if cleanup_fn and temp_dir:
                                             try:
                                                 cleanup_fn()
                                                 logger.info(
-                                                    f"Progressive cleanup after {task_name}",
-                                                    extra={"event": "phase2_progressive_cleanup", "task": task_name}
+                                                    f"Progressive cleanup after {task_name}",  # noqa: E501
+                                                    extra={
+                                                        "event": "phase2_progressive_cleanup",  # noqa: E501
+                                                        "task": task_name,
+                                                    },
                                                 )
                                             except Exception as cleanup_err:
                                                 logger.warning(
-                                                    f"Progressive cleanup failed after {task_name}: {cleanup_err}",
-                                                    extra={"event": "phase2_cleanup_error", "task": task_name}
+                                                    f"Progressive cleanup failed after {task_name}: {cleanup_err}",  # noqa: E501
+                                                    extra={
+                                                        "event": "phase2_cleanup_error",
+                                                        "task": task_name,
+                                                    },
                                                 )
                                     except Exception as e:
                                         completed_tasks.add(task_name)
                                         logger.warning(
                                             f"Task {task_name} failed: {e}",
-                                            extra={"event": f"phase2_task_{task_name}_failed", "file_id": str(file_id)}
+                                            extra={
+                                                "event": f"phase2_task_{task_name}_failed",  # noqa: E501
+                                                "file_id": str(file_id),
+                                            },
                                         )
 
                                 def cleanup_cad_glb():
@@ -805,56 +905,84 @@ class UploadConsumer:
 
                                     cad.glb is needed by rendering tasks (thumb, previews, glb).
                                     Do NOT delete it until every task is done.
-                                    """
+                                    """  # noqa: E501
                                     if len(completed_tasks) >= 3 and cad_glb_path:
                                         try:
-                                            if os.path.exists(cad_glb_path):
-                                                size_mb = os.path.getsize(cad_glb_path)/1024/1024
-                                                os.unlink(cad_glb_path)
+                                            if os.path.exists(cad_glb_path):  # noqa: PTH110
+                                                size_mb = (
+                                                    os.path.getsize(cad_glb_path)  # noqa: PTH202
+                                                    / 1024
+                                                    / 1024
+                                                )
+                                                os.unlink(cad_glb_path)  # noqa: PTH108
                                                 logger.info(
-                                                    f"Removed cad.glb ({size_mb:.1f} MB freed)",
-                                                    extra={"event": "phase2_cad_glb_removed"}
+                                                    f"Removed cad.glb ({size_mb:.1f} MB freed)",  # noqa: E501
+                                                    extra={
+                                                        "event": "phase2_cad_glb_removed"  # noqa: E501
+                                                    },
                                                 )
                                             else:
-                                                logger.debug(f"cad.glb already removed or never created")
+                                                logger.debug(
+                                                    "cad.glb already removed or never created"  # noqa: E501
+                                                )
                                         except Exception as e:
-                                            logger.warning(f"Failed to remove cad.glb: {e}")
+                                            logger.warning(
+                                                f"Failed to remove cad.glb: {e}"
+                                            )
 
                                 def cleanup_cad_file():
-                                    """Clean up original CAD file after Phase 2 completes."""
-                                    # Original CAD file no longer needed after rendering tasks finish
+                                    """Clean up original CAD file after Phase 2 completes."""  # noqa: E501
+                                    # Original CAD file no longer needed after rendering tasks finish  # noqa: E501
                                     if len(completed_tasks) >= 3 and cad_path_for_dfm:
                                         try:
-                                            if os.path.exists(cad_path_for_dfm):
-                                                size_mb = os.path.getsize(cad_path_for_dfm)/1024/1024
-                                                os.unlink(cad_path_for_dfm)
+                                            if os.path.exists(cad_path_for_dfm):  # noqa: PTH110
+                                                size_mb = (
+                                                    os.path.getsize(cad_path_for_dfm)  # noqa: PTH202
+                                                    / 1024
+                                                    / 1024
+                                                )
+                                                os.unlink(cad_path_for_dfm)  # noqa: PTH108
                                                 logger.info(
-                                                    f"Removed original.{cad_ext} ({size_mb:.1f} MB freed)",
-                                                    extra={"event": "phase2_cad_file_removed"}
+                                                    f"Removed original.{cad_ext} ({size_mb:.1f} MB freed)",  # noqa: E501
+                                                    extra={
+                                                        "event": "phase2_cad_file_removed"  # noqa: E501
+                                                    },
                                                 )
                                             else:
-                                                logger.debug(f"original.{cad_ext} already removed")
+                                                logger.debug(
+                                                    f"original.{cad_ext} already removed"  # noqa: E501
+                                                )
                                         except Exception as e:
-                                            logger.warning(f"Failed to remove original.{cad_ext}: {e}")
+                                            logger.warning(
+                                                f"Failed to remove original.{cad_ext}: {e}"  # noqa: E501
+                                            )
 
                                 # Create tasks with progressive cleanup hooks.
-                                # Shared file (cad.glb) is only deleted when ALL 4 tasks complete —
+                                # Shared file (cad.glb) is only deleted when ALL 4 tasks complete —  # noqa: E501
                                 # the cleanup function checks len(completed_tasks) >= 4.
-                                # Per-task files (original CAD) are cleaned up after DFM only.
+                                # Per-task files (original CAD) are cleaned up after DFM only.  # noqa: E501
                                 def cleanup_shared():
-                                    """Run shared-file cleanup; safe to call from any task."""
+                                    """Run shared-file cleanup; safe to call from any task."""  # noqa: E501
                                     cleanup_cad_glb()
                                     cleanup_cad_file()
 
                                 tasks = {
                                     "thumb": asyncio.create_task(
-                                        _run_with_cleanup("thumb", _run_small_thumbnail(), cleanup_shared)
+                                        _run_with_cleanup(
+                                            "thumb",
+                                            _run_small_thumbnail(),
+                                            cleanup_shared,
+                                        )
                                     ),
                                     "glb": asyncio.create_task(
-                                        _run_with_cleanup("glb", _run_glb(), cleanup_shared)
+                                        _run_with_cleanup(
+                                            "glb", _run_glb(), cleanup_shared
+                                        )
                                     ),
                                     "previews": asyncio.create_task(
-                                        _run_with_cleanup("previews", _run_previews(), cleanup_shared)
+                                        _run_with_cleanup(
+                                            "previews", _run_previews(), cleanup_shared
+                                        )
                                     ),
                                 }
 
@@ -866,12 +994,15 @@ class UploadConsumer:
                                     t.cancel()
                                     logger.warning(
                                         "Phase 2 task cancelled after deadline",
-                                        extra={"event": "phase2_task_cancelled", "file_id": str(file_id)},
+                                        extra={
+                                            "event": "phase2_task_cancelled",
+                                            "file_id": str(file_id),
+                                        },
                                     )
 
                                 rss_mb = _check_rss_and_maybe_gc("post-phase2")
                                 logger.info(
-                                    "Phase 2 complete (all tasks finished or timed out)",
+                                    "Phase 2 complete (all tasks finished or timed out)",  # noqa: E501
                                     extra={
                                         "event": "phase2_complete",
                                         "file_id": str(file_id),
@@ -882,7 +1013,7 @@ class UploadConsumer:
                                 # Safety net: if no GLB was published, fail explicitly
                                 if not _glb_published[0]:
                                     logger.warning(
-                                        "Phase 2 completed without publishing a GLB artifact — "
+                                        "Phase 2 completed without publishing a GLB artifact — "  # noqa: E501
                                         "publishing GEOMETRY_NO_RESULT failure event",
                                         extra={
                                             "event": "phase2_no_result",
@@ -902,32 +1033,39 @@ class UploadConsumer:
                                             "Failed to publish GEOMETRY_NO_RESULT: %s",
                                             pub_err,
                                             extra={
-                                                "event": "phase2_no_result_publish_error",
+                                                "event": "phase2_no_result_publish_error",  # noqa: E501
                                                 "file_id": str(file_id),
                                             },
                                         )
 
                             finally:
                                 # Clean up temp directory
-                                if temp_dir and os.path.exists(temp_dir):
+                                if temp_dir and os.path.exists(temp_dir):  # noqa: PTH110
                                     try:
                                         import shutil
+
                                         shutil.rmtree(temp_dir)
                                         logger.info(
                                             f"Cleaned up temp directory: {temp_dir}",
-                                            extra={"event": "phase2_temp_cleanup", "file_id": str(file_id)},
+                                            extra={
+                                                "event": "phase2_temp_cleanup",
+                                                "file_id": str(file_id),
+                                            },
                                         )
                                     except Exception as cleanup_err:
                                         logger.warning(
-                                            f"Failed to clean up temp directory {temp_dir}: {cleanup_err}",
-                                            extra={"event": "phase2_temp_cleanup_error", "file_id": str(file_id)},
+                                            f"Failed to clean up temp directory {temp_dir}: {cleanup_err}",  # noqa: E501
+                                            extra={
+                                                "event": "phase2_temp_cleanup_error",
+                                                "file_id": str(file_id),
+                                            },
                                         )
 
                                 extra: dict[str, Any] = {
                                     "file.id": str(file_id),
                                     "volume_cm3": metrics.volume_cm3,
                                     "surface_area_cm2": metrics.surface_area_cm2,
-                                    "bounding_box": f"{metrics.bounding_box.x} x {metrics.bounding_box.y} x {metrics.bounding_box.z}",
+                                    "bounding_box": f"{metrics.bounding_box.x} x {metrics.bounding_box.y} x {metrics.bounding_box.z}",  # noqa: E501
                                 }
                                 logger.info(
                                     "Successfully analyzed file",
@@ -972,7 +1110,7 @@ class UploadConsumer:
         """Check Content-Length header before downloading to reject oversized files early.
 
         Returns True if file size is within limits, False if exceeds MAX_FILE_SIZE_MB.
-        """
+        """  # noqa: E501
         try:
             # T4a: reuse the shared client instead of creating a fresh one.
             response = await self._http_client.head(url)
@@ -981,22 +1119,27 @@ class UploadConsumer:
                 size_mb = int(content_length) / (1024 * 1024)
                 if size_mb > settings.MAX_FILE_SIZE_MB:
                     logger.warning(
-                        f"File exceeds size limit: {size_mb:.1f}MB > {settings.MAX_FILE_SIZE_MB}MB - rejecting early",
-                        extra={"event": "file_size_early_rejection", "size_mb": size_mb}
+                        f"File exceeds size limit: {size_mb:.1f}MB > {settings.MAX_FILE_SIZE_MB}MB - rejecting early",  # noqa: E501
+                        extra={
+                            "event": "file_size_early_rejection",
+                            "size_mb": size_mb,
+                        },
                     )
                     return False
-                else:
-                    logger.info(
-                        f"File size check passed: {size_mb:.1f}MB",
-                        extra={"event": "file_size_validated", "size_mb": size_mb}
-                    )
-                    return True
-            else:
-                # Content-Length not available, proceed with download
-                logger.debug("Content-Length header not available, skipping early size check")
+                logger.info(
+                    f"File size check passed: {size_mb:.1f}MB",
+                    extra={"event": "file_size_validated", "size_mb": size_mb},
+                )
                 return True
+            # Content-Length not available, proceed with download
+            logger.debug(
+                "Content-Length header not available, skipping early size check"
+            )
+            return True
         except Exception as e:
-            logger.warning(f"Failed to check file size before download: {e}, proceeding anyway")
+            logger.warning(
+                f"Failed to check file size before download: {e}, proceeding anyway"
+            )
             return True  # Proceed with download if HEAD request fails
 
     async def download_with_retry(self, url: str, attempts: int = 3) -> io.BytesIO:
@@ -1062,9 +1205,7 @@ class UploadConsumer:
             )
             response.raise_for_status()
             result = response.json()
-            logger.info(
-                f"Artifact uploaded successfully: {result.get('storagePath')}"
-            )
+            logger.info(f"Artifact uploaded successfully: {result.get('storagePath')}")
             return True
 
         except httpx.HTTPStatusError as e:
@@ -1145,9 +1286,9 @@ def _extract_worker_diagnostics(file_id: UUID) -> str:
     logs = []
     # Search for recent worker log files
     log_pattern = f"/tmp/worker_*_{file_id.hex[:8]}*.log"
-    for log_file in glob.glob(log_pattern):
+    for log_file in glob.glob(log_pattern):  # noqa: PTH207
         try:
-            with open(log_file, "r") as f:
+            with open(log_file) as f:  # noqa: PTH123
                 logs.append(f"=== {log_file} ===\n{f.read()}")
         except Exception:
             pass

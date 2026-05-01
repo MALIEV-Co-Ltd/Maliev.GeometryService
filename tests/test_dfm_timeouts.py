@@ -4,25 +4,23 @@ These tests verify that DFM analysis handles timeouts gracefully,
 performs within acceptable time limits, and properly cleans up resources.
 """
 
-import pytest
-import os
-import time
-import sys
 import signal
+import sys
 import threading
-import psutil
+import time
 from pathlib import Path
-from typing import Dict, Any, List
+
+import psutil
+import pytest
 
 from src.core.geometry import (
     compute_dfm_analysis_for_stl,
     compute_multi_body_dfm_analysis,
 )
 from tests.test_utils import (
-    monitor_resources,
     check_for_orphaned_processes,
     measure_performance,
-    TimeoutTester,
+    monitor_resources,
 )
 
 
@@ -42,8 +40,7 @@ def large_stl_file(test_assets_dir):
         pytest.skip("No STL files found")
 
     # Find the largest file
-    large_file = max(stl_files, key=lambda f: f.stat().st_size)
-    return large_file
+    return max(stl_files, key=lambda f: f.stat().st_size)
 
 
 class TestDFMTimeouts:
@@ -68,9 +65,9 @@ class TestDFMTimeouts:
 
         # Verify it completed within timeout
         duration = monitor.snapshots[-1].timestamp - monitor.snapshots[0].timestamp
-        assert duration < timeout_seconds, (
-            f"Analysis took {duration}s, exceeds {timeout_seconds}s timeout"
-        )
+        assert (
+            duration < timeout_seconds
+        ), f"Analysis took {duration}s, exceeds {timeout_seconds}s timeout"
 
     def test_dfm_timeout_fails_gracefully(self, sample_stl_file):
         """Test that DFM timeout is handled gracefully without crashes."""
@@ -97,9 +94,9 @@ class TestDFMTimeouts:
         orphaned_after = check_for_orphaned_processes()
         orphaned_count = len(orphaned_after) - len(orphaned_before)
 
-        assert orphaned_count == 0, (
-            f"Found {orphaned_count} orphaned processes after timeout"
-        )
+        assert (
+            orphaned_count == 0
+        ), f"Found {orphaned_count} orphaned processes after timeout"
 
     def test_dfm_per_body_timeout_in_multi_body(self, multi_body_glbs):
         """Test that per-body timeout works in multi-body analysis."""
@@ -132,7 +129,7 @@ class TestDFMTimeouts:
 
         timeout_occurred = False
 
-        def timeout_handler(signum, frame):
+        def timeout_handler(signum, frame):  # noqa: ARG001
             nonlocal timeout_occurred
             timeout_occurred = True
             raise TimeoutError("DFM analysis timed out")
@@ -142,7 +139,7 @@ class TestDFMTimeouts:
         signal.alarm(1)  # 1 second timeout
 
         try:
-            result = compute_dfm_analysis_for_stl(stl_bytes, timeout_seconds=5)
+            compute_dfm_analysis_for_stl(stl_bytes, timeout_seconds=5)
             # If it completes quickly, cancel alarm
             signal.alarm(0)
         except TimeoutError:
@@ -179,9 +176,7 @@ class TestDFMTimeouts:
         watchdog_thread.start()
 
         try:
-            result = compute_dfm_analysis_for_stl(
-                stl_bytes, timeout_seconds=timeout_seconds
-            )
+            compute_dfm_analysis_for_stl(stl_bytes, timeout_seconds=timeout_seconds)
         finally:
             stop_event.set()
             watchdog_thread.join(timeout=2)
@@ -205,9 +200,9 @@ class TestDFMPerformance:
         assert perf["success"], f"DFM analysis failed: {perf.get('error')}"
 
         # Small geometry should complete in < 10 seconds
-        assert perf["duration_seconds"] < 10, (
-            f"Small geometry took {perf['duration_seconds']:.2f}s, exceeds 10s baseline"
-        )
+        assert (
+            perf["duration_seconds"] < 10
+        ), f"Small geometry took {perf['duration_seconds']:.2f}s, exceeds 10s baseline"
 
         print(
             f"\nSmall geometry DFM: {perf['duration_seconds']:.2f}s, "
@@ -235,9 +230,9 @@ class TestDFMPerformance:
         assert perf["success"], f"DFM analysis failed: {perf.get('error')}"
 
         # Medium geometry should complete in < 30 seconds
-        assert perf["duration_seconds"] < 30, (
-            f"Medium geometry took {perf['duration_seconds']:.2f}s, exceeds 30s baseline"
-        )
+        assert (
+            perf["duration_seconds"] < 30
+        ), f"Medium geometry took {perf['duration_seconds']:.2f}s, exceeds 30s baseline"
 
         print(
             f"\nMedium geometry ({estimated_vertices} vertices) DFM: "
@@ -252,7 +247,7 @@ class TestDFMPerformance:
         rss_before = process.memory_info().rss / 1024 / 1024
 
         # Run DFM analysis
-        result = compute_dfm_analysis_for_stl(stl_bytes, timeout_seconds=30)
+        compute_dfm_analysis_for_stl(stl_bytes, timeout_seconds=30)
 
         # Force cleanup
         import gc
@@ -296,9 +291,9 @@ class TestDFMPerformance:
                     pytest.fail(f"Concurrent analysis failed: {e}")
 
         # Verify all completed
-        assert len(results) == num_concurrent, (
-            f"Only {len(results)}/{num_concurrent} analyses completed"
-        )
+        assert (
+            len(results) == num_concurrent
+        ), f"Only {len(results)}/{num_concurrent} analyses completed"
 
         # Verify no orphaned processes
         orphaned_after = check_for_orphaned_processes()
@@ -327,9 +322,9 @@ class TestDFMFaultTolerance:
             # Should indicate failure
             if "reports" in result:
                 # May have empty reports or error info
-                assert isinstance(result["reports"], list), (
-                    f"Invalid mesh {i} reports not a list"
-                )
+                assert isinstance(
+                    result["reports"], list
+                ), f"Invalid mesh {i} reports not a list"
 
     def test_dfm_handles_mixed_valid_invalid_bodies(self, multi_body_glbs):
         """Test multi-body DFM with mix of valid and invalid bodies."""
@@ -392,7 +387,7 @@ class TestDFMResourceManagement:
 
         # Force timeout
         with monitor_resources() as monitor:
-            result = compute_dfm_analysis_for_stl(stl_bytes, timeout_seconds=0.001)
+            compute_dfm_analysis_for_stl(stl_bytes, timeout_seconds=0.001)
 
         # Give time for cleanup
         time.sleep(1.0)
@@ -401,16 +396,16 @@ class TestDFMResourceManagement:
         orphaned_after = check_for_orphaned_processes()
         orphaned_count = len(orphaned_after) - len(orphaned_before)
 
-        assert orphaned_count == 0, (
-            f"Found {orphaned_count} orphaned processes after timeout"
-        )
+        assert (
+            orphaned_count == 0
+        ), f"Found {orphaned_count} orphaned processes after timeout"
 
         # Verify memory was released
         memory_growth = monitor.get_memory_growth()
         # Allow some growth but not excessive
-        assert memory_growth < 200, (
-            f"Memory growth {memory_growth}MB after timeout is excessive"
-        )
+        assert (
+            memory_growth < 200
+        ), f"Memory growth {memory_growth}MB after timeout is excessive"
 
     def test_dfm_temp_file_cleanup(self, sample_stl_file):
         """Test that DFM cleans up temporary files."""
@@ -420,9 +415,7 @@ class TestDFMResourceManagement:
         temp_files_before = len([f for f in Path(temp_dir).iterdir() if f.is_file()])
 
         # Run DFM analysis
-        result = compute_dfm_analysis_for_stl(
-            sample_stl_file.read_bytes(), timeout_seconds=30
-        )
+        compute_dfm_analysis_for_stl(sample_stl_file.read_bytes(), timeout_seconds=30)
 
         # Give time for cleanup
         time.sleep(0.5)
@@ -433,13 +426,13 @@ class TestDFMResourceManagement:
 
         # Temp files should be cleaned up (allow some growth for legitimate reasons)
         # Excessive growth would indicate a leak
-        assert temp_file_growth < 10, (
-            f"Temp file growth {temp_file_growth} indicates potential leak"
-        )
+        assert (
+            temp_file_growth < 10
+        ), f"Temp file growth {temp_file_growth} indicates potential leak"
 
 
 @pytest.fixture
-def multi_body_glbs(test_assets_dir):
+def multi_body_glbs(test_assets_dir):  # noqa: ARG001
     """Create mock multi-body GLB data for testing."""
     # For now, return empty list
     # In real tests, this would load actual multi-body GLBs

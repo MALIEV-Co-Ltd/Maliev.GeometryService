@@ -145,7 +145,7 @@ class FileUploadedEvent(MassTransitEnvelope):
 
 
 class FileAnalyzedPayload(BaseModel):
-    """Nested payload data inside FileAnalyzedEvent.message — mirrors C# FileAnalyzedEventPayload."""
+    """Nested payload data inside FileAnalyzedEvent.message — mirrors C# FileAnalyzedEventPayload."""  # noqa: E501
 
     model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
     file_id: str = Field(alias="fileId")
@@ -164,7 +164,7 @@ class FileAnalyzedPayload(BaseModel):
 
 
 class FileAnalyzedMessageBody(BaseMessageBody):
-    """The full body of FileAnalyzedEvent.message — includes BaseMessage fields + payload."""
+    """The full body of FileAnalyzedEvent.message — includes BaseMessage fields + payload."""  # noqa: E501
 
     payload: FileAnalyzedPayload
 
@@ -237,7 +237,7 @@ class FileAnalysisFailedEvent(MassTransitEnvelope):
 
 
 class PreviewImagesMessage(BaseModel):
-    """Seven preview image storage paths (6 orthographic + 1 isometric) plus 1200px ISO WebP."""
+    """Seven preview image storage paths (6 orthographic + 1 isometric) plus 1200px ISO WebP."""  # noqa: E501
 
     model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
     front_small: str | None = Field(alias="frontSmall", default=None)
@@ -286,11 +286,17 @@ class DfmAnalysisReadyPayload(BaseModel):
     sla_report: SlaDfmReport | None = Field(alias="slaReport", default=None)
     cnc_report: CncDfmReport | None = Field(alias="cncReport", default=None)
     analyzed_at: datetime = Field(alias="analyzedAt")
-    # Overlay GLB storage paths keyed by "{PROCESS}__{category}" or "GENERAL__{category}".
+    # Overlay GLB storage paths keyed by "{PROCESS}__{category}" or "GENERAL__{category}".  # noqa: E501
     # Frontend loads these on-demand when a DFM issue is clicked.
     overlay_paths: dict[str, str] | None = Field(alias="overlayPaths", default=None)
     # Number of distinct bodies/shells detected in the mesh. >1 means multi-body.
     body_count: int | None = Field(alias="bodyCount", default=None)
+    # Mesh-integrity details forwarded from the tessellation path so the
+    # on-demand DFM endpoint can surface them even when FileAnalyzedEvent is stale.
+    non_manifold_reason: str | None = Field(alias="nonManifoldReason", default=None)
+    non_manifold_face_count: int | None = Field(
+        alias="nonManifoldFaceCount", default=None
+    )
 
 
 class DfmAnalysisReadyMessageBody(BaseMessageBody):

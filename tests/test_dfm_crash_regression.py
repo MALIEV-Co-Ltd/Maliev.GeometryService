@@ -12,7 +12,6 @@ See: src/core/mesh_analyzers.py detect_holes_mesh and
 import io
 
 import numpy as np
-import pytest
 import trimesh
 
 from src.core.mesh_analyzers import detect_holes_mesh
@@ -28,8 +27,7 @@ def make_degenerate_mesh(seed: int = 42) -> trimesh.Trimesh:
     box = trimesh.creation.box()
     extra_verts = rng.random((1000, 3)) * 0.001  # unreferenced garbage verts
     vertices = np.vstack([box.vertices, extra_verts])
-    mesh = trimesh.Trimesh(vertices=vertices, faces=box.faces, process=False)
-    return mesh
+    return trimesh.Trimesh(vertices=vertices, faces=box.faces, process=False)
 
 
 class TestDetectHolesDegenerateMesh:
@@ -52,10 +50,7 @@ class TestDetectHolesDegenerateMesh:
         """
         mesh = make_degenerate_mesh()
 
-        # Patch the property to raise the exact error seen in production
-        original_prop = type(mesh).vertex_faces.fget  # noqa: B009
-
-        def _raise_vertex_faces(self):  # noqa: ANN001
+        def _raise_vertex_faces(_self):  # noqa: ANN001
             raise ValueError(
                 "NumPy boolean array indexing assignment cannot assign "
                 "184476 input values to 199446 output values where the mask is true"

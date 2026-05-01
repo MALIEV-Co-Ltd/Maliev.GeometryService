@@ -40,6 +40,7 @@ Pillow = "^11.1.0"
 pytest = "^8.4.2"
 pytest-asyncio = "^0.25.3"
 pytest-xdist = "^3.6.0"
+pytest-timeout = "^2.3.1"
 mypy = "^1.19.1"
 ruff = "^0.8.6"
 black = "^24.10.0"
@@ -48,11 +49,14 @@ pre-commit = "^4.5.1"
 respx = "^0.22.0"
 
 [tool.pytest.ini_options]
-addopts = "-n auto --dist loadfile"
+# Sequential by default to prevent nested process-pool OOM.
+# Parallelism is opt-in: pytest -n --dist loadfile
+# Slow tests are opt-in:   pytest -m slow
+addopts = "-m 'not slow'"
 testpaths = ["tests"]
 asyncio_mode = "auto"
 markers = [
-    "slow: marks tests as slow (worker recycling, RSS soak) — run with pytest -m slow",
+    "slow: marks tests as slow (worker recycling, RSS soak, real cascadio) — run with pytest -m slow",
 ]
 
 [build-system]

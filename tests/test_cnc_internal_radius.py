@@ -4,12 +4,9 @@ Tests for internal radius detection in CNC milling.
 Uses 100x100x25mm-cube-sharp-internal-corners-various-fillets test file.
 """
 
-import io
-
 import pytest
 
 from src.core.geometry import _analyze_single_process
-
 
 ASSETS_DIR = pytest.importorskip("pathlib").Path(__file__).parent / "assets"
 
@@ -29,7 +26,7 @@ class TestInternalRadiusDetection:
         )
 
         if not file_path.exists():
-            pytest.skip(f"File not found")
+            pytest.skip("File not found")
 
         stl_bytes = file_path.read_bytes()
 
@@ -80,7 +77,7 @@ class TestSharpCorners:
         )
 
         if not file_path.exists():
-            pytest.skip(f"File not found")
+            pytest.skip("File not found")
 
         stl_bytes = file_path.read_bytes()
 

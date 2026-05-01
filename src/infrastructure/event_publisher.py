@@ -5,15 +5,14 @@ by both the upload consumer and the FastAPI endpoints (main.py).
 """
 
 import logging
-from typing import Union
 
 import aio_pika
 import aio_pika.abc
 
 from src.core.schemas import (
     DfmAnalysisReadyEvent,
-    FileAnalyzedEvent,
     FileAnalysisFailedEvent,
+    FileAnalyzedEvent,
     FileMetricsReadyEvent,
     PreviewImagesGeneratedEvent,
     SmallThumbnailReadyEvent,
@@ -38,14 +37,12 @@ def initialize_event_publisher(exchange: aio_pika.abc.AbstractRobustExchange) ->
 
 
 async def publish_event(
-    event: Union[
-        FileAnalyzedEvent,
-        FileAnalysisFailedEvent,
-        FileMetricsReadyEvent,
-        PreviewImagesGeneratedEvent,
-        DfmAnalysisReadyEvent,
-        SmallThumbnailReadyEvent,
-    ],
+    event: FileAnalyzedEvent
+    | FileAnalysisFailedEvent
+    | FileMetricsReadyEvent
+    | PreviewImagesGeneratedEvent
+    | DfmAnalysisReadyEvent
+    | SmallThumbnailReadyEvent,
     routing_key: str,
 ) -> None:
     """Publish an event to the message bus.
@@ -56,10 +53,10 @@ async def publish_event(
 
     Raises:
         RuntimeError: If the exchange has not been initialized via initialize_event_publisher().
-    """
+    """  # noqa: E501
     if _exchange is None:
         raise RuntimeError(
-            "Event publisher not initialized. Call initialize_event_publisher(exchange) first."
+            "Event publisher not initialized. Call initialize_event_publisher(exchange) first."  # noqa: E501
         )
 
     # model_dump_json(by_alias=True) ensures camelCase for MassTransit

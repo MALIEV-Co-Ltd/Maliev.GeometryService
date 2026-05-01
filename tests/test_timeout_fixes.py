@@ -3,13 +3,17 @@
 These tests verify the timeout handling improvements from the plan.
 """
 
-import pytest
 import time
-import tempfile
-from pathlib import Path
 from io import BytesIO
+from pathlib import Path
+
+import pytest
 
 from src.core.geometry import GeometryProcessor
+
+# All tests here create GeometryProcessor / real subprocess pools.
+# Excluded from the default run to prevent nested-pool OOM crashes.
+pytestmark = pytest.mark.slow
 
 
 @pytest.fixture
@@ -36,6 +40,14 @@ def sample_stl_file(test_assets_dir):
     return stl_file
 
 
+@pytest.fixture(scope="class")
+def processor():
+    """Class-scoped GeometryProcessor — one pool per test class, not per test method."""
+    p = GeometryProcessor(enable_diagnostics=False)
+    yield p
+    p.shutdown()
+
+
 class TestCascadioTimeoutFixes:
     """Test cascadio timeout handling improvements."""
 
@@ -54,9 +66,9 @@ class TestCascadioTimeoutFixes:
 
             # Verify metrics have expected fields
             assert hasattr(metrics, "volume_cm3"), "Should have volume_cm3 metric"
-            assert hasattr(metrics, "surface_area_cm2"), (
-                "Should have surface_area_cm2 metric"
-            )
+            assert hasattr(
+                metrics, "surface_area_cm2"
+            ), "Should have surface_area_cm2 metric"
         finally:
             processor.shutdown()
 
@@ -172,9 +184,9 @@ class TestTimeoutBehavior:
                 metrics, preview, thumbnail = processor.analyze_bytes(b"", ".step")
             except Exception as e:
                 # Expected to fail, but should be a proper exception
-                assert isinstance(e, (ValueError, FileNotFoundError)), (
-                    f"Unexpected exception type: {type(e)}"
-                )
+                assert isinstance(
+                    e, ValueError | FileNotFoundError
+                ), f"Unexpected exception type: {type(e)}"
 
             # The important thing is it doesn't crash the processor
         finally:
@@ -300,8 +312,8 @@ class TestMemoryManagement:
                 results.append(metrics)
 
             # All should succeed despite worker recycling
-            assert all(r is not None for r in results), (
-                "Worker recycling caused failures"
-            )
+            assert all(
+                r is not None for r in results
+            ), "Worker recycling caused failures"
         finally:
             processor.shutdown()

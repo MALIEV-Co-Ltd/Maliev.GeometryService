@@ -56,20 +56,20 @@ class DfmIssue:
 class HoleFeature:
     """A detected hole (cylindrical void) in the mesh."""
 
-    center: list[float]        # [x, y, z] hole centre in mm
-    axis: list[float]          # unit vector along hole axis
+    center: list[float]  # [x, y, z] hole centre in mm
+    axis: list[float]  # unit vector along hole axis
     diameter_mm: float
     depth_mm: float
-    face_indices: list[int]    # mesh faces forming the cylinder wall
+    face_indices: list[int]  # mesh faces forming the cylinder wall
 
 
 @dataclass
 class InternalRadiusFeature:
     """A concave edge region with a measurable fillet / corner radius."""
 
-    radius_mm: float           # measured or absent (0.0 = sharp corner)
-    centroid: list[float]      # [x, y, z]
-    depth_mm: float            # depth of the containing cavity (for ratio check)
+    radius_mm: float  # measured or absent (0.0 = sharp corner)
+    centroid: list[float]  # [x, y, z]
+    depth_mm: float  # depth of the containing cavity (for ratio check)
     face_indices: list[int]
 
 
@@ -92,10 +92,10 @@ class AxisSymmetryReport:
     """Result of testing whether a mesh is a surface of revolution."""
 
     is_turnable: bool
-    primary_axis: str | None          # "X", "Y", or "Z"
-    axis_vector: list[float]          # unit vector
+    primary_axis: str | None  # "X", "Y", or "Z"
+    axis_vector: list[float]  # unit vector
     length_diameter_ratio: float | None
-    symmetry_deviation: float         # 0 = perfect, >0 = deviation from round
+    symmetry_deviation: float  # 0 = perfect, >0 = deviation from round
 
 
 @dataclass
@@ -113,7 +113,7 @@ class GrooveFeature:
 class ToolAccessReport:
     """Result of 3/4/5-axis accessibility analysis."""
 
-    minimum_axes: int              # 3, 4, or 5
+    minimum_axes: int  # 3, 4, or 5
     inaccessible_face_count: int
     inaccessible_face_indices: list[int]
-    details: str                   # human-readable summary
+    details: str  # human-readable summary

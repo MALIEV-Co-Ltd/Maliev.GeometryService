@@ -6,9 +6,12 @@ a submit() method returning concurrent.futures.Future.
 """
 
 import asyncio
+
 import pytest
 
 from src.core.geometry import GeometryProcessor
+
+pytestmark = pytest.mark.slow
 
 
 def simple_task() -> dict:
@@ -33,9 +36,9 @@ class TestExecutorIntegration:
         """Verify executor has submit() method required by run_in_executor."""
         processor = GeometryProcessor(enable_diagnostics=False)
 
-        assert hasattr(processor.executor, "submit"), (
-            "Executor must have submit() method"
-        )
+        assert hasattr(
+            processor.executor, "submit"
+        ), "Executor must have submit() method"
         assert callable(processor.executor.submit), "submit must be callable"
 
         processor.shutdown()
@@ -44,9 +47,9 @@ class TestExecutorIntegration:
         """Verify DFM executor has submit() method required by run_in_executor."""
         processor = GeometryProcessor(enable_diagnostics=False)
 
-        assert hasattr(processor.dfm_executor, "submit"), (
-            "DFM executor must have submit() method"
-        )
+        assert hasattr(
+            processor.dfm_executor, "submit"
+        ), "DFM executor must have submit() method"
         assert callable(processor.dfm_executor.submit), "submit must be callable"
 
         processor.shutdown()

@@ -7,6 +7,7 @@ from src.core import observability as obs_module
 def _reset_observability():
     obs_module._is_configured = False
     from opentelemetry.sdk._logs import LoggingHandler
+
     root = logging.getLogger()
     root.handlers = [h for h in root.handlers if not isinstance(h, LoggingHandler)]
 
@@ -19,12 +20,22 @@ def test_root_logger_level_set_to_info_when_otlp_configured(monkeypatch):
     """
     _reset_observability()
 
-    monkeypatch.setattr(obs_module.settings, "OTEL_EXPORTER_OTLP_ENDPOINT", "http://localhost:4317")
+    monkeypatch.setattr(
+        obs_module.settings, "OTEL_EXPORTER_OTLP_ENDPOINT", "http://localhost:4317"
+    )
     monkeypatch.setattr(obs_module.settings, "SERVICE_NAME", "test-service")
 
-    with mock.patch("opentelemetry.exporter.otlp.proto.grpc.trace_exporter.OTLPSpanExporter"), \
-         mock.patch("opentelemetry.exporter.otlp.proto.grpc.metric_exporter.OTLPMetricExporter"), \
-         mock.patch("opentelemetry.exporter.otlp.proto.grpc._log_exporter.OTLPLogExporter"):
+    with (
+        mock.patch(
+            "opentelemetry.exporter.otlp.proto.grpc.trace_exporter.OTLPSpanExporter"
+        ),
+        mock.patch(
+            "opentelemetry.exporter.otlp.proto.grpc.metric_exporter.OTLPMetricExporter"
+        ),
+        mock.patch(
+            "opentelemetry.exporter.otlp.proto.grpc._log_exporter.OTLPLogExporter"
+        ),
+    ):
         obs_module.setup_observability()
 
     root_logger = logging.getLogger()

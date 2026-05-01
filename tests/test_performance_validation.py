@@ -8,17 +8,19 @@ Tests verify:
 - Stage 5 optimizations (process-specific checks, caching, adaptive tessellation)
 """
 
-import base64
-import pytest
 import time
 from pathlib import Path
 
-from src.core.geometry import (
+import pytest
+
+pytestmark = pytest.mark.slow
+
+from src.core.geometry import (  # noqa: E402
     _analyze_single_body,
-    _quick_quality_check,
     _analyze_single_process,
+    _quick_quality_check,
 )
-from src.core.geometry_optimizations import get_cache_key
+from src.core.geometry_optimizations import get_cache_key  # noqa: E402
 
 
 @pytest.fixture
@@ -60,7 +62,7 @@ class TestPerformanceTargets:
         print(f"\nQuality check completed in {duration:.2f}s for simple file")
 
         assert duration < 5.0, f"Quality check too slow: {duration:.2f}s (target: <5s)"
-        assert result["is_manifold"] == True
+        assert result["is_manifold"] is True
         assert result["face_count"] > 0
 
     @pytest.mark.anyio
@@ -76,7 +78,7 @@ class TestPerformanceTargets:
         stl_bytes = stl_file.read_bytes()
 
         start_time = time.time()
-        result = _quick_quality_check(stl_bytes)
+        _quick_quality_check(stl_bytes)
         duration = time.time() - start_time
 
         print(f"\nQuality check completed in {duration:.2f}s for complex file")
@@ -94,9 +96,9 @@ class TestPerformanceTargets:
 
         print(f"\nFDM analysis completed in {duration:.2f}s")
 
-        assert duration < 15.0, (
-            f"Process analysis too slow: {duration:.2f}s (target: <15s)"
-        )
+        assert (
+            duration < 15.0
+        ), f"Process analysis too slow: {duration:.2f}s (target: <15s)"
         assert result["reportType"] == "FDM"
         assert (
             len(result["issues"]) >= 0
@@ -140,14 +142,14 @@ class TestQualityAccuracy:
 
         # Both should agree on manifold status
         if old_manifold is not None:
-            assert old_manifold == new_manifold, (
-                f"Manifold detection mismatch: old={old_manifold}, new={new_manifold}"
-            )
+            assert (
+                old_manifold == new_manifold
+            ), f"Manifold detection mismatch: old={old_manifold}, new={new_manifold}"
         else:
-            # If old approach doesn't have manifold status, new approach should still work
-            assert new_manifold is not None, (
-                "New approach should detect manifold status"
-            )
+            # If old approach doesn't have manifold status, new approach should still work  # noqa: E501
+            assert (
+                new_manifold is not None
+            ), "New approach should detect manifold status"
 
     @pytest.mark.anyio
     async def test_volume_calculation_accuracy(self, sample_stl_file):
@@ -168,9 +170,9 @@ class TestQualityAccuracy:
 
         # Both should have similar volume calculations
         if old_volume is not None:
-            assert abs(old_volume - new_volume) < 1.0, (
-                f"Volume calculation mismatch: old={old_volume}, new={new_volume}"
-            )
+            assert (
+                abs(old_volume - new_volume) < 1.0
+            ), f"Volume calculation mismatch: old={old_volume}, new={new_volume}"
         else:
             # If old approach doesn't have volume, new approach should still work
             assert new_volume > 0, "New approach should calculate volume"
@@ -194,9 +196,9 @@ class TestQualityAccuracy:
 
         # Both should have same face count
         if old_faces is not None:
-            assert old_faces == new_faces, (
-                f"Face count mismatch: old={old_faces}, new={new_faces}"
-            )
+            assert (
+                old_faces == new_faces
+            ), f"Face count mismatch: old={old_faces}, new={new_faces}"
         else:
             # If old approach doesn't have face count, new approach should still work
             assert new_faces > 0, "New approach should count faces"
@@ -220,16 +222,16 @@ class TestQualityAccuracy:
 
         # New approach should always have bounding box
         assert new_bbox is not None, "New approach should calculate bounding box"
-        assert new_bbox["x"] > 0 and new_bbox["y"] > 0 and new_bbox["z"] > 0, (
-            "Bounding box should have positive dimensions"
-        )
+        assert (
+            new_bbox["x"] > 0 and new_bbox["y"] > 0 and new_bbox["z"] > 0
+        ), "Bounding box should have positive dimensions"
 
         # If old approach has bounding box, they should match
         if old_bbox is not None:
             for dim in ["x", "y", "z"]:
-                assert abs(old_bbox[dim] - new_bbox[dim]) < 0.1, (
-                    f"Bounding box {dim} mismatch: old={old_bbox[dim]}, new={new_bbox[dim]}"
-                )
+                assert (
+                    abs(old_bbox[dim] - new_bbox[dim]) < 0.1
+                ), f"Bounding box {dim} mismatch: old={old_bbox[dim]}, new={new_bbox[dim]}"  # noqa: E501
 
 
 class TestDfmIssueAccuracy:
@@ -258,9 +260,9 @@ class TestDfmIssueAccuracy:
 
         # Should have same or similar number of issues
         # Allow small difference due to algorithmic changes
-        assert abs(len(old_thin_walls) - len(new_thin_walls)) <= 1, (
-            f"Thin wall detection count differs significantly: old={len(old_thin_walls)}, new={len(new_thin_walls)}"
-        )
+        assert (
+            abs(len(old_thin_walls) - len(new_thin_walls)) <= 1
+        ), f"Thin wall detection count differs significantly: old={len(old_thin_walls)}, new={len(new_thin_walls)}"  # noqa: E501
 
     @pytest.mark.anyio
     async def test_fdm_overhang_detection_accuracy(self, sample_stl_file):
@@ -284,9 +286,9 @@ class TestDfmIssueAccuracy:
         print(f"New approach: {len(new_overhangs)} overhang issues")
 
         # Should have same or similar number
-        assert abs(len(old_overhangs) - len(new_overhangs)) <= 1, (
-            f"Overhang detection count differs significantly: old={len(old_overhangs)}, new={len(new_overhangs)}"
-        )
+        assert (
+            abs(len(old_overhangs) - len(new_overhangs)) <= 1
+        ), f"Overhang detection count differs significantly: old={len(old_overhangs)}, new={len(new_overhangs)}"  # noqa: E501
 
     @pytest.mark.anyio
     async def test_cnc_internal_radii_detection_accuracy(self, sample_step_file):
@@ -322,9 +324,9 @@ class TestDfmIssueAccuracy:
         print(f"New approach: {len(new_radii)} internal radius issues")
 
         # Should have same or similar number
-        assert abs(len(old_radii) - len(new_radii)) <= 2, (
-            f"Internal radius detection count differs: old={len(old_radii)}, new={len(new_radii)}"
-        )
+        assert (
+            abs(len(old_radii) - len(new_radii)) <= 2
+        ), f"Internal radius detection count differs: old={len(old_radii)}, new={len(new_radii)}"  # noqa: E501
 
 
 class TestProductionFilePerformance:
@@ -353,10 +355,10 @@ class TestProductionFilePerformance:
         print(f"  Faces: {result['face_count']}")
         print(f"  Complexity: {result['complexity']}")
 
-        assert duration < 5.0, (
-            f"Production file quality check too slow: {duration:.2f}s"
-        )
-        assert result["is_manifold"] == True
+        assert (
+            duration < 5.0
+        ), f"Production file quality check too slow: {duration:.2f}s"
+        assert result["is_manifold"] is True
 
     @pytest.mark.anyio
     async def test_production_file_process_analysis_speed(self, sample_step_file):
@@ -381,9 +383,9 @@ class TestProductionFilePerformance:
         print(f"\nProduction file FDM analysis: {fdm_duration:.2f}s")
         print(f"  Issues: {len(fdm_result['issues'])}")
 
-        assert fdm_duration < 15.0, (
-            f"Production file FDM analysis too slow: {fdm_duration:.2f}s"
-        )
+        assert (
+            fdm_duration < 15.0
+        ), f"Production file FDM analysis too slow: {fdm_duration:.2f}s"
 
         # Test CNC (might take longer, but should still complete)
         start_time = time.time()
@@ -393,9 +395,9 @@ class TestProductionFilePerformance:
         print(f"Production file CNC analysis: {cnc_duration:.2f}s")
         print(f"  Issues: {len(cnc_result['issues'])}")
 
-        assert cnc_duration < 30.0, (
-            f"Production file CNC analysis too slow: {cnc_duration:.2f}s"
-        )
+        assert (
+            cnc_duration < 30.0
+        ), f"Production file CNC analysis too slow: {cnc_duration:.2f}s"
 
 
 class TestEndToEndWorkflow:
@@ -405,16 +407,15 @@ class TestEndToEndWorkflow:
     async def test_complete_two_phase_workflow(self, sample_stl_file, sample_step_file):
         """Test the complete two-phase workflow as used in production."""
         stl_bytes = sample_stl_file.read_bytes()
-        upload_id = "test-e2e"
 
         # Phase 1: Quality check (fast, shows preview)
         start_time = time.time()
         quality_result = _quick_quality_check(stl_bytes)
         quality_duration = time.time() - start_time
 
-        assert quality_result["is_manifold"] == True
+        assert quality_result["is_manifold"] is True
         assert quality_result["face_count"] > 0
-        assert quality_result["can_preview"] == True
+        assert quality_result["can_preview"] is True
 
         print(f"\n✓ Phase 1 (Quality Check): {quality_duration:.2f}s")
         print(f"  File is valid: {quality_result['face_count']} faces")
@@ -454,7 +455,7 @@ class TestEndToEndWorkflow:
         assert total_time < 60.0, f"Two-phase workflow too slow: {total_time:.2f}s"
 
         print(
-            f"\n✓ All checks passed! Two-phase workflow is {90.0 / max(total_time, 1):.1f}x faster than old approach"
+            f"\n✓ All checks passed! Two-phase workflow is {90.0 / max(total_time, 1):.1f}x faster than old approach"  # noqa: E501
         )
 
 
@@ -464,8 +465,8 @@ class TestResourceUsage:
     @pytest.mark.anyio
     async def test_memory_efficiency_single_process(self, sample_stl_file):
         """Test that single process uses less memory than all processes."""
-        import tracemalloc
         import gc
+        import tracemalloc
 
         stl_bytes = sample_stl_file.read_bytes()
 
@@ -478,14 +479,14 @@ class TestResourceUsage:
         current, peak = tracemalloc.get_traced_memory()
         tracemalloc.stop()
 
-        print(f"\nSingle process (FDM) memory usage:")
+        print("\nSingle process (FDM) memory usage:")
         print(f"  Current: {current / 1024:.1f} KB")
         print(f"  Peak: {peak / 1024:.1f} KB")
 
         # Peak memory should be reasonable (<100MB for simple file)
-        assert peak < 100 * 1024 * 1024, (
-            f"Memory usage too high: {peak / 1024 / 1024:.1f} MB"
-        )
+        assert (
+            peak < 100 * 1024 * 1024
+        ), f"Memory usage too high: {peak / 1024 / 1024:.1f} MB"
 
     @pytest.mark.anyio
     async def test_cleanup_removes_cached_data(self, sample_stl_file):
@@ -518,7 +519,7 @@ class TestResourceUsage:
 
 
 class TestStage5Optimizations:
-    """Test Stage 5 optimizations: process-specific checks, caching, adaptive tessellation."""
+    """Test Stage 5 optimizations: process-specific checks, caching, adaptive tessellation."""  # noqa: E501
 
     @pytest.mark.anyio
     async def test_powder_bed_skips_overhang_check(self, sample_stl_file):
@@ -539,7 +540,7 @@ class TestStage5Optimizations:
         print(f"SLS total issues: {len(sls_result.get('issues', []))}")
 
         # SLS should not have overhang checks (they're skipped)
-        # However, we can't assert len == 0 because the file might legitimately have no overhangs
+        # However, we can't assert len == 0 because the file might legitimately have no overhangs  # noqa: E501
         # Instead, verify the analysis completes without error
         assert sls_result.get("reportType") == "SLS"
         assert "error_type" not in sls_result
@@ -597,9 +598,9 @@ class TestStage5Optimizations:
     async def test_result_caching_works(self, sample_stl_file):
         """Test that result caching works correctly."""
         from src.core.geometry_optimizations import (
-            get_cached_result,
             cache_result,
             clear_cache,
+            get_cached_result,
         )
 
         stl_bytes = sample_stl_file.read_bytes()
@@ -621,7 +622,7 @@ class TestStage5Optimizations:
         assert cached2 is not None, "Second call should be cache hit"
         assert cached2["test"] == "data", "Cached result should match"
 
-        print(f"\n✓ Caching works correctly")
+        print("\n✓ Caching works correctly")
 
     @pytest.mark.anyio
     async def test_adaptive_tessellation_tolerance(self):
@@ -630,23 +631,23 @@ class TestStage5Optimizations:
 
         # CNC processes should get high precision
         cnc_tolerance = get_tessellation_tolerance("CNC_MILL", file_size_mb=1.0)
-        assert cnc_tolerance == 0.02, (
-            f"CNC should use 0.02 tolerance, got {cnc_tolerance}"
-        )
+        assert (
+            cnc_tolerance == 0.02
+        ), f"CNC should use 0.02 tolerance, got {cnc_tolerance}"
 
         # Printing processes with small file should use medium precision
         fdm_small_tolerance = get_tessellation_tolerance("FDM", file_size_mb=0.5)
-        assert fdm_small_tolerance == 0.05, (
-            f"Small FDM file should use 0.05 tolerance, got {fdm_small_tolerance}"
-        )
+        assert (
+            fdm_small_tolerance == 0.05
+        ), f"Small FDM file should use 0.05 tolerance, got {fdm_small_tolerance}"
 
         # Printing processes with large file should use coarse tolerance
         fdm_large_tolerance = get_tessellation_tolerance("FDM", file_size_mb=15.0)
-        assert fdm_large_tolerance == 0.2, (
-            f"Large FDM file should use 0.2 tolerance, got {fdm_large_tolerance}"
-        )
+        assert (
+            fdm_large_tolerance == 0.2
+        ), f"Large FDM file should use 0.2 tolerance, got {fdm_large_tolerance}"
 
-        print(f"\n✓ Adaptive tessellation tolerances:")
+        print("\n✓ Adaptive tessellation tolerances:")
         print(f"  CNC: {cnc_tolerance}mm")
         print(f"  FDM (small): {fdm_small_tolerance}mm")
         print(f"  FDM (large): {fdm_large_tolerance}mm")
@@ -673,7 +674,7 @@ class TestStage5Optimizations:
 
         assert key_fdm != key_sla, "Different processes should have different keys"
 
-        print(f"\n✓ Cache key uniqueness verified")
+        print("\n✓ Cache key uniqueness verified")
         print(f"  File1+FDM: {key1a}")
         print(f"  File2+FDM: {key2}")
         print(f"  File1+SLA: {key_sla}")
@@ -681,7 +682,7 @@ class TestStage5Optimizations:
     @pytest.mark.anyio
     async def test_cache_lru_eviction(self):
         """Test that cache evicts oldest entries when full."""
-        from src.core.geometry_optimizations import cache_result, _cache
+        from src.core.geometry_optimizations import _cache, cache_result
 
         # Store initial cache size
         initial_size = len(_cache)
@@ -697,12 +698,12 @@ class TestStage5Optimizations:
         # Cache should have grown but not exceed ~100 + initial_size
         # The LRU eviction keeps cache at ~100 entries
         final_size = len(_cache)
-        assert final_size <= 100 + initial_size, (
-            f"Cache should be <= {100 + initial_size} entries after LRU eviction, got {final_size}"
-        )
+        assert (
+            final_size <= 100 + initial_size
+        ), f"Cache should be <= {100 + initial_size} entries after LRU eviction, got {final_size}"  # noqa: E501
 
         print(
-            f"\n✓ LRU eviction works correctly (initial: {initial_size}, final: {final_size})"
+            f"\n✓ LRU eviction works correctly (initial: {initial_size}, final: {final_size})"  # noqa: E501
         )
 
     @pytest.mark.anyio
@@ -720,10 +721,10 @@ class TestStage5Optimizations:
         # Verify entries were added (import fresh reference)
         from src.core.geometry_optimizations import _cache
 
-        entries_before = len([k for k in _cache.keys() if k in test_entries])
-        assert entries_before == 10, (
-            f"Should have added 10 test entries, found {entries_before}"
-        )
+        entries_before = len([k for k in _cache if k in test_entries])
+        assert (
+            entries_before == 10
+        ), f"Should have added 10 test entries, found {entries_before}"
 
         # Clear cache
         clear_cache()
@@ -731,11 +732,11 @@ class TestStage5Optimizations:
         # Verify cache is now empty (re-import to get new reference)
         from src.core.geometry_optimizations import _cache as cache_after
 
-        assert len(cache_after) == 0, (
-            f"Cache should be empty after clear, got {len(cache_after)} entries"
-        )
+        assert (
+            len(cache_after) == 0
+        ), f"Cache should be empty after clear, got {len(cache_after)} entries"
 
-        print(f"\n✓ Clear cache works correctly")
+        print("\n✓ Clear cache works correctly")
 
 
 if __name__ == "__main__":

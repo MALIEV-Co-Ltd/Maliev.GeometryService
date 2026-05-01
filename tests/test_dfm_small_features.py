@@ -9,8 +9,7 @@ import io
 import pytest
 import trimesh
 
-from src.core.geometry import GeometryProcessor, _analyze_single_process
-
+from src.core.geometry import _analyze_single_process
 
 ASSETS_DIR = pytest.importorskip("pathlib").Path(__file__).parent / "assets"
 
@@ -46,7 +45,7 @@ class TestSmallFeatureDetection:
         file_path = ASSETS_DIR / "emboss-deboss-1mm-binary.stl"
 
         if not file_path.exists():
-            pytest.skip(f"File not found")
+            pytest.skip("File not found")
 
         stl_bytes = file_path.read_bytes()
 

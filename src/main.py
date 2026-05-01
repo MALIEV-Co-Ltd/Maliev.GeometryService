@@ -8,7 +8,7 @@ from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager, suppress
 
 # Add src to path for imports
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))  # noqa: PTH118, PTH120
 
 from fastapi import APIRouter, FastAPI, responses
 from fastapi.responses import JSONResponse
@@ -18,6 +18,7 @@ from src.consumers.upload_consumer import UploadConsumer
 from src.core.config import settings
 from src.core.geometry import GeometryProcessor
 from src.core.observability import setup_observability
+from src.infrastructure.event_publisher import publish_event
 from src.infrastructure.iam_registration import register_iam_permissions
 from src.infrastructure.storage import HttpDownloadService
 
@@ -59,7 +60,7 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
             logger.info("Successfully registered IAM permissions")
         else:
             logger.warning(
-                "Failed to register IAM permissions - service may not have proper permissions"
+                "Failed to register IAM permissions - service may not have proper permissions"  # noqa: E501
             )
     except Exception as e:
         logger.warning(f"Error registering IAM permissions: {e}")
@@ -239,6 +240,10 @@ class _BoundedFileCache:
         self._timestamps[key] = time.monotonic()
         self._total_bytes += entry_bytes
 
+    def get(self, key: str, default: dict | None = None) -> dict | None:
+        self._evict_expired()
+        return self._data.get(key, default)
+
     def __delitem__(self, key: str) -> None:
         if key in self._data:
             self._remove(key)
@@ -313,6 +318,9 @@ async def quality_check(upload_id: str, file_data: dict) -> JSONResponse:
             "stl_bytes": stl_bytes,
             "cad_bytes": cad_bytes,
             "cad_extension": cad_extension,
+            "body_count": quality_result.get("body_count", 1),
+            "non_manifold_reason": quality_result.get("non_manifold_reason"),
+            "non_manifold_face_count": quality_result.get("non_manifold_face_count"),
         }
 
         logger.info(
@@ -371,7 +379,7 @@ async def analyze_for_process(
 
     Returns:
         Process-specific DFM report with issues found for the selected manufacturing method
-    """
+    """  # noqa: E501
     from datetime import datetime, timezone
     from uuid import uuid4
 
@@ -390,7 +398,6 @@ async def analyze_for_process(
         DfmAnalysisReadyPayload,
         MessageTypeEnum,
     )
-    from src.infrastructure.event_publisher import publish_event
 
     storage_path: str | None = None
     download_url: str | None = None
@@ -408,7 +415,7 @@ async def analyze_for_process(
                     "upload_id": upload_id,
                     "status": "error",
                     "error_type": "NotFound",
-                    "message": "Upload not found. Please provide storage_path or download_url in request body.",
+                    "message": "Upload not found. Please provide storage_path or download_url in request body.",  # noqa: E501
                 },
                 status_code=404,
             )
@@ -421,7 +428,7 @@ async def analyze_for_process(
                         "upload_id": upload_id,
                         "status": "error",
                         "error_type": "BadRequest",
-                        "message": "download_url is required when upload_id not in cache",
+                        "message": "download_url is required when upload_id not in cache",  # noqa: E501
                     },
                     status_code=400,
                 )
@@ -433,21 +440,84 @@ async def analyze_for_process(
                 data = file_stream.read()
                 file_stream.close()
 
-                # Run quality check to populate cache
-                quality_result = _quick_quality_check(data, None, None)
+                # Determine file extension from storage_path (preferred) or URL.
+                from pathlib import Path as _Path
+                from urllib.parse import urlparse as _urlparse
 
-                # Store file data for future use
-                _file_analysis_cache[upload_id] = {
-                    "stl_bytes": data,
-                    "cad_bytes": None,
-                    "cad_extension": None,
-                }
+                _ext_source = storage_path or _urlparse(download_url).path
+                _ext = _Path(_ext_source).suffix.lower().lstrip(".")
+
+                if _ext in ("step", "stp", "igs", "iges"):
+                    # Re-tessellate with cascadio — same path as the upload consumer.
+                    # This is the only way to get real STL bytes from a CAD file.
+                    from src.core.geometry import _compute_metrics_worker as _cmw
+
+                    _loop = asyncio.get_event_loop()
+                    _metrics = await _loop.run_in_executor(None, _cmw, data, _ext)
+                    _stl = _metrics.get("mesh_stl_bytes") or b""
+                    if not _stl:
+                        return JSONResponse(
+                            content={
+                                "upload_id": upload_id,
+                                "status": "error",
+                                "error_type": "TessellationFailed",
+                                "message": "Could not tessellate CAD file for DFM analysis.",  # noqa: E501
+                            },
+                            status_code=422,
+                        )
+                    _cache_entry: dict = {
+                        "stl_bytes": _stl,
+                        "stl_bytes_dict": _metrics.get("mesh_stl_bytes_dict"),
+                        "cad_bytes": data,
+                        "cad_extension": _ext,
+                        "cad_glb_bytes": _metrics.get("cad_glb_bytes"),
+                        "body_count": _metrics.get("body_count", 1),
+                        "non_manifold_reason": _metrics.get("non_manifold_reason"),
+                        "non_manifold_face_count": _metrics.get(
+                            "non_manifold_face_count"
+                        ),
+                    }
+                else:
+                    # STL / OBJ / 3MF / etc. — bytes are already mesh data, but
+                    # still need Phase 1 metrics to recover disconnected bodies.
+                    from src.core.geometry import _compute_metrics_worker as _cmw
+
+                    _loop = asyncio.get_event_loop()
+                    _metrics = await _loop.run_in_executor(None, _cmw, data, _ext)
+                    # Use tessellated STL bytes from metrics when available (e.g. 3MF,
+                    # OBJ) so DFM analysis always gets valid STL — not raw format bytes.
+                    _stl_for_cache = _metrics.get("mesh_stl_bytes") or (
+                        data if _ext == "stl" else b""
+                    )
+                    _cache_entry = {
+                        "stl_bytes": _stl_for_cache,
+                        "stl_bytes_dict": _metrics.get("mesh_stl_bytes_dict"),
+                        "cad_bytes": None,
+                        "cad_extension": None,
+                        "cad_glb_bytes": _metrics.get("cad_glb_bytes"),
+                        "body_count": _metrics.get("body_count", 1),
+                        "non_manifold_reason": _metrics.get("non_manifold_reason"),
+                        "non_manifold_face_count": _metrics.get(
+                            "non_manifold_face_count"
+                        ),
+                    }
+
+                _file_analysis_cache[upload_id] = _cache_entry
+
+                # Run quality check for logging; real work already done above.
+                quality_result = _quick_quality_check(
+                    _cache_entry["stl_bytes"],
+                    _cache_entry.get("cad_bytes"),
+                    _cache_entry.get("cad_extension"),
+                )
 
                 logger.info(
                     f"Cache-miss recovery: downloaded and cached file for {upload_id}",
                     extra={
                         "upload_id": upload_id,
+                        "extension": _ext,
                         "face_count": quality_result.get("face_count"),
+                        "body_count": _cache_entry.get("body_count"),
                         "file_size_bytes": len(data),
                     },
                 )
@@ -459,7 +529,7 @@ async def analyze_for_process(
 
             if isinstance(e, PermanentDownloadError):
                 logger.warning(
-                    f"Permanent download failure for {upload_id} — file is gone from storage: {e}",
+                    f"Permanent download failure for {upload_id} — file is gone from storage: {e}",  # noqa: E501
                     extra={"upload_id": upload_id},
                 )
                 return JSONResponse(
@@ -467,7 +537,7 @@ async def analyze_for_process(
                         "upload_id": upload_id,
                         "status": "file_missing",
                         "error_type": "FileMissing",
-                        "message": "The file is no longer in storage. Please re-upload.",
+                        "message": "The file is no longer in storage. Please re-upload.",  # noqa: E501
                     },
                     status_code=410,
                 )
@@ -527,7 +597,7 @@ async def analyze_for_process(
             # Check if analysis failed
             if "error_type" in result:
                 logger.error(
-                    f"Process analysis failed for {upload_id}/{process_code}: {result.get('message')}",
+                    f"Process analysis failed for {upload_id}/{process_code}: {result.get('message')}",  # noqa: E501
                     extra={
                         "upload_id": upload_id,
                         "process_code": process_code,
@@ -571,7 +641,9 @@ async def analyze_for_process(
         try:
             import os
 
-            glb_path = f"{os.path.splitext(storage_path)[0]}.glb" if storage_path else ""
+            glb_path = (
+                f"{os.path.splitext(storage_path)[0]}.glb" if storage_path else ""  # noqa: PTH122
+            )
 
             # Build reports dict for overlay generation
             reports: dict[str, dict] = {process_code: result}
@@ -587,7 +659,9 @@ async def analyze_for_process(
                     glb_path=glb_path,
                     reports=reports,
                     storage_path=storage_path or "",
-                    storage_service=HttpDownloadService(),
+                    upload_service_url=settings.UPLOAD_SERVICE_URL,
+                    token_provider=consumer._token_provider,
+                    http_client=consumer._http_client,
                     upload_id=upload_id,
                     stl_bytes=cached_stl_bytes,
                 ),
@@ -595,7 +669,7 @@ async def analyze_for_process(
             )
         except asyncio.TimeoutError:
             logger.warning(
-                f"Overlay generation timed out after 120 s for {upload_id}/{process_code}; "
+                f"Overlay generation timed out after 120 s for {upload_id}/{process_code}; "  # noqa: E501
                 "returning analysis result without overlays",
                 extra={"upload_id": upload_id, "process_code": process_code},
             )
@@ -615,14 +689,14 @@ async def analyze_for_process(
             sla_report = None
             cnc_report = None
 
-            if process_code == "FDM":
+            if process_code in ("FDM", "SLS", "MJF", "MJ", "BJ", "DMLS"):
                 fdm_report = FdmDfmReport.model_validate(result)
-            elif process_code == "SLA":
+            elif process_code in ("SLA", "SLA_DLP", "DLP"):
                 sla_report = SlaDfmReport.model_validate(result)
             elif process_code in ("CNC", "CNC_MILL", "CNC_TURN"):
                 cnc_report = CncDfmReport.model_validate(result)
 
-            # Use the file_id portion of upload_id if it's a full UUID, otherwise generate one
+            # Use the file_id portion of upload_id if it's a full UUID, otherwise generate one  # noqa: E501
             try:
                 file_id = uuid4()
                 # Try to parse upload_id as UUID first
@@ -661,7 +735,9 @@ async def analyze_for_process(
                         cncReport=cnc_report,
                         analyzedAt=_now,
                         overlayPaths=overlay_paths,
-                        bodyCount=None,  # Not tracked in on-demand endpoint
+                        bodyCount=file_data.get("body_count"),
+                        nonManifoldReason=file_data.get("non_manifold_reason"),
+                        nonManifoldFaceCount=file_data.get("non_manifold_face_count"),
                     ),
                 ),
             )
@@ -672,7 +748,7 @@ async def analyze_for_process(
             )
         except Exception as e:
             logger.warning(
-                f"Failed to publish DfmAnalysisReadyEvent for {upload_id}/{process_code}: {e}",
+                f"Failed to publish DfmAnalysisReadyEvent for {upload_id}/{process_code}: {e}",  # noqa: E501
                 extra={"upload_id": upload_id, "process_code": process_code},
                 exc_info=True,
             )
@@ -685,12 +761,13 @@ async def analyze_for_process(
                 "dfm_report": result,
                 "overlay_paths": overlay_paths or {},
                 "cache_status": cache_status,
+                "body_count": file_data.get("body_count"),
             }
         )
 
     except asyncio.TimeoutError:
         logger.error(
-            f"Process analysis timed out after {timeout}s for {upload_id}/{process_code}",
+            f"Process analysis timed out after {timeout}s for {upload_id}/{process_code}",  # noqa: E501
             extra={
                 "upload_id": upload_id,
                 "process_code": process_code,
@@ -711,7 +788,6 @@ async def analyze_for_process(
     except Exception as e:
         logger.error(
             f"Process analysis failed for {upload_id}/{process_code}: {e}",
-
             extra={
                 "upload_id": upload_id,
                 "process_code": process_code,

@@ -11,11 +11,9 @@ import hashlib
 import json
 import time
 from collections import OrderedDict
-from functools import lru_cache
 from typing import Any
 
 from src.core.geometry import _analyze_single_process
-
 
 # ── Optimization 1: Process-Specific Analysis Helpers ────────────────
 
@@ -38,13 +36,13 @@ def should_run_check(category: str, process_code: str) -> bool:
 
     Returns:
         True if the check should run, False if it should be skipped
-    """
+    """  # noqa: E501
     # Skip CNC-only checks for printing processes
     if process_code in PRINTING_PROCESSES and category in CNC_ONLY_CHECKS:
         return False
 
     # Skip printing-only checks for CNC processes
-    if process_code in CNC_PROCESSES and category in PRINTING_ONLY_CHECKS:
+    if process_code in CNC_PROCESSES and category in PRINTING_ONLY_CHECKS:  # noqa: SIM103
         return False
 
     # Run all other checks
@@ -52,6 +50,7 @@ def should_run_check(category: str, process_code: str) -> bool:
 
 
 # ── Optimization 2: Adaptive Tessellation Quality ────────────────────
+
 
 def get_tessellation_tolerance(process_code: str, file_size_mb: float = 0) -> float:
     """Get appropriate tessellation tolerance based on process and file size.
@@ -71,10 +70,9 @@ def get_tessellation_tolerance(process_code: str, file_size_mb: float = 0) -> fl
     if process_code in PRINTING_PROCESSES:
         if file_size_mb > 10:
             return 0.2  # Very coarse for large files
-        elif file_size_mb > 1:
+        if file_size_mb > 1:
             return 0.1  # Coarse for medium files
-        else:
-            return 0.05  # Medium for small files
+        return 0.05  # Medium for small files
 
     # Default medium precision
     return 0.1
@@ -149,6 +147,9 @@ class _BoundedDfmCache:
     def __len__(self) -> int:
         return len(self._data)
 
+    def keys(self):
+        return self._data.keys()
+
     @property
     def total_bytes(self) -> int:
         return self._total_bytes
@@ -168,7 +169,7 @@ def get_cache_key(stl_bytes: bytes, process_code: str) -> str:
         Cache key string
     """
     # Hash the file bytes (first 1MB for speed)
-    file_hash = hashlib.md5(stl_bytes[:1024*1024]).hexdigest()
+    file_hash = hashlib.md5(stl_bytes[: 1024 * 1024]).hexdigest()
     return f"{file_hash[:16]}:{process_code}"
 
 
@@ -205,6 +206,7 @@ def clear_cache() -> None:
 
 # ── Optimization 4: Process-Specific Analysis with All Optimizations ───────
 
+
 def optimized_analyze_single_process(
     stl_bytes: bytes,
     process_code: str,
@@ -240,7 +242,7 @@ def optimized_analyze_single_process(
     start_time = time.time()
 
     # Calculate file size for adaptive tessellation
-    file_size_mb = len(stl_bytes) / (1024 * 1024)
+    len(stl_bytes) / (1024 * 1024)
 
     # Run the analysis (this will use optimized checks internally)
     result = _analyze_single_process(
@@ -268,7 +270,8 @@ def optimized_analyze_single_process(
 
 # ── Optimization 5: Early Termination Heuristics ──────────────────────
 
-def should_terminate_early(face_count: int, vertex_count: int, complexity: str) -> bool:
+
+def should_terminate_early(face_count: int, vertex_count: int, complexity: str) -> bool:  # noqa: ARG001
     """Determine if analysis should terminate early due to complexity.
 
     For very simple geometries, we can skip expensive analyses.
@@ -286,7 +289,7 @@ def should_terminate_early(face_count: int, vertex_count: int, complexity: str) 
         return True
 
     # Low complexity - can skip some optimizations
-    if complexity == "simple" and face_count < 1000:
+    if complexity == "simple" and face_count < 1000:  # noqa: SIM103
         return True
 
     # Normal or complex geometry - run full analysis
@@ -294,6 +297,7 @@ def should_terminate_early(face_count: int, vertex_count: int, complexity: str) 
 
 
 # ── Optimization 6: Spatial Filtering Optimization ─────────────────────
+
 
 def filter_faces_by_region(
     face_indices: list[int],
@@ -323,7 +327,7 @@ def filter_faces_by_region(
     center_z = bounding_box.get("z", 0) / 2
 
     filtered = []
-    for face_idx, centroid in zip(face_indices, centroids):
+    for face_idx, centroid in zip(face_indices, centroids, strict=False):
         if len(centroid) >= 3:
             # Check if face is within region of center
             dx = abs(centroid[0] - center_x)
@@ -338,6 +342,7 @@ def filter_faces_by_region(
 
 # ── Performance Monitoring ─────────────────────────────────────────
 
+
 class PerformanceMetrics:
     """Track performance metrics for optimization validation."""
 
@@ -349,20 +354,22 @@ class PerformanceMetrics:
 
     def record_quality_check(self, duration: float, face_count: int):
         """Record quality check performance."""
-        self.quality_checks.append({
-            "duration": duration,
-            "face_count": face_count,
-            "timestamp": time.time()
-        })
+        self.quality_checks.append(
+            {"duration": duration, "face_count": face_count, "timestamp": time.time()}
+        )
 
-    def record_process_analysis(self, duration: float, process_code: str, cache_status: str):
+    def record_process_analysis(
+        self, duration: float, process_code: str, cache_status: str
+    ):
         """Record process analysis performance."""
-        self.process_analyses.append({
-            "duration": duration,
-            "process_code": process_code,
-            "cache_status": cache_status,
-            "timestamp": time.time()
-        })
+        self.process_analyses.append(
+            {
+                "duration": duration,
+                "process_code": process_code,
+                "cache_status": cache_status,
+                "timestamp": time.time(),
+            }
+        )
 
         if cache_status == "cold":
             self.cache_misses += 1
@@ -380,11 +387,17 @@ class PerformanceMetrics:
         return {
             "total_quality_checks": total_quality,
             "total_process_analyses": total_analysis,
-            "avg_quality_check_time": sum(quality_times) / total_quality if total_quality > 0 else 0,
-            "avg_process_analysis_time": sum(analysis_times) / total_analysis if total_analysis > 0 else 0,
+            "avg_quality_check_time": sum(quality_times) / total_quality
+            if total_quality > 0
+            else 0,
+            "avg_process_analysis_time": sum(analysis_times) / total_analysis
+            if total_analysis > 0
+            else 0,
             "cache_hits": self.cache_hits,
             "cache_misses": self.cache_misses,
-            "cache_hit_rate": self.cache_hits / (self.cache_hits + self.cache_misses) if (self.cache_hits + self.cache_misses) > 0 else 0,
+            "cache_hit_rate": self.cache_hits / (self.cache_hits + self.cache_misses)
+            if (self.cache_hits + self.cache_misses) > 0
+            else 0,
         }
 
 
@@ -393,6 +406,7 @@ _perf_monitor = PerformanceMetrics()
 
 
 # ── Optimization API ───────────────────────────────────────────────
+
 
 def get_performance_summary() -> dict[str, Any]:
     """Get current performance metrics summary."""

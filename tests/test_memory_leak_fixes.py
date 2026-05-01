@@ -18,16 +18,17 @@ import time
 
 import pytest
 
-
 # ---------------------------------------------------------------------------
 # 1 & 2 — BoundedFileCache unit tests
 # ---------------------------------------------------------------------------
+
 
 class TestBoundedFileCache:
     """Unit tests for _BoundedFileCache in src/main.py."""
 
     def _make_cache(self, max_entries=5, max_bytes=1000, ttl_seconds=60):
         from src.main import _BoundedFileCache
+
         return _BoundedFileCache(
             max_entries=max_entries,
             max_bytes=max_bytes,
@@ -54,9 +55,9 @@ class TestBoundedFileCache:
         cache = self._make_cache(max_entries=100, max_bytes=100)
         for i in range(8):
             cache[f"k{i}"] = {"stl_bytes": b"x" * 30, "cad_bytes": None}
-        assert cache.total_bytes <= 100, (
-            f"total_bytes {cache.total_bytes} exceeds 100-byte cap"
-        )
+        assert (
+            cache.total_bytes <= 100
+        ), f"total_bytes {cache.total_bytes} exceeds 100-byte cap"
 
     def test_ttl_eviction_on_write(self):
         cache = self._make_cache(max_entries=10, max_bytes=10_000_000, ttl_seconds=0.05)
@@ -87,15 +88,14 @@ class TestBoundedFileCache:
     def test_update_existing_key_no_double_count(self):
         cache = self._make_cache(max_entries=10, max_bytes=10_000_000)
         cache["k"] = {"stl_bytes": b"x" * 50, "cad_bytes": None}
-        size_before = cache.total_bytes
         cache["k"] = {"stl_bytes": b"x" * 30, "cad_bytes": None}
-        assert cache.total_bytes == 30, (
-            f"After update total_bytes should be 30, got {cache.total_bytes}"
-        )
+        assert (
+            cache.total_bytes == 30
+        ), f"After update total_bytes should be 30, got {cache.total_bytes}"
 
     def test_cad_bytes_counted_in_size(self):
         cache = self._make_cache(max_entries=10, max_bytes=200, ttl_seconds=60)
-        # stl=80 + cad=80 = 160 bytes; second entry (80+0=80) pushes total to 240 → evict first
+        # stl=80 + cad=80 = 160 bytes; second entry (80+0=80) pushes total to 240 → evict first  # noqa: E501
         cache["k1"] = {"stl_bytes": b"x" * 80, "cad_bytes": b"y" * 80}
         cache["k2"] = {"stl_bytes": b"x" * 80, "cad_bytes": None}
         assert cache.total_bytes <= 200
@@ -105,11 +105,13 @@ class TestBoundedFileCache:
 # 3 — _BoundedDfmCache unit tests
 # ---------------------------------------------------------------------------
 
+
 class TestBoundedDfmCache:
     """Unit tests for _BoundedDfmCache in src/core/geometry_optimizations.py."""
 
     def _make_cache(self, max_entries=5, max_bytes=1000):
         from src.core.geometry_optimizations import _BoundedDfmCache
+
         return _BoundedDfmCache(max_entries=max_entries, max_bytes=max_bytes)
 
     def test_evicts_by_count(self):
@@ -131,14 +133,13 @@ class TestBoundedDfmCache:
 
     def test_evicts_by_bytes(self):
         # Each entry serializes to ~50 bytes; cap at 200 → at most ~4 entries
-        import json
         cache = self._make_cache(max_entries=100, max_bytes=200)
         payload = {"data": "x" * 40}  # ~50 bytes serialized
         for i in range(10):
             cache.set(f"k{i}", payload)
-        assert cache.total_bytes <= 200, (
-            f"total_bytes {cache.total_bytes} exceeds 200-byte cap"
-        )
+        assert (
+            cache.total_bytes <= 200
+        ), f"total_bytes {cache.total_bytes} exceeds 200-byte cap"
 
     def test_clear(self):
         cache = self._make_cache()
@@ -159,11 +160,13 @@ class TestBoundedDfmCache:
 # 4 — Public cache_result / get_cached_result / clear_cache API
 # ---------------------------------------------------------------------------
 
+
 class TestDfmCachePublicApi:
     """Ensure public API functions still work after replacing the backing store."""
 
     def test_cache_miss_returns_none(self):
         from src.core.geometry_optimizations import clear_cache, get_cached_result
+
         clear_cache()
         result = get_cached_result(b"fake_stl_data_that_does_not_exist", "FDM")
         assert result is None
@@ -174,6 +177,7 @@ class TestDfmCachePublicApi:
             clear_cache,
             get_cached_result,
         )
+
         clear_cache()
         stl = b"STL_BYTES" * 100
         report = {"issues": [{"type": "thin_wall"}], "process": "FDM"}
@@ -187,6 +191,7 @@ class TestDfmCachePublicApi:
             clear_cache,
             get_cached_result,
         )
+
         clear_cache()
         stl = b"stl_bytes_shared"
         cache_result(stl, "FDM", {"process": "FDM"})
@@ -200,12 +205,14 @@ class TestDfmCachePublicApi:
 # 5 — DiagnosticExecutor max_tasks_per_child forwarding
 # ---------------------------------------------------------------------------
 
+
 class TestDiagnosticExecutorMaxTasksPerChild:
     """Verify DiagnosticExecutor accepts max_tasks_per_child without error."""
 
     def test_accepts_max_tasks_per_child_param(self):
         """DiagnosticExecutor must accept max_tasks_per_child without TypeError."""
         from src.core.worker_wrapper import DiagnosticExecutor
+
         # On Python <3.11 the value is silently ignored (warning is logged);
         # on Python ≥3.11 it is forwarded to ProcessPoolExecutor.  Either way
         # construction must not raise.
@@ -218,6 +225,7 @@ class TestDiagnosticExecutorMaxTasksPerChild:
 
     def test_none_max_tasks_per_child_accepted(self):
         from src.core.worker_wrapper import DiagnosticExecutor
+
         ex = DiagnosticExecutor(
             max_workers=1,
             mp_context=multiprocessing.get_context("spawn"),
@@ -228,6 +236,7 @@ class TestDiagnosticExecutorMaxTasksPerChild:
     def test_max_tasks_per_child_stored(self):
         """DiagnosticExecutor stores max_tasks_per_child for introspection."""
         from src.core.worker_wrapper import DiagnosticExecutor
+
         ex = DiagnosticExecutor(
             max_workers=1,
             mp_context=multiprocessing.get_context("spawn"),
@@ -257,14 +266,15 @@ class TestDiagnosticExecutorMaxTasksPerChild:
         finally:
             ex.shutdown(wait=False)
 
-        assert len(pids) >= 2, (
-            f"Expected worker PIDs to recycle after 2 jobs, got: {pids}"
-        )
+        assert (
+            len(pids) >= 2
+        ), f"Expected worker PIDs to recycle after 2 jobs, got: {pids}"
 
 
 # ---------------------------------------------------------------------------
 # 6 — GeometryProcessor rendering executor uses max_tasks_per_child=5
 # ---------------------------------------------------------------------------
+
 
 class TestGeometryProcessorExecutorConfig:
     """Check GeometryProcessor wires worker recycling on the rendering executor."""
@@ -308,6 +318,7 @@ class TestGeometryProcessorExecutorConfig:
 # 7 — FastAPI endpoints cache size stays bounded under load
 # ---------------------------------------------------------------------------
 
+
 class TestQualityCheckCacheBounded:
     """The /quality-check endpoint must not grow _file_analysis_cache unboundedly."""
 
@@ -316,6 +327,7 @@ class TestQualityCheckCacheBounded:
         """Clear the module-level cache before and after each test."""
         import src.main as main_module
         from src.main import _BoundedFileCache
+
         original = main_module._file_analysis_cache
         main_module._file_analysis_cache = _BoundedFileCache(
             max_entries=5, max_bytes=50_000, ttl_seconds=60
@@ -344,6 +356,6 @@ class TestQualityCheckCacheBounded:
                 "cad_bytes": None,
                 "cad_extension": None,
             }
-        assert cache.total_bytes <= 50_000, (
-            f"total_bytes {cache.total_bytes} exceeds 50 000-byte cap"
-        )
+        assert (
+            cache.total_bytes <= 50_000
+        ), f"total_bytes {cache.total_bytes} exceeds 50 000-byte cap"

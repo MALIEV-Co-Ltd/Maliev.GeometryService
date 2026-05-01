@@ -95,6 +95,8 @@ import numpy as np  # noqa: E402
 import trimesh  # noqa: E402
 from pydantic import BaseModel, ConfigDict, Field  # noqa: E402
 
+from src.core.config import settings  # noqa: E402
+
 logger = logging.getLogger(__name__)
 
 THIN_WALL_THRESHOLD_MM = 0.8
@@ -922,15 +924,17 @@ def _generate_preview_images_parallel(mesh: trimesh.Trimesh) -> dict[str, bytes 
         for view_name in ALL_VIEWS  # 7 views at 256px
     ] + [("thumbnail_large", 1200)]  # 1 view at 1200px
 
-    logger.info(
-        f"Rendering {len(views_to_render)} views in parallel with ThreadPoolExecutor"
-    )
-
     # Render all views in parallel
     render_start = time.time()
     completed_count = 0
 
-    with ThreadPoolExecutor(max_workers=8) as executor:
+    preview_workers = max(1, min(settings.GEOMETRY_PREVIEW_RENDER_WORKERS, 8))
+    logger.info(
+        "Rendering %d views with %d preview workers",
+        len(views_to_render),
+        preview_workers,
+    )
+    with ThreadPoolExecutor(max_workers=preview_workers) as executor:
         # Submit all rendering tasks
         futures = {
             executor.submit(
@@ -2880,8 +2884,14 @@ def _analyze_printing_process(
     oh_count, oh_area_cm2, oh_centroids, oh_face_idx = 0, 0.0, [], []
     if rules.max_overhang_deg is not None and process_code not in powder_bed_processes:
         try:
-            oh_count, oh_area_cm2, oh_centroids, oh_face_idx = compute_overhang_analysis(
-                mesh, rules.max_overhang_deg
+            (
+                oh_count,
+                oh_area_cm2,
+                oh_centroids,
+                oh_face_idx,
+            ) = compute_overhang_analysis(
+                mesh,
+                rules.max_overhang_deg,
             )
         except Exception as _e:
             logger.warning("Overhang detection failed: %s", _e)
@@ -2940,7 +2950,10 @@ def _analyze_printing_process(
     # OPTIMIZATION: Skip bridge check for powder-bed processes (SLS, MJF, BJ, DMLS)
     if rules.bridge_span_mm is not None and process_code not in powder_bed_processes:
         try:
-            br_count, br_centroids, br_face_idx = detect_bridges(mesh, rules.bridge_span_mm)
+            br_count, br_centroids, br_face_idx = detect_bridges(
+                mesh,
+                rules.bridge_span_mm,
+            )
         except Exception as _e:
             logger.warning("Bridge detection failed: %s", _e)
             br_count, br_centroids, br_face_idx = 0, [], []
@@ -3888,11 +3901,17 @@ def _compute_dfm_worker(
 
         per_body_reports: dict[int, dict[str, Any]] = {}
         body_count = len(stl_bytes)
+        body_workers = max(1, min(settings.GEOMETRY_DFM_BODY_WORKERS, body_count, 4))
 
         logger.info(
-            "🚀 Parallel DFM analysis for %d bodies (using ThreadPoolExecutor)",
+            "Parallel DFM analysis for %d bodies using %d body workers",
             body_count,
-            extra={"event": "dfm_parallel_start", "body_count": body_count},
+            body_workers,
+            extra={
+                "event": "dfm_parallel_start",
+                "body_count": body_count,
+                "body_workers": body_workers,
+            },
         )
 
         # Use ThreadPoolExecutor for parallel DFM analysis
@@ -3901,7 +3920,7 @@ def _compute_dfm_worker(
         # Per-body timeout prevents indefinite hangs (90s for complex geometries)
         PER_BODY_TIMEOUT = 90  # noqa: N806
 
-        with ThreadPoolExecutor(max_workers=4) as executor:
+        with ThreadPoolExecutor(max_workers=body_workers) as executor:
             # Submit all bodies for analysis
             futures = {
                 executor.submit(
@@ -4529,7 +4548,9 @@ class GeometryProcessor:
         _cpu = os.cpu_count() or 2
         # Limit workers to avoid concurrent OOM on large files.
         # Each worker loads hundreds of MB of STL data from disk.
-        _workers = max(2, min(4, _cpu // 2))
+        _workers = settings.GEOMETRY_MAIN_WORKERS or max(2, min(4, _cpu // 2))
+        _workers = max(1, min(_workers, 4))
+        _dfm_workers = max(1, min(settings.GEOMETRY_DFM_WORKERS, 2))
 
         # Rendering executor: recycles workers after 5 jobs so trimesh/numpy
         # pages accumulated during thumbnail/GLB/preview work are released back
@@ -4595,7 +4616,7 @@ class GeometryProcessor:
         # initializer=_dfm_worker_initializer: pre-imports OCC/trimesh/numpy/scipy
         # once per worker spawn, amortising the ~1-3 s cold-start cost.
         self.dfm_executor = PoolExecutorWrapper(
-            processes=2,
+            processes=_dfm_workers,
             maxtasksperchild=2,
             initializer=_dfm_worker_initializer,
         )
@@ -4640,7 +4661,7 @@ class GeometryProcessor:
             logger.warning(f"DFM executor shutdown failed during rebuild: {e}")
 
         self.dfm_executor = PoolExecutorWrapper(
-            processes=2,
+            processes=max(1, min(settings.GEOMETRY_DFM_WORKERS, 2)),
             maxtasksperchild=2,
             initializer=_dfm_worker_initializer,
         )

@@ -5,16 +5,19 @@ behave correctly with the cascadio workload, including pickling behavior
 and context management.
 """
 
-import sys
-import pytest
 import concurrent.futures
+import contextlib
 import multiprocessing
 import os
 import time
-from pathlib import Path
+
+import pytest
 
 from src.core.geometry import load_cascadio_geometry
 
+# All tests here spawn real subprocesses (Pool / ProcessPoolExecutor / Manager).
+# Excluded from the default run to prevent nested-pool OOM crashes.
+pytestmark = pytest.mark.slow
 
 # ---------------------------------------------------------------------------
 # Module-level helpers required by spawn-context tests.
@@ -22,6 +25,7 @@ from src.core.geometry import load_cascadio_geometry
 # picklable.  Local (inner) functions are not picklable on Python 3.10;
 # defining them at module level fixes this.
 # ---------------------------------------------------------------------------
+
 
 def _get_current_pid():
     """Return the PID of the current (worker) process."""
@@ -94,8 +98,9 @@ class TestMultiprocessingContext:
             child_pid = pool.apply(_get_current_pid)
 
             # Child PID should be different from parent
-            assert child_pid != parent_pid, \
-                f"Spawn context didn't create isolated process: {child_pid} == {parent_pid}"
+            assert (
+                child_pid != parent_pid
+            ), f"Spawn context didn't create isolated process: {child_pid} == {parent_pid}"  # noqa: E501
 
     def test_fork_context_available_on_unix(self):
         """Test that 'fork' context is available on Unix systems."""
@@ -130,6 +135,7 @@ class TestExecutorPickling:
         def outer():
             def inner(x: int) -> int:
                 return x * 2
+
             return inner
 
         nested_func = outer()
@@ -137,9 +143,9 @@ class TestExecutorPickling:
         # This may or may not raise an error depending on implementation
         # The key is that it's problematic
         try:
-            pickled = pickle.dumps(nested_func)
+            pickle.dumps(nested_func)
             # If it succeeds, that's fine too
-        except (pickle.PicklingError, AttributeError) as e:
+        except (pickle.PicklingError, AttributeError):
             # Expected for nested functions
             assert True  # This is expected behavior
 
@@ -155,10 +161,12 @@ class TestExecutorPickling:
 
     def test_threadpool_with_nested_function(self):
         """Test that ThreadPoolExecutor can work with closures/nested functions."""
+
         def create_task():
             # This is a nested function (closure)
             def nested_task(x: int) -> int:
                 return x * 2
+
             return nested_task
 
         task = create_task()
@@ -181,7 +189,7 @@ class TestExecutorPickling:
 
             # If it works, that's fine
             assert result == 10, f"Lambda execution returned wrong result: {result}"
-        except Exception as e:
+        except Exception:
             # If it fails, that's also acceptable
             # The key is consistent behavior
             assert True
@@ -234,8 +242,9 @@ class TestCascadioExecutorCompatibility:
                     pytest.fail("ProcessPoolExecutor load timed out")
 
         # Verify all completed
-        assert len(results) == num_loads, \
-            f"Only {len(results)}/{num_loads} loads completed in ProcessPoolExecutor"
+        assert (
+            len(results) == num_loads
+        ), f"Only {len(results)}/{num_loads} loads completed in ProcessPoolExecutor"
 
     def test_cascadio_thread_pool_behavior(self, test_assets_dir):
         """Test cascadio loading behavior with ThreadPoolExecutor."""
@@ -267,8 +276,9 @@ class TestCascadioExecutorCompatibility:
                     pytest.fail("ThreadPoolExecutor load timed out")
 
         # Verify all completed
-        assert len(results) == num_loads, \
-            f"Only {len(results)}/{num_loads} loads completed in ThreadPoolExecutor"
+        assert (
+            len(results) == num_loads
+        ), f"Only {len(results)}/{num_loads} loads completed in ThreadPoolExecutor"
 
 
 class TestExecutorShutdown:
@@ -278,7 +288,7 @@ class TestExecutorShutdown:
         """Test that ProcessPoolExecutor shutdown waits for completion."""
         with concurrent.futures.ProcessPoolExecutor(max_workers=2) as executor:
             # Submit multiple tasks using module-level _slow_task (picklable)
-            futures = [executor.submit(_slow_task, i) for i in range(5)]
+            [executor.submit(_slow_task, i) for i in range(5)]
             # Shutdown with wait=True should wait for all tasks
             # This is tested implicitly by the context manager
 
@@ -287,6 +297,7 @@ class TestExecutorShutdown:
 
     def test_processpool_shutdown_nowait_cancels_pending(self):
         """Test that ProcessPoolExecutor shutdown without wait cancels pending tasks."""
+
         def slow_task(x: int) -> int:
             time.sleep(10)  # Long task
             return x * 2
@@ -294,7 +305,7 @@ class TestExecutorShutdown:
         executor = concurrent.futures.ProcessPoolExecutor(max_workers=1)
 
         # Submit a long task
-        future = executor.submit(slow_task, 5)
+        executor.submit(slow_task, 5)
 
         # Shutdown without waiting
         executor.shutdown(wait=False, cancel_futures=True)
@@ -304,13 +315,14 @@ class TestExecutorShutdown:
 
     def test_threadpool_shutdown_waits_for_completion(self):
         """Test that ThreadPoolExecutor shutdown waits for completion."""
+
         def slow_task(x: int) -> int:
             time.sleep(0.5)
             return x * 2
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
             # Submit multiple tasks
-            futures = [executor.submit(slow_task, i) for i in range(5)]
+            [executor.submit(slow_task, i) for i in range(5)]
 
             # Context manager will wait for completion
 
@@ -324,15 +336,14 @@ class TestExecutorShutdown:
         (that was never in the stdlib API).  We use future.result(timeout=...)
         to bound the wait instead.
         """
-        # Test ThreadPoolExecutor — use a short-lived task so shutdown doesn't hang
+        # Test ThreadPoolExecutor — use a short-lived task so shutdown doesn't hang.
+        # NOTE: ThreadPoolExecutor.shutdown() does NOT accept a `timeout` kwarg on
+        # Python 3.10; we bound the wait via future.result(timeout=...) instead.
         start_time = time.time()
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
             future = executor.submit(time.sleep, 0.1)
-            try:
+            with contextlib.suppress(concurrent.futures.TimeoutError):
                 future.result(timeout=2)
-            except concurrent.futures.TimeoutError:
-                pass
-            # shutdown() without `timeout` kwarg — that parameter does not exist
             executor.shutdown(wait=True)
 
         threadpool_duration = time.time() - start_time
@@ -341,10 +352,8 @@ class TestExecutorShutdown:
         start_time = time.time()
         executor = concurrent.futures.ProcessPoolExecutor(max_workers=1)
         future = executor.submit(_simple_task, 1)  # fast, picklable task
-        try:
+        with contextlib.suppress(concurrent.futures.TimeoutError):
             future.result(timeout=5)
-        except concurrent.futures.TimeoutError:
-            pass
         executor.shutdown(wait=False)
         processpool_duration = time.time() - start_time
 

@@ -433,7 +433,9 @@ class TestCacheMissRecovery:
         try:
             import cascadio  # noqa: F401
         except ImportError:
-            pytest.skip("cascadio not installed — STEP tessellation unavailable in this env")
+            pytest.skip(
+                "cascadio not installed — STEP tessellation unavailable in this env"
+            )
         step_file = test_assets_dir / "50x50x50mm-solid-cube.step"
         if not step_file.exists():
             pytest.skip("50x50x50mm-solid-cube.step not found")

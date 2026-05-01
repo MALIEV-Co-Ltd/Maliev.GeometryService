@@ -5,11 +5,14 @@ timeout issues in production. This validates that the DFM performance issues
 are caught and addressed.
 """
 
-import pytest
 import time
 from pathlib import Path
 
+import pytest
+
 from src.core.geometry import _compute_dfm_single_body
+
+pytestmark = pytest.mark.slow
 
 
 @pytest.fixture
@@ -76,7 +79,9 @@ class TestProductionDFMTimeouts:
 
         This file has 4,916 vertices and times out in production after 95s.
         After fixes, it should complete in < 30s.
-        """
+        """  # noqa: E501
+        if "e16096_p11_EAR JIG" not in production_files:
+            pytest.skip("e16096_p11_EAR JIG not in production_files fixture")
         file_info = production_files["e16096_p11_EAR JIG"]
 
         if not file_info["step"].exists():

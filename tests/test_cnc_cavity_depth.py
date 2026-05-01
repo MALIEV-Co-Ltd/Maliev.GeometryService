@@ -11,7 +11,6 @@ import trimesh
 
 from src.core.geometry import GeometryProcessor, _analyze_single_process
 
-
 ASSETS_DIR = pytest.importorskip("pathlib").Path(__file__).parent / "assets"
 
 
@@ -54,7 +53,7 @@ class TestCavityDepthRatio:
         )
 
         if not file_path.exists():
-            pytest.skip(f"File not found")
+            pytest.skip("File not found")
 
         stl_bytes = file_path.read_bytes()
 
