@@ -7,10 +7,12 @@ Tests the new REST API endpoints for lazy evaluation:
 """
 
 import base64
-import pytest
+import contextlib
 import time
 from pathlib import Path
-from httpx import AsyncClient, ASGITransport
+
+import pytest
+from httpx import ASGITransport, AsyncClient
 
 from src.main import app
 
@@ -201,7 +203,7 @@ class TestProcessAnalysisEndpoint:
 
     @pytest.mark.asyncio
     async def test_process_analysis_requires_quality_check_first(
-        self, client, sample_stl_file
+        self, client, sample_stl_file  # noqa: ARG002
     ):
         """Test that process analysis fails without quality check."""
         # Try to run process analysis without quality check
@@ -371,6 +373,264 @@ class TestEndToEndWorkflow:
 
         # Total should be much faster than old approach (90+ seconds)
         assert total_time < 60.0, f"Two-phase workflow too slow: {total_time:.2f}s"
+
+
+class TestCacheMissRecovery:
+    """Tests for cache-miss recovery via download_url."""
+
+    @pytest.mark.asyncio
+    async def test_permanent_download_failure_returns_410(self, client):
+        """When re-download via signed URL hits a permanent GCS error (401/403/404),
+        the endpoint should return 410 Gone with status='file_missing'."""
+        from unittest.mock import AsyncMock, patch
+
+        from src.infrastructure.storage import PermanentDownloadError
+
+        upload_id = "test-upload-permanent-fail"
+
+        with patch(
+            "src.main.HttpDownloadService",
+            autospec=True,
+        ) as mock_service_class:
+            mock_instance = AsyncMock()
+            mock_instance.download_file.side_effect = PermanentDownloadError(
+                "Permanent failure downloading https://storage.googleapis.com/signed: 404"  # noqa: E501
+            )
+            mock_instance.close = AsyncMock()
+            mock_service_class.return_value = mock_instance
+
+            response = await client.post(
+                f"/geometry/uploads/{upload_id}/dfm/FDM",
+                json={"download_url": "https://storage.googleapis.com/signed?sig=test"},
+                timeout=10.0,
+            )
+
+        assert response.status_code == 410
+        data = response.json()
+        assert data["status"] == "file_missing"
+        assert data["error_type"] == "FileMissing"
+        assert data["upload_id"] == upload_id
+
+    @pytest.mark.asyncio
+    async def test_missing_download_url_returns_404_when_not_cached(self, client):
+        """When upload_id is not in cache and no download_url provided, returns 404."""
+        response = await client.post(
+            "/geometry/uploads/test-upload-no-url/dfm/FDM",
+            json={},
+            timeout=5.0,
+        )
+
+        assert response.status_code == 404
+        data = response.json()
+        assert data["error_type"] == "NotFound"
+
+    @pytest.mark.asyncio
+    async def test_cache_miss_recovery_reconstructs_step_to_stl(
+        self, client, test_assets_dir
+    ):
+        """Cache-miss recovery must tessellate STEP→STL so DFM analysis runs on real geometry
+        (not on STEP bytes fed to the STL parser, which produces a 0-face empty mesh)."""  # noqa: E501
+        try:
+            import cascadio  # noqa: F401
+        except ImportError:
+            pytest.skip("cascadio not installed — STEP tessellation unavailable in this env")
+        step_file = test_assets_dir / "50x50x50mm-solid-cube.step"
+        if not step_file.exists():
+            pytest.skip("50x50x50mm-solid-cube.step not found")
+
+        step_bytes = step_file.read_bytes()
+        upload_id = "test-cache-miss-step-recovery"
+
+        from src.main import _file_analysis_cache
+
+        # Ensure the upload is NOT in cache so recovery path is triggered.
+        _file_analysis_cache.pop(upload_id, None) if hasattr(
+            _file_analysis_cache, "pop"
+        ) else None
+        with contextlib.suppress(KeyError):
+            del _file_analysis_cache[upload_id]
+
+        import io as _io
+        from unittest.mock import AsyncMock, patch
+
+        with patch("src.main.HttpDownloadService", autospec=True) as mock_svc_cls:
+            mock_instance = AsyncMock()
+            # Simulate downloading the .stp file from the signed URL.
+            mock_instance.download_file = AsyncMock(
+                return_value=_io.BytesIO(step_bytes)
+            )
+            mock_instance.close = AsyncMock()
+            mock_svc_cls.return_value = mock_instance
+
+            with patch("src.main.publish_event", AsyncMock()):
+                response = await client.post(
+                    f"/geometry/uploads/{upload_id}/dfm/FDM",
+                    json={
+                        "storage_path": f"projects/test/{upload_id}/cube.stp",
+                        "download_url": "https://storage.googleapis.com/signed?sig=test",
+                    },
+                    timeout=120.0,
+                )
+
+        assert (
+            response.status_code == 200
+        ), f"Expected 200, got {response.status_code}: {response.text}"
+        data = response.json()
+        assert data["status"] == "analysis_complete", f"Unexpected status: {data}"
+
+        # The cache entry must contain real STL bytes (non-empty) and correct metadata.
+        cached = _file_analysis_cache.get(upload_id)
+        assert cached is not None, "Cache entry not populated after recovery"
+        assert (
+            cached.get("cad_extension") == "stp"
+        ), "cad_extension must be 'stp' after STEP recovery"
+        assert (
+            cached.get("body_count", 0) >= 1
+        ), "body_count must be ≥ 1 after tessellation"
+        stl_bytes = cached.get("stl_bytes", b"")
+        assert (
+            len(stl_bytes) > 0
+        ), "stl_bytes in cache must not be empty after STEP tessellation"
+
+        # Verify the DFM report has actual geometry data (not a 0-face phantom pass).
+        import trimesh as _trimesh
+
+        recovered_mesh = _trimesh.load(
+            _io.BytesIO(stl_bytes), file_type="stl", force="mesh"
+        )
+        assert isinstance(
+            recovered_mesh, _trimesh.Trimesh
+        ), "Cached STL bytes must parse as Trimesh"
+        assert (
+            len(recovered_mesh.faces) > 0
+        ), "Cached STL must have >0 faces — cache-miss recovery still storing STEP bytes as STL"  # noqa: E501
+
+    @pytest.mark.asyncio
+    async def test_quick_quality_check_returns_error_on_step_bytes(
+        self, test_assets_dir
+    ):
+        """_quick_quality_check must return error dict (not a phantom pass) when fed non-STL bytes."""  # noqa: E501
+        step_file = test_assets_dir / "50x50x50mm-solid-cube.step"
+        if not step_file.exists():
+            pytest.skip("50x50x50mm-solid-cube.step not found")
+
+        from src.core.geometry import _quick_quality_check
+
+        result = _quick_quality_check(step_file.read_bytes(), None, None)
+        assert (
+            result.get("error") == "empty_mesh"
+        ), f"Expected error='empty_mesh', got: {result}"
+        assert result.get("face_count", -1) == 0
+
+    @pytest.mark.asyncio
+    async def test_analyze_for_process_returns_422_for_corrupted_cad(
+        self, client, test_assets_dir  # noqa: ARG002
+    ):
+        """When cache-miss recovery downloads bytes that can't be tessellated,
+        the endpoint must return 422 (not a phantom 200 with an empty DFM report)."""
+        upload_id = "test-cache-miss-corrupt"
+
+        from src.main import _file_analysis_cache
+
+        with contextlib.suppress(KeyError):
+            del _file_analysis_cache[upload_id]
+
+        import io as _io
+        from unittest.mock import AsyncMock, patch
+
+        corrupt_bytes = b"this is not a valid STEP file at all"
+
+        with patch("src.main.HttpDownloadService", autospec=True) as mock_svc_cls:
+            mock_instance = AsyncMock()
+            mock_instance.download_file = AsyncMock(
+                return_value=_io.BytesIO(corrupt_bytes)
+            )
+            mock_instance.close = AsyncMock()
+            mock_svc_cls.return_value = mock_instance
+
+            response = await client.post(
+                f"/geometry/uploads/{upload_id}/dfm/FDM",
+                json={
+                    "storage_path": f"projects/test/{upload_id}/broken.stp",
+                    "download_url": "https://storage.googleapis.com/signed?sig=test",
+                },
+                timeout=30.0,
+            )
+
+        # Must not be 200 — either tessellation failed (422) or cascade error (500 acceptable).  # noqa: E501
+        assert (
+            response.status_code in (422, 500)
+        ), f"Expected 422 or 500 for corrupted STEP, got {response.status_code}: {response.text}"  # noqa: E501
+
+    @pytest.mark.asyncio
+    async def test_cache_miss_recovery_multi_body_step_reports_correct_body_count(
+        self, client, test_assets_dir
+    ):
+        """Cache-miss recovery must report the real body count for multi-body files.
+
+        Uses a 3MF file (3 disconnected bodies) rather than STEP because cascadio
+        merges all STEP solids into a single mesh — the 3MF path preserves the
+        per-body structure via trimesh Scene geometry, so body_count correctly
+        reflects the 3 distinct bodies.
+        """
+        # 3MF preserves multi-body structure; STEP is merged by cascadio into 1 mesh.
+        multi_body_file = test_assets_dir / "50mm-polygon-multibodies-nonoverlap.3mf"
+        if not multi_body_file.exists():
+            pytest.skip("50mm-polygon-multibodies-nonoverlap.3mf not found")
+
+        file_bytes = multi_body_file.read_bytes()
+        upload_id = "00000000-0000-0000-0000-000000000099"  # valid UUID for test
+
+        from src.main import _file_analysis_cache
+
+        with contextlib.suppress(KeyError):
+            del _file_analysis_cache[upload_id]
+
+        import io as _io
+        from unittest.mock import AsyncMock, patch
+
+        published_payloads: list = []
+
+        async def capture_event(event, routing_key):  # noqa: ARG001
+            published_payloads.append(event)
+
+        with patch("src.main.HttpDownloadService", autospec=True) as mock_svc_cls:
+            mock_instance = AsyncMock()
+            mock_instance.download_file = AsyncMock(
+                return_value=_io.BytesIO(file_bytes)
+            )
+            mock_instance.close = AsyncMock()
+            mock_svc_cls.return_value = mock_instance
+
+            with patch("src.main.publish_event", side_effect=capture_event):
+                response = await client.post(
+                    f"/geometry/uploads/{upload_id}/dfm/FDM",
+                    json={
+                        "storage_path": f"projects/test/{upload_id}/multibody.3mf",
+                        "download_url": "https://storage.googleapis.com/signed?sig=test",
+                    },
+                    timeout=120.0,
+                )
+
+        assert (
+            response.status_code == 200
+        ), f"Expected 200, got {response.status_code}: {response.text}"
+
+        cached = _file_analysis_cache.get(upload_id)
+        assert cached is not None
+        body_count = cached.get("body_count", 1)
+        assert (
+            body_count > 1
+        ), f"Multi-body file should report body_count > 1, got {body_count}"
+
+        # The published DfmAnalysisReadyEvent must carry the correct body count.
+        assert (
+            len(published_payloads) > 0
+        ), "Expected DfmAnalysisReadyEvent to be published"
+        published_body_count = published_payloads[0].message.payload.body_count
+        assert (
+            published_body_count == body_count
+        ), f"Published bodyCount={published_body_count} must match cached body_count={body_count}"  # noqa: E501
 
 
 if __name__ == "__main__":
