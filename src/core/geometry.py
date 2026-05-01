@@ -12,9 +12,9 @@ import sys
 import tempfile
 import threading
 import traceback
-from concurrent.futures import Future
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable, TypedDict, cast
+from typing import Any, TypedDict, cast
 
 
 class PoolExecutorWrapper:
@@ -74,7 +74,7 @@ class PoolExecutorWrapper:
         chunksize = kwargs.get("chunksize", 1)
         return self._pool.imap_unordered(fn, iterables, chunksize=chunksize)
 
-    def shutdown(self, wait: bool = True, *, cancel_futures: bool = False) -> None:
+    def shutdown(self, wait: bool = True, *, cancel_futures: bool = False) -> None:  # noqa: ARG002
         """Shutdown the executor pool.
 
         Uses Pool.close() + Pool.join() for graceful shutdown.
@@ -90,10 +90,10 @@ class PoolExecutorWrapper:
         self.shutdown(wait=True)
 
 
-import gmsh
-import numpy as np
-import trimesh
-from pydantic import BaseModel, ConfigDict, Field
+import gmsh  # noqa: E402
+import numpy as np  # noqa: E402
+import trimesh  # noqa: E402
+from pydantic import BaseModel, ConfigDict, Field  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -141,14 +141,13 @@ def _get_cached_glb(glb_path: str) -> Any | None:
                 geom_count,
             )
             return cached_obj
-        else:
-            # Expired - remove from cache
-            logger.debug("GLB cache expired: %s", glb_path)
-            del _glb_cache[glb_path]
+        # Expired - remove from cache
+        logger.debug("GLB cache expired: %s", glb_path)
+        del _glb_cache[glb_path]
 
     # Load from disk
     try:
-        with open(glb_path, "rb") as fh:
+        with open(glb_path, "rb") as fh:  # noqa: PTH123
             glb_bytes = fh.read()
 
         logger.info("Loading GLB for caching: %s (%d bytes)", glb_path, len(glb_bytes))
@@ -159,7 +158,7 @@ def _get_cached_glb(glb_path: str) -> Any | None:
             geom_count = len(scene_data.geometry)
             logger.info(f"Loaded GLB Scene with {geom_count} geometries")
         else:
-            logger.info(f"Loaded single Trimesh object")
+            logger.info("Loaded single Trimesh object")
 
         # Add to cache (with LRU eviction if needed)
         if len(_glb_cache) >= _GLB_CACHE_MAX_SIZE:
@@ -254,24 +253,25 @@ def _dfm_worker_initializer() -> None:
     Amortises the ~1-3 s cold-start cost across max_tasks_per_child jobs.
     """
     try:
-        import trimesh  # noqa: F401
         import numpy  # noqa: F401
         import scipy  # noqa: F401
-        from src.core.dfm_thresholds import PRINTING_RULES, MILLING_RULES  # noqa: F401
-        from src.core.mesh_analyzers import (  # noqa: F401
-            detect_hollow_regions,
-            detect_holes_mesh,
-            compute_overhang_analysis,
-            compute_thin_wall_analysis,
-        )
+        import trimesh  # noqa: F401
+
         from src.core.cnc_analyzers import (  # noqa: F401
             compute_sharp_corner_analysis,
             detect_cavities,
             detect_chatter_risk,
         )
+        from src.core.dfm_thresholds import MILLING_RULES, PRINTING_RULES  # noqa: F401
+        from src.core.mesh_analyzers import (  # noqa: F401
+            compute_overhang_analysis,
+            compute_thin_wall_analysis,
+            detect_holes_mesh,
+            detect_hollow_regions,
+        )
 
         # OCC is optional — don't fail if unavailable
-        try:
+        try:  # noqa: SIM105
             from OCC.Core.BRep import BRep_Tool  # noqa: F401
         except ImportError:
             pass
@@ -308,6 +308,10 @@ class GeometryMetrics(BaseModel):
     is_manifold: bool = Field(alias="isManifold")
     triangle_count: int = Field(alias="triangleCount")
     euler_number: int = Field(alias="eulerNumber")
+    non_manifold_reason: str | None = Field(default=None, alias="nonManifoldReason")
+    non_manifold_face_count: int | None = Field(
+        default=None, alias="nonManifoldFaceCount"
+    )
 
 
 class DfmIssueItem(BaseModel):
@@ -353,15 +357,25 @@ class SlaDfmReport(BaseModel):
 
     report_type: str = Field(default="SLA", alias="reportType")
     thin_wall_count: int = Field(default=0, alias="thinWallCount")
-    thin_wall_regions: list[list[float]] = Field(default_factory=list, alias="thinWallRegions")
+    thin_wall_regions: list[list[float]] = Field(
+        default_factory=list, alias="thinWallRegions"
+    )
     overhang_face_count: int = Field(default=0, alias="overhangFaceCount")
     overhang_area_cm2: float = Field(default=0.0, alias="overhangAreaCm2")
-    overhang_regions: list[list[float]] = Field(default_factory=list, alias="overhangRegions")
+    overhang_regions: list[list[float]] = Field(
+        default_factory=list, alias="overhangRegions"
+    )
     resin_trapping_risk: bool = Field(default=False, alias="resinTrappingRisk")
-    resin_trapping_regions: list[list[float]] = Field(default_factory=list, alias="resinTrappingRegions")
+    resin_trapping_regions: list[list[float]] = Field(
+        default_factory=list, alias="resinTrappingRegions"
+    )
     suction_risk: bool = Field(default=False, alias="suctionRisk")
-    suction_regions: list[list[float]] = Field(default_factory=list, alias="suctionRegions")
-    hollow_regions: list[list[float]] = Field(default_factory=list, alias="hollowRegions")
+    suction_regions: list[list[float]] = Field(
+        default_factory=list, alias="suctionRegions"
+    )
+    hollow_regions: list[list[float]] = Field(
+        default_factory=list, alias="hollowRegions"
+    )
     issues: list[DfmIssueItem] = Field(default_factory=list)
 
 
@@ -372,9 +386,13 @@ class CncDfmReport(BaseModel):
 
     report_type: str = Field(default="CNC", alias="reportType")
     sharp_corner_count: int = Field(default=0, alias="sharpCornerCount")
-    sharp_corner_regions: list[list[float]] = Field(default_factory=list, alias="sharpCornerRegions")
+    sharp_corner_regions: list[list[float]] = Field(
+        default_factory=list, alias="sharpCornerRegions"
+    )
     has_undercuts: bool = Field(default=False, alias="hasUndercuts")
-    undercut_regions: list[list[float]] = Field(default_factory=list, alias="undercutRegions")
+    undercut_regions: list[list[float]] = Field(
+        default_factory=list, alias="undercutRegions"
+    )
     has_drill_holes: bool = Field(default=False, alias="hasDrillHoles")
     drill_hole_count: int = Field(default=0, alias="drillHoleCount")
     requires_edm: bool = Field(default=False, alias="requiresEdm")
@@ -480,7 +498,7 @@ def _compute_overhang_analysis(
     """
     Detect overhang faces where the normal deviates more than threshold from vertical (Z-axis).
     Returns (overhang_face_count, overhang_area_cm2, overhang_centroids).
-    """
+    """  # noqa: E501
     overhang_face_count = 0
     overhang_area_cm2 = 0.0
     overhang_centroids: list[list[float]] = []
@@ -534,7 +552,7 @@ def _compute_sharp_corner_analysis(
             return 0, []
 
         vertices = mesh.vertices
-        SHARP_CORNER_THRESHOLD_DEGREES = 45.0
+        SHARP_CORNER_THRESHOLD_DEGREES = 45.0  # noqa: N806
         threshold_cos = math.cos(math.radians(SHARP_CORNER_THRESHOLD_DEGREES))
 
         edge_directions: dict[int, list[np.ndarray]] = {}
@@ -593,14 +611,13 @@ def _compute_hollow_analysis(mesh: trimesh.Trimesh) -> list[list[float]]:
         if isinstance(split, trimesh.Trimesh):
             return hollow_regions
 
-        if isinstance(split, trimesh.Scene):
-            if len(split.geometry) > 1:
-                for body in split.geometry.values():
-                    if isinstance(body, trimesh.Trimesh) and not body.is_watertight:
-                        centroid = body.centroid
-                        hollow_regions.append(
-                            [float(centroid[0]), float(centroid[1]), float(centroid[2])]
-                        )
+        if isinstance(split, trimesh.Scene) and len(split.geometry) > 1:
+            for body in split.geometry.values():
+                if isinstance(body, trimesh.Trimesh) and not body.is_watertight:
+                    centroid = body.centroid
+                    hollow_regions.append(
+                        [float(centroid[0]), float(centroid[1]), float(centroid[2])]
+                    )
 
     except Exception as e:
         logger.warning(f"Hollow analysis failed: {e}")
@@ -654,10 +671,8 @@ def _render_single_view(
 
     # Initialize virtual framebuffer for headless rendering in Docker (Linux only)
     if hasattr(pv, "start_xvfb"):
-        try:
+        with contextlib.suppress(Exception):
             pv.start_xvfb()
-        except Exception:
-            pass
 
     # 85mm lens equivalent: vertical FOV = 2*atan(24/(2*85)) ≈ 16°
     view_angle = 16.0
@@ -756,8 +771,8 @@ def _prepare_mesh_for_rendering(mesh: trimesh.Trimesh) -> dict[str, Any] | None:
         Returns None on error
     """
     try:
-        import pyvista as pv
         import numpy as np
+        import pyvista as pv
 
         pv.OFF_SCREEN = True
         # pyvista 0.44+ uses lazy module loading: pv.Plotter is only resolved from
@@ -839,7 +854,7 @@ def _render_single_view_from_prepared_mesh(
     Returns:
         Tuple of (result_key, image_bytes) where result_key is like "front_small" or "thumbnail_large"
         Returns (result_key, None) on failure
-    """
+    """  # noqa: E501
     try:
         # Get view configuration
         if view_name == "thumbnail_large":
@@ -881,9 +896,9 @@ def _generate_preview_images_parallel(mesh: trimesh.Trimesh) -> dict[str, bytes 
     All 8 images (6 orthographic + 1 isometric small + 1 isometric large) render concurrently.
 
     Speedup: ~8x faster than sequential rendering.
-    """
-    from concurrent.futures import ThreadPoolExecutor, as_completed
+    """  # noqa: E501
     import time
+    from concurrent.futures import ThreadPoolExecutor, as_completed
 
     start_time = time.time()
     results: dict[str, bytes | None] = {}
@@ -935,7 +950,7 @@ def _generate_preview_images_parallel(mesh: trimesh.Trimesh) -> dict[str, bytes 
                 completed_count += 1
                 elapsed = time.time() - render_start
                 logger.debug(
-                    f"[{completed_count}/{len(views_to_render)}] Rendered {view_name} -> {result_key} "
+                    f"[{completed_count}/{len(views_to_render)}] Rendered {view_name} -> {result_key} "  # noqa: E501
                     f"in {elapsed:.2f}s total"
                 )
             except Exception as e:
@@ -952,8 +967,8 @@ def _generate_preview_images_parallel(mesh: trimesh.Trimesh) -> dict[str, bytes 
     successful = sum(1 for v in results.values() if v is not None)
 
     logger.info(
-        f"PARALLEL preview generation complete: {successful}/{len(views_to_render)} views "
-        f"in {total_time:.2f}s (~{total_time / len(views_to_render):.2f}s per view average)"
+        f"PARALLEL preview generation complete: {successful}/{len(views_to_render)} views "  # noqa: E501
+        f"in {total_time:.2f}s (~{total_time / len(views_to_render):.2f}s per view average)"  # noqa: E501
     )
 
     # Ensure all keys exist
@@ -1087,8 +1102,8 @@ def _generate_preview_images_sync(mesh: trimesh.Trimesh) -> dict[str, bytes | No
         successful = sum(1 for v in results.values() if v is not None)
 
         logger.info(
-            f"SEQUENTIAL preview generation complete: {successful}/{len(ALL_VIEWS) + 1} views "
-            f"in {total_time:.2f}s (~{total_time / max(successful, 1):.2f}s per view average)"
+            f"SEQUENTIAL preview generation complete: {successful}/{len(ALL_VIEWS) + 1} views "  # noqa: E501
+            f"in {total_time:.2f}s (~{total_time / max(successful, 1):.2f}s per view average)"  # noqa: E501
         )
 
     except Exception as e:
@@ -1112,17 +1127,15 @@ def _run_gmsh_with_timeout(file_path: str, timeout_seconds: int) -> trimesh.Trim
     mesh = None
     timeout_fired = False
 
-    def _sigalarm_handler(signum, frame):
+    def _sigalarm_handler(signum, frame):  # noqa: ARG001
         nonlocal timeout_fired
         timeout_fired = True
         # Attempt graceful gmsh finalize before os._exit
-        try:
+        with contextlib.suppress(Exception):
             gmsh.finalize()
-        except Exception:
-            pass
         # Log before dying so Aspire structured logs capture it
         logger.error(
-            f"gmsh mesh generation timed out after {timeout_seconds}s — killing worker process",
+            f"gmsh mesh generation timed out after {timeout_seconds}s — killing worker process",  # noqa: E501
             extra={
                 "event": "gmsh_timeout",
                 "timeout_seconds": timeout_seconds,
@@ -1169,7 +1182,7 @@ def _run_gmsh_with_timeout(file_path: str, timeout_seconds: int) -> trimesh.Trim
             gmsh.finalize()
     else:
         # Windows: signal.SIGALRM is not available; use a watchdog thread + gmsh in a
-        # subprocess.  If the thread fires before gmsh returns, we terminate the process.
+        # subprocess.  If the thread fires before gmsh returns, we terminate the process.  # noqa: E501
         result = {}
 
         def _gmsh_work():
@@ -1203,10 +1216,8 @@ def _run_gmsh_with_timeout(file_path: str, timeout_seconds: int) -> trimesh.Trim
             except Exception as e:
                 result["error"] = e
             finally:
-                try:
+                with contextlib.suppress(Exception):
                     gmsh.finalize()
-                except Exception:
-                    pass
 
         worker_thread = threading.Thread(target=_gmsh_work, daemon=True)
         worker_thread.start()
@@ -1215,7 +1226,7 @@ def _run_gmsh_with_timeout(file_path: str, timeout_seconds: int) -> trimesh.Trim
         if worker_thread.is_alive() or "error" in result:
             # gmsh is still running or raised an error — kill this process
             logger.error(
-                f"gmsh mesh generation timed out after {timeout_seconds}s (Windows) — killing worker process",
+                f"gmsh mesh generation timed out after {timeout_seconds}s (Windows) — killing worker process",  # noqa: E501
                 extra={
                     "event": "gmsh_timeout",
                     "timeout_seconds": timeout_seconds,
@@ -1239,7 +1250,7 @@ def _load_cad_with_cascadio(
 
     This is a compatibility wrapper - calls the isolated version.
     """
-    with open(file_path, "rb") as f:
+    with open(file_path, "rb") as f:  # noqa: PTH123
         file_bytes = f.read()
     return _load_cad_with_cascadio_isolated(file_bytes, timeout_seconds)
 
@@ -1247,7 +1258,7 @@ def _load_cad_with_cascadio(
 def _cascadio_subprocess_load(
     file_path: str,
     glb_output_path: str,
-    timeout_seconds: int = 60,
+    timeout_seconds: int = 60,  # noqa: ARG001
 ) -> int:
     """Load CAD via cascadio in isolated process.
 
@@ -1262,13 +1273,12 @@ def _cascadio_subprocess_load(
     """
     import cascadio
 
-    ret = cascadio.step_to_glb(
+    return cascadio.step_to_glb(
         file_path,
         glb_output_path,
         tol_linear=0.05,
         tol_angular=0.1,
     )
-    return ret
 
 
 def _load_cad_with_cascadio_isolated(
@@ -1282,7 +1292,7 @@ def _load_cad_with_cascadio_isolated(
 
     Returns:
         tuple[list[trimesh.Trimesh], bytes, int, list[str]]: meshes, glb_bytes, body_count, body_names
-    """
+    """  # noqa: E501
     import concurrent.futures
     import multiprocessing
     import os
@@ -1322,7 +1332,7 @@ def _load_cad_with_cascadio_isolated(
                 f"terminated process for clean cleanup"
             )
 
-            raise TimeoutError(
+            raise TimeoutError(  # noqa: B904
                 f"cascadio timed out after {timeout_seconds}s loading {inp_path}"
             )
         finally:
@@ -1339,7 +1349,7 @@ def _load_cad_with_cascadio_isolated(
             body_names = list(loaded.geometry.keys())
             meshes = list(loaded.geometry.values())
             if not meshes:
-                raise ValueError(f"cascadio produced empty scene")
+                raise ValueError("cascadio produced empty scene")
             body_count = len(meshes)
 
             for mesh in meshes:
@@ -1347,38 +1357,101 @@ def _load_cad_with_cascadio_isolated(
                 trimesh.repair.fix_winding(mesh)
                 mesh.apply_scale(1000.0)
 
-            with open(glb_path, "rb") as f:
+            with open(glb_path, "rb") as f:  # noqa: PTH123
                 glb_bytes = f.read()
 
             return meshes, glb_bytes, body_count, body_names
 
-        elif isinstance(loaded, trimesh.Trimesh):
+        if isinstance(loaded, trimesh.Trimesh):
             mesh = loaded
             if len(mesh.vertices) == 0:
-                raise ValueError(f"cascadio produced empty mesh")
+                raise ValueError("cascadio produced empty mesh")
             mesh.merge_vertices(digits_vertex=3)
             trimesh.repair.fix_winding(mesh)
             mesh.apply_scale(1000.0)
 
-            with open(glb_path, "rb") as f:
+            with open(glb_path, "rb") as f:  # noqa: PTH123
                 glb_bytes = f.read()
 
             return [mesh], glb_bytes, 1, ["Body_01"]
-        else:
-            raise ValueError(f"cascadio produced unexpected type: {type(loaded)}")
+        raise ValueError(f"cascadio produced unexpected type: {type(loaded)}")
 
     finally:
         # Cleanup temp files
-        if inp_path and os.path.exists(inp_path):
-            os.unlink(inp_path)
-        if glb_path and os.path.exists(glb_path):
-            os.unlink(glb_path)
+        if inp_path and os.path.exists(inp_path):  # noqa: PTH110
+            os.unlink(inp_path)  # noqa: PTH108
+        if glb_path and os.path.exists(glb_path):  # noqa: PTH110
+            os.unlink(glb_path)  # noqa: PTH108
         if pool:
             try:
                 pool.terminate()
                 pool.join()
             except Exception:
                 pass
+
+
+def _split_significant_mesh_bodies(mesh: trimesh.Trimesh) -> list[trimesh.Trimesh]:
+    """Split mesh-native assemblies into bodies and ignore tiny face islands."""
+    if len(mesh.faces) == 0:
+        return []
+
+    try:
+        parts = mesh.split(only_watertight=False)
+    except Exception:
+        return [mesh]
+
+    if not parts:
+        return [mesh]
+
+    significant = [part for part in parts if len(part.faces) >= 10]
+    return significant or [mesh]
+
+
+def _mesh_manifold_info(mesh: trimesh.Trimesh) -> tuple[bool, str | None, int | None]:
+    """Returns (is_manifold, reason_str_or_None, broken_face_count_or_None)."""
+    mesh = mesh.copy()
+    mesh.merge_vertices()
+    edge_counts = np.unique(mesh.edges_sorted, axis=0, return_counts=True)[1]
+    if bool(np.all(edge_counts <= 2)) and bool(mesh.is_watertight):
+        return True, None, None
+
+    boundary_count = int(np.sum(edge_counts == 1))
+    non_manifold_edge_count = int(np.sum(edge_counts > 2))
+    try:
+        broken = trimesh.repair.broken_faces(mesh, color=None)
+        broken_count = int(len(broken)) if broken is not None else None
+    except Exception:
+        broken_count = None
+
+    parts = []
+    if boundary_count > 0:
+        parts.append(f"{boundary_count} open boundary edge(s)")
+    if non_manifold_edge_count > 0:
+        parts.append(
+            f"{non_manifold_edge_count} non-manifold edge(s) shared by >2 faces"
+        )
+    reason = "; ".join(parts) if parts else "mesh is not watertight"
+    return False, reason, broken_count
+
+
+def _export_multibody_scene_glb(
+    meshes: list[trimesh.Trimesh],
+    body_names: list[str],
+) -> bytes | None:
+    """Export mesh-native disconnected bodies as separate glTF scene nodes."""
+    try:
+        scene = trimesh.Scene()
+        for index, mesh in enumerate(meshes):
+            name = (
+                body_names[index]
+                if index < len(body_names)
+                else f"Body_{index + 1:02d}"
+            )
+            scene.add_geometry(mesh, geom_name=name, node_name=name)
+        return cast(bytes, scene.export(file_type="glb"))
+    except Exception as exc:
+        logger.warning("Failed to export multi-body scene GLB: %s", exc)
+        return None
 
 
 def _compute_metrics_worker(data: bytes, file_extension: str) -> dict[str, Any]:
@@ -1397,6 +1470,7 @@ def _compute_metrics_worker(data: bytes, file_extension: str) -> dict[str, Any]:
         cad_glb_bytes: bytes | None = None
         cad_body_count: int = 1
         body_names: list[str] = []
+        metrics_mesh_raw: trimesh.Trimesh | None = None
         if ext in ["igs", "iges", "step", "stp"]:
             try:
                 # Write to a temp file that cascadio will open.
@@ -1415,7 +1489,7 @@ def _compute_metrics_worker(data: bytes, file_extension: str) -> dict[str, Any]:
                 )
                 mesh_list, cad_glb_bytes, cad_body_count, body_names = (
                     _load_cad_with_cascadio_isolated(
-                        open(tmp_path, "rb").read(),
+                        open(tmp_path, "rb").read(),  # noqa: SIM115, PTH123
                         timeout_seconds=60,
                     )
                 )
@@ -1447,19 +1521,32 @@ def _compute_metrics_worker(data: bytes, file_extension: str) -> dict[str, Any]:
                 if not mesh_data.geometry:
                     raise ValueError("EMPTY_FILE_ERROR")
                 # Preserve multi-body structure for non-CAD formats too
-                mesh_list = []
-                for geom in mesh_data.geometry.values():
+                for geom_name, geom in mesh_data.geometry.items():
                     if isinstance(geom, trimesh.Trimesh) and len(geom.vertices) > 0:
-                        mesh_list.append(geom)
+                        bodies = _split_significant_mesh_bodies(geom)
+                        is_single_geom_body = len(bodies) == 1
+                        for body in bodies:
+                            mesh_list.append(body)
+                            body_names.append(
+                                str(geom_name)
+                                if is_single_geom_body
+                                else f"Body_{len(mesh_list):02d}"
+                            )
                 cad_body_count = len(mesh_list)
-                body_names = [f"Body_{i + 1:02d}" for i in range(cad_body_count)]
                 if not mesh_list:
                     raise ValueError("EMPTY_FILE_ERROR")
+                dumped_mesh = mesh_data.dump(concatenate=True)
+                if (
+                    isinstance(dumped_mesh, trimesh.Trimesh)
+                    and len(dumped_mesh.vertices) > 0
+                ):
+                    metrics_mesh_raw = dumped_mesh
             else:
                 mesh = cast(trimesh.Trimesh, mesh_data)
-                mesh_list = [mesh]
-                cad_body_count = 1
-                body_names = ["Body_01"]
+                metrics_mesh_raw = mesh
+                mesh_list = _split_significant_mesh_bodies(mesh)
+                cad_body_count = len(mesh_list)
+                body_names = [f"Body_{i + 1:02d}" for i in range(cad_body_count)]
             # glTF/GLB spec mandates meters, but most CAD software exports GLBs in mm.
             # If all dimensions are < 1 unit the file is almost certainly in meters;
             # apply ×1000 so downstream metrics are in mm.  Otherwise assume mm already.
@@ -1480,24 +1567,43 @@ def _compute_metrics_worker(data: bytes, file_extension: str) -> dict[str, Any]:
 
         # Concatenate ONLY for aggregate metrics (volume, bbox, etc.)
         # Preserve mesh_list for Phase 2 multi-body handling
-        if len(mesh_list) > 1:
+        if metrics_mesh_raw is not None:
+            metrics_mesh = metrics_mesh_raw
+        elif len(mesh_list) > 1:
             metrics_mesh = trimesh.util.concatenate(mesh_list)
         else:
             metrics_mesh = mesh_list[0]
 
-        # Manifold check: evaluate per-body to avoid false positives from
-        # concatenation artefacts (shared-boundary edges appear 4x instead of 2x).
-        # A part is manifold when every individual body is manifold.
-        # Use watertight as a fallback — it's equivalent for a single solid body
-        # and avoids false non-manifold reports from tessellation seam gaps.
-        def _body_is_manifold(m: "trimesh.Trimesh") -> bool:
-            ec = np.unique(m.edges_sorted, axis=0, return_counts=True)[1]
-            if bool(np.all(ec <= 2)):
-                return True
-            # Fallback: watertight implies manifold for a closed solid
-            return bool(m.is_watertight)
+        # Manifold check: parametric CAD formats (STEP/IGES/etc.) are guaranteed
+        # valid closed solids when OCC loads them successfully, so skip the trimesh
+        # edge-count check — it produces false positives due to tessellation
+        # t-junctions and unmerged vertices at shared faces.
+        # For mesh-native formats (.stl/.obj/.ply) run the check per-body after
+        # merging coincident vertices to reduce artefact-driven false positives.
+        _PARAMETRIC_EXTS = {"step", "stp", "iges", "igs", "x_t", "x_b", "sat", "brep"}  # noqa: N806
 
-        is_manifold = all(_body_is_manifold(m) for m in mesh_list)
+        if ext in _PARAMETRIC_EXTS:
+            is_manifold = True
+            non_manifold_reason: str | None = None
+            non_manifold_face_count: int | None = None
+        else:
+            diagnostic_meshes = (
+                [metrics_mesh_raw] if metrics_mesh_raw is not None else mesh_list
+            )
+            body_infos = [
+                _mesh_manifold_info(m) for m in diagnostic_meshes if m is not None
+            ]
+            is_manifold = all(info[0] for info in body_infos)
+            if not is_manifold:
+                reasons = [info[1] for info in body_infos if info[1]]
+                non_manifold_reason = (
+                    "; ".join(reasons) if reasons else "mesh is not watertight"
+                )
+                counts = [info[2] for info in body_infos if info[2] is not None]
+                non_manifold_face_count = sum(counts) if counts else None
+            else:
+                non_manifold_reason = None
+                non_manifold_face_count = None
 
         if metrics_mesh.is_watertight:
             volume_mm3 = float(metrics_mesh.volume)
@@ -1534,7 +1640,7 @@ def _compute_metrics_worker(data: bytes, file_extension: str) -> dict[str, Any]:
                 mesh_stl_bytes_dict[i] = stl_bytes
             except Exception as ex:
                 logger.warning(
-                    "STL export failed for body %d, Phase 3 may produce degraded results: %s",
+                    "STL export failed for body %d, Phase 3 may produce degraded results: %s",  # noqa: E501
                     i,
                     ex,
                 )
@@ -1551,7 +1657,10 @@ def _compute_metrics_worker(data: bytes, file_extension: str) -> dict[str, Any]:
         # STL/OBJ/3MF: export the processed mesh to GLB.
         if not cad_glb_bytes and ext not in ("step", "stp", "igs", "iges"):
             try:
-                cad_glb_bytes = cast(bytes, metrics_mesh.export(file_type="glb"))
+                if len(mesh_list) > 1:
+                    cad_glb_bytes = _export_multibody_scene_glb(mesh_list, body_names)
+                else:
+                    cad_glb_bytes = cast(bytes, metrics_mesh.export(file_type="glb"))
             except Exception as e:
                 logger.warning(
                     f"Failed to export GLB from {ext} mesh, DFM may be degraded: {e}",
@@ -1583,6 +1692,8 @@ def _compute_metrics_worker(data: bytes, file_extension: str) -> dict[str, Any]:
             "surface_area_cm2": area_mm2 / 100.0,
             "bounding_box": bbox,
             "is_manifold": is_manifold,
+            "non_manifold_reason": non_manifold_reason,
+            "non_manifold_face_count": non_manifold_face_count,
             "triangle_count": len(metrics_mesh.faces),
             "euler_number": euler_number,
             "body_count": cad_body_count,
@@ -1655,7 +1766,7 @@ def compute_metrics_trimesh_only(
     # STEP/IGES files loaded via trimesh often return meter-scale values
     # (matching the glTF convention).  If all dimensions are < 1 unit, the
     # mesh is almost certainly in meters — scale to mm so metrics are correct.
-    if ext in ("step", "stp", "igs", "iges", "glb", "gltf"):
+    if ext in ("step", "stp", "igs", "iges", "glb", "gltf"):  # noqa: SIM102
         if mesh.extents is not None and max(mesh.extents.tolist()) < 1.0:
             mesh.apply_scale(1000.0)
             logger.info(
@@ -1807,7 +1918,7 @@ def _analyze_bytes_worker(data: bytes, file_extension: str) -> dict[str, Any]:
                     tmp_path = tmp.name
 
                 logger.info(
-                    f"Loading CAD file with gmsh (timeout={GMSH_MESH_TIMEOUT_SECONDS}s)",
+                    f"Loading CAD file with gmsh (timeout={GMSH_MESH_TIMEOUT_SECONDS}s)",  # noqa: E501
                     extra={
                         "event": "gmsh_start",
                         "extension": ext,
@@ -1894,11 +2005,11 @@ def _analyze_bytes_worker(data: bytes, file_extension: str) -> dict[str, Any]:
                 preview_images = _generate_preview_images_sync(mesh)
             if not is_manifold:
                 logger.warning(
-                    "Mesh is not manifold (not watertight) — previews generated with best-effort geometry"
+                    "Mesh is not manifold (not watertight) — previews generated with best-effort geometry"  # noqa: E501
                 )
         else:
             logger.warning(
-                "Mesh has no polygon faces — skipping preview generation (point cloud or line mesh)"
+                "Mesh has no polygon faces — skipping preview generation (point cloud or line mesh)"  # noqa: E501
             )
 
         thumbnail_bytes = preview_images.get("thumbnail_small")
@@ -1929,7 +2040,7 @@ def _analyze_bytes_worker(data: bytes, file_extension: str) -> dict[str, Any]:
 
 
 def _render_small_thumbnail_worker(stl_bytes: bytes) -> bytes | None:
-    """Phase 2 worker: renders a 256px isometric thumbnail from STL bytes. Runs in a separate process."""
+    """Phase 2 worker: renders a 256px isometric thumbnail from STL bytes. Runs in a separate process."""  # noqa: E501
     try:
         import pyvista as pv
 
@@ -1995,8 +2106,7 @@ def _render_thumbnail_from_glb_worker(glb_bytes: bytes) -> bytes | None:
                 "Successfully rendered thumbnail using headless matplotlib renderer"
             )
             return thumbnail
-        else:
-            logger.warning("Headless rendering failed, falling back to PyVista")
+        logger.warning("Headless rendering failed, falling back to PyVista")
 
     except ImportError:
         logger.info("Headless thumbnail renderer not available, using PyVista fallback")
@@ -2010,9 +2120,9 @@ def _render_thumbnail_from_glb_worker(glb_bytes: bytes) -> bytes | None:
 def _render_thumbnail_from_glb_worker_fallback(glb_bytes: bytes) -> bytes | None:
     """Fallback thumbnail rendering using PyVista (legacy method)."""
     try:
-        import trimesh
-        import pyvista as pv
         import numpy as np
+        import pyvista as pv
+        import trimesh
 
         pv.OFF_SCREEN = True
 
@@ -2024,14 +2134,14 @@ def _render_thumbnail_from_glb_worker_fallback(glb_bytes: bytes) -> bytes | None
             tmesh = tmesh.dump(concatenate=True)
         if not isinstance(tmesh, trimesh.Trimesh) or len(tmesh.vertices) == 0:
             logger.warning(
-                "_render_thumbnail_from_glb_worker_fallback: empty or non-Trimesh after load"
+                "_render_thumbnail_from_glb_worker_fallback: empty or non-Trimesh after load"  # noqa: E501
             )
             return None
 
         vertices = tmesh.vertices
         faces = tmesh.faces  # shape (N, 3) — trimesh triangles, no count prefix
 
-        # PyVista PolyData requires faces as flat array: [3, v0, v1, v2, 3, v0, v1, v2, ...]
+        # PyVista PolyData requires faces as flat array: [3, v0, v1, v2, 3, v0, v1, v2, ...]  # noqa: E501
         faces_pv = np.hstack(
             [np.full((len(faces), 1), 3, dtype=np.int32), faces]
         ).flatten()
@@ -2096,7 +2206,7 @@ def _export_glb_worker(cad_glb_bytes: bytes, file_ext: str = "") -> bytes | None
     Args:
         cad_glb_bytes: GLB bytes from Phase 1 (may be meters or mm depending on source)
         file_ext: Original file extension (with dot, e.g., ".step", ".stl") to determine units
-    """
+    """  # noqa: E501
     # Z-up → Y-up pre-rotation.
     # −90° around X: (x, y, z) → (x, z, −y) — original Z (up) becomes glTF Y (up).
     z_to_yup = np.array(
@@ -2115,7 +2225,7 @@ def _export_glb_worker(cad_glb_bytes: bytes, file_ext: str = "") -> bytes | None
 
         if isinstance(scene_data, trimesh.Scene) and len(scene_data.geometry) > 1:
             # Multi-body: preserve node hierarchy so the viewer can color/select bodies.
-            try:
+            try:  # noqa: SIM105
                 scene_data.apply_translation(-scene_data.centroid)  # center at origin
             except Exception:
                 pass
@@ -2188,10 +2298,29 @@ def _quick_quality_check(
             }
 
         # Basic mesh properties
-        is_manifold = mesh.is_watertight
+        is_manifold, non_manifold_reason, non_manifold_face_count = _mesh_manifold_info(
+            mesh
+        )
         is_empty = len(mesh.faces) == 0
         face_count = len(mesh.faces)
         vertex_count = len(mesh.vertices)
+        body_count = len(_split_significant_mesh_bodies(mesh))
+
+        if is_empty:
+            elapsed = time.time() - start_time
+            logger.info(
+                f"Quality check completed in {elapsed:.2f}s "
+                f"(faces={face_count}, complexity=simple)"
+            )
+            return {
+                "is_manifold": False,
+                "is_empty": True,
+                "face_count": 0,
+                "vertex_count": 0,
+                "complexity": "simple",
+                "error": "empty_mesh",
+                "error_detail": "STL parsing produced 0 faces — bytes may not be valid STL.",  # noqa: E501
+            }
 
         # Geometry metrics
         extents = (
@@ -2221,9 +2350,10 @@ def _quick_quality_check(
         brep_face_count = None
         if cad_bytes and cad_extension in ("step", "stp", "igs", "iges"):
             try:
-                import cadquery as cq
-                import tempfile as _tmpmod
                 import os as _os
+                import tempfile as _tmpmod
+
+                import cadquery as cq
                 from OCP.TopAbs import TopAbs_FACE as _TopAbs_FACE
                 from OCP.TopExp import TopExp_Explorer as _TopExp_Explorer
 
@@ -2246,10 +2376,8 @@ def _quick_quality_check(
                             _exp.Next()
                         brep_face_count = _cnt
                 finally:
-                    try:
-                        _os.unlink(_tmp_path)
-                    except OSError:
-                        pass
+                    with contextlib.suppress(OSError):
+                        _os.unlink(_tmp_path)  # noqa: PTH108
             except Exception as occ_err:
                 logger.warning("OCC topology face count failed: %s", occ_err)
 
@@ -2269,7 +2397,9 @@ def _quick_quality_check(
             "bounding_box": bounding_box,
             "can_preview": not is_empty,
             "complexity": complexity,
-            "body_count": 1,
+            "body_count": body_count,
+            "non_manifold_reason": non_manifold_reason,
+            "non_manifold_face_count": non_manifold_face_count,
             "brep_face_count": brep_face_count,
         }
 
@@ -2312,35 +2442,35 @@ def _analyze_single_process(
     start_time = time.time()
 
     try:
+        from src.core.cnc_analyzers import (
+            compute_sharp_corner_analysis,  # noqa: F401
+            detect_axial_symmetry,  # noqa: F401
+            detect_cavities,  # noqa: F401
+            detect_chatter_risk,  # noqa: F401
+            detect_deep_narrow_cavities,  # noqa: F401
+            detect_grooves,  # noqa: F401
+            detect_internal_radii,  # noqa: F401
+            detect_tool_access,  # noqa: F401
+        )
         from src.core.dfm_thresholds import (
-            MILLING_RULES,
+            MILLING_RULES,  # noqa: F401
             PRINTING_RULES,
-            TURNING_RULES,
-            get_tool_for_radius,
+            TURNING_RULES,  # noqa: F401
+            get_tool_for_radius,  # noqa: F401
         )
         from src.core.mesh_analyzers import (
-            compute_overhang_analysis,
-            compute_thin_wall_analysis,
-            compute_unsupported_wall_analysis,
-            detect_bridges,
-            detect_connecting_clearance,
-            detect_embossed_engraved,
-            detect_escape_hole_risk,
+            compute_overhang_analysis,  # noqa: F401
+            compute_thin_wall_analysis,  # noqa: F401
+            compute_unsupported_wall_analysis,  # noqa: F401
+            detect_bridges,  # noqa: F401
+            detect_connecting_clearance,  # noqa: F401
+            detect_embossed_engraved,  # noqa: F401
+            detect_escape_hole_risk,  # noqa: F401
             detect_holes_mesh,
             detect_hollow_regions,
-            detect_small_features,
-            detect_small_features_occ,
-            detect_thin_pins,
-        )
-        from src.core.cnc_analyzers import (
-            compute_sharp_corner_analysis,
-            detect_axial_symmetry,
-            detect_cavities,
-            detect_chatter_risk,
-            detect_deep_narrow_cavities,
-            detect_grooves,
-            detect_internal_radii,
-            detect_tool_access,
+            detect_small_features,  # noqa: F401
+            detect_small_features_occ,  # noqa: F401
+            detect_thin_pins,  # noqa: F401
         )
         from src.core.occ_analyzer import analyze_step_brep
     except ImportError as _imp_err:
@@ -2351,6 +2481,20 @@ def _analyze_single_process(
         mesh = trimesh.load(io.BytesIO(stl_bytes), file_type="stl", force="mesh")
         if not isinstance(mesh, trimesh.Trimesh):
             return {"error_type": "ValueError", "message": "Invalid mesh format"}
+        if len(mesh.faces) == 0:
+            return {
+                "error_type": "EmptyMesh",
+                "message": "STL bytes produced an empty mesh (0 faces). Input may not be valid STL.",  # noqa: E501
+            }
+
+        # Sanitize mesh to remove degenerate/unreferenced vertices that cause
+        # trimesh.geometry.vertex_face_indices count-mismatch crashes.
+        mesh = mesh.copy()
+        mesh.process(validate=True)
+        mesh.remove_unreferenced_vertices()
+        mesh.merge_vertices()
+        mesh.update_faces(mesh.unique_faces())
+        mesh.update_faces(mesh.nondegenerate_faces())
 
         extents = (
             mesh.extents if mesh.extents is not None else np.array([0.0, 0.0, 0.0])
@@ -2401,7 +2545,7 @@ def _analyze_single_process(
                         _time.time(),
                     )
                     logger.info(
-                        "OCC cache MISS — tessellated+cached process=%s tol=%.2f features=%d",
+                        "OCC cache MISS — tessellated+cached process=%s tol=%.2f features=%d",  # noqa: E501
                         process_code,
                         _tol,
                         len(occ_features),
@@ -2496,14 +2640,15 @@ def _analyze_single_process(
         # here ensures RSS drops between per-body tasks even when summary
         # generation raises.
         import gc
-        try: del mesh
-        except NameError: pass
-        try: del issues
-        except NameError: pass
-        try: del occ_features
-        except NameError: pass
-        try: del occ_face_tag_to_tri
-        except NameError: pass
+
+        with contextlib.suppress(NameError):
+            del mesh
+        with contextlib.suppress(NameError):
+            del issues
+        with contextlib.suppress(NameError):
+            del occ_features
+        with contextlib.suppress(NameError):
+            del occ_face_tag_to_tri
         gc.collect()
 
 
@@ -2522,6 +2667,15 @@ def _analyze_single_body(
         mesh = trimesh.load(io.BytesIO(stl_bytes), file_type="stl", force="mesh")
         if not isinstance(mesh, trimesh.Trimesh):
             return {}
+
+        # Sanitize mesh to remove degenerate/unreferenced vertices that cause
+        # trimesh.geometry.vertex_face_indices count-mismatch crashes.
+        mesh = mesh.copy()
+        mesh.process(validate=True)
+        mesh.remove_unreferenced_vertices()
+        mesh.merge_vertices()
+        mesh.update_faces(mesh.unique_faces())
+        mesh.update_faces(mesh.nondegenerate_faces())
 
         # Quality metrics (lightweight, always computed)
         reports: dict[str, Any] = {
@@ -2547,9 +2701,7 @@ def _analyze_single_body(
         }
 
         # ── FDM analysis (real results, <15 s per body) ───────────────────────
-        fdm_result = _analyze_single_process(
-            stl_bytes, "FDM", cad_bytes, cad_extension
-        )
+        fdm_result = _analyze_single_process(stl_bytes, "FDM", cad_bytes, cad_extension)
         if fdm_result and "error_type" not in fdm_result:
             reports["FDM"] = fdm_result
         else:
@@ -2618,7 +2770,7 @@ def _analyze_printing_process(
     process_code: str,
     occ_features: list[Any],
     all_holes: list[Any],
-    support_mm3: float,
+    support_mm3: float,  # noqa: ARG001
     bodies: list[Any] | None = None,
 ) -> list[dict[str, Any]]:
     """Analyze mesh for a specific 3D printing process.
@@ -2669,9 +2821,13 @@ def _analyze_printing_process(
     issues: list[dict[str, Any]] = []
 
     # Thin wall (supported)
-    tw_count, tw_centroids, tw_face_idx = compute_thin_wall_analysis(
-        mesh, rules.supported_wall_mm
-    )
+    try:
+        tw_count, tw_centroids, tw_face_idx = compute_thin_wall_analysis(
+            mesh, rules.supported_wall_mm
+        )
+    except Exception as _e:
+        logger.warning("Thin wall detection failed: %s", _e)
+        tw_count, tw_centroids, tw_face_idx = 0, [], []
     if tw_count > 0:
         issues.append(
             {
@@ -2693,9 +2849,13 @@ def _analyze_printing_process(
     # Unsupported wall (not applicable for powder-bed processes)
     uw_count, uw_centroids, uw_face_idx = 0, [], []
     if rules.unsupported_wall_mm is not None:
-        uw_count, uw_centroids, uw_face_idx = compute_unsupported_wall_analysis(
-            mesh, rules.unsupported_wall_mm
-        )
+        try:
+            uw_count, uw_centroids, uw_face_idx = compute_unsupported_wall_analysis(
+                mesh, rules.unsupported_wall_mm
+            )
+        except Exception as _e:
+            logger.warning("Unsupported wall detection failed: %s", _e)
+            uw_count, uw_centroids, uw_face_idx = 0, [], []
         if uw_count > 0:
             issues.append(
                 {
@@ -2719,9 +2879,13 @@ def _analyze_printing_process(
     powder_bed_processes = ["SLS", "MJF", "BJ", "DMLS"]
     oh_count, oh_area_cm2, oh_centroids, oh_face_idx = 0, 0.0, [], []
     if rules.max_overhang_deg is not None and process_code not in powder_bed_processes:
-        oh_count, oh_area_cm2, oh_centroids, oh_face_idx = compute_overhang_analysis(
-            mesh, rules.max_overhang_deg
-        )
+        try:
+            oh_count, oh_area_cm2, oh_centroids, oh_face_idx = compute_overhang_analysis(
+                mesh, rules.max_overhang_deg
+            )
+        except Exception as _e:
+            logger.warning("Overhang detection failed: %s", _e)
+            oh_count, oh_area_cm2, oh_centroids, oh_face_idx = 0, 0.0, [], []
         if oh_count > 0:
             issues.append(
                 {
@@ -2775,7 +2939,11 @@ def _analyze_printing_process(
     # Bridges (only for processes where a span limit is defined)
     # OPTIMIZATION: Skip bridge check for powder-bed processes (SLS, MJF, BJ, DMLS)
     if rules.bridge_span_mm is not None and process_code not in powder_bed_processes:
-        br_count, br_centroids, br_face_idx = detect_bridges(mesh, rules.bridge_span_mm)
+        try:
+            br_count, br_centroids, br_face_idx = detect_bridges(mesh, rules.bridge_span_mm)
+        except Exception as _e:
+            logger.warning("Bridge detection failed: %s", _e)
+            br_count, br_centroids, br_face_idx = 0, [], []
         if br_count > 0:
             issues.append(
                 {
@@ -2795,14 +2963,18 @@ def _analyze_printing_process(
             )
 
     # Small features — use CAD topology when available (STEP/IGES)
-    if occ_features:
-        sf_count, sf_centroids, sf_face_idx = detect_small_features_occ(
-            occ_features, rules.min_feature_mm, mesh
-        )
-    else:
-        sf_count, sf_centroids, sf_face_idx = detect_small_features(
-            mesh, rules.min_feature_mm
-        )
+    try:
+        if occ_features:
+            sf_count, sf_centroids, sf_face_idx = detect_small_features_occ(
+                occ_features, rules.min_feature_mm, mesh
+            )
+        else:
+            sf_count, sf_centroids, sf_face_idx = detect_small_features(
+                mesh, rules.min_feature_mm
+            )
+    except Exception as _e:
+        logger.warning("Small features detection failed: %s", _e)
+        sf_count, sf_centroids, sf_face_idx = 0, [], []
     if sf_count > 0:
         issues.append(
             {
@@ -2823,9 +2995,13 @@ def _analyze_printing_process(
 
     # Thin pins / columns — pass all_holes so detect_thin_pins skips its own
     # detect_holes_mesh call (T2e: holes already computed at 0.1 mm threshold).
-    pin_count, pin_centroids, pin_face_idx = detect_thin_pins(
-        mesh, rules.pin_diameter_mm, precomputed_holes=all_holes
-    )
+    try:
+        pin_count, pin_centroids, pin_face_idx = detect_thin_pins(
+            mesh, rules.pin_diameter_mm, precomputed_holes=all_holes
+        )
+    except Exception as _e:
+        logger.warning("Thin pin detection failed: %s", _e)
+        pin_count, pin_centroids, pin_face_idx = 0, [], []
     if pin_count > 0:
         issues.append(
             {
@@ -2846,12 +3022,16 @@ def _analyze_printing_process(
 
     # Escape holes (enclosed volumes without drainage)
     if rules.escape_hole_diameter_mm is not None:
-        esc_has_risk, esc_centroids, esc_face_idx = detect_escape_hole_risk(
-            mesh,
-            rules.escape_hole_diameter_mm,
-            bodies=bodies,
-            precomputed_holes=all_holes,
-        )
+        try:
+            esc_has_risk, esc_centroids, esc_face_idx = detect_escape_hole_risk(
+                mesh,
+                rules.escape_hole_diameter_mm,
+                bodies=bodies,
+                precomputed_holes=all_holes,
+            )
+        except Exception as _e:
+            logger.warning("Escape hole detection failed: %s", _e)
+            esc_has_risk, esc_centroids, esc_face_idx = False, [], []
         if esc_has_risk:
             issues.append(
                 {
@@ -2873,11 +3053,15 @@ def _analyze_printing_process(
 
     # Connecting clearance (multi-body assemblies)
     if rules.connecting_clearance_mm is not None:
-        cl_count, cl_centroids, cl_face_idx = detect_connecting_clearance(
-            mesh,
-            rules.connecting_clearance_mm,
-            bodies=bodies,
-        )
+        try:
+            cl_count, cl_centroids, cl_face_idx = detect_connecting_clearance(
+                mesh,
+                rules.connecting_clearance_mm,
+                bodies=bodies,
+            )
+        except Exception as _e:
+            logger.warning("Connecting clearance detection failed: %s", _e)
+            cl_count, cl_centroids, cl_face_idx = 0, [], []
         if cl_count > 0:
             issues.append(
                 {
@@ -2897,9 +3081,13 @@ def _analyze_printing_process(
             )
 
     # Embossed / engraved features
-    emb_count, emb_centroids, emb_face_idx = detect_embossed_engraved(
-        mesh, rules.embossed_width_mm, rules.embossed_height_mm
-    )
+    try:
+        emb_count, emb_centroids, emb_face_idx = detect_embossed_engraved(
+            mesh, rules.embossed_width_mm, rules.embossed_height_mm
+        )
+    except Exception as _e:
+        logger.warning("Embossed/engraved detection failed: %s", _e)
+        emb_count, emb_centroids, emb_face_idx = 0, [], []
     if emb_count > 0:
         issues.append(
             {
@@ -2927,7 +3115,7 @@ def _analyze_printing_process(
 
 def _analyze_cnc_milling(
     mesh: trimesh.Trimesh,
-    occ_features: list[Any],
+    occ_features: list[Any],  # noqa: ARG001
     all_holes: list[Any],
 ) -> list[dict[str, Any]]:
     """Analyze mesh for CNC milling process.
@@ -2940,7 +3128,6 @@ def _analyze_cnc_milling(
     Returns:
         List of DFM issue dicts
     """
-    from src.core.dfm_thresholds import MILLING_RULES, get_tool_for_radius
     from src.core.cnc_analyzers import (
         compute_sharp_corner_analysis,
         detect_cavities,
@@ -2949,6 +3136,7 @@ def _analyze_cnc_milling(
         detect_internal_radii,
         detect_tool_access,
     )
+    from src.core.dfm_thresholds import MILLING_RULES, get_tool_for_radius
 
     issues: list[dict[str, Any]] = []
 
@@ -3006,7 +3194,7 @@ def _analyze_cnc_milling(
                 "severity": "error" if max_dr > 8.0 else "warning",
                 "title": f"Deep Cavities ({dc_count})",
                 "description": (
-                    f"{dc_count} cavity/cavities exceed the {MILLING_RULES.cavity_depth_ratio}:1"
+                    f"{dc_count} cavity/cavities exceed the {MILLING_RULES.cavity_depth_ratio}:1"  # noqa: E501
                     f" depth/width limit. Worst: {max_dr:.1f}:1."
                 ),
                 "value": float(max_dr),
@@ -3116,7 +3304,7 @@ def _analyze_cnc_milling(
 
 def _analyze_cnc_turning(
     mesh: trimesh.Trimesh,
-    occ_features: list[Any],
+    occ_features: list[Any],  # noqa: ARG001
 ) -> list[dict[str, Any]]:
     """Analyze mesh for CNC turning process.
 
@@ -3127,12 +3315,12 @@ def _analyze_cnc_turning(
     Returns:
         List of DFM issue dicts
     """
-    from src.core.dfm_thresholds import TURNING_RULES
     from src.core.cnc_analyzers import (
+        _compute_z_slice_profile,
         detect_axial_symmetry,
         detect_grooves,
-        _compute_z_slice_profile,
     )
+    from src.core.dfm_thresholds import TURNING_RULES
 
     # T3e: compute Z-slice profile once; share between detect_axial_symmetry
     # and detect_grooves so only one section_multiplane pass is needed.
@@ -3254,14 +3442,13 @@ def _generate_printing_summary(issues: list[dict[str, Any]]) -> dict[str, Any]:
 
 def _generate_cnc_milling_summary(
     issues: list[dict[str, Any]],
-    mesh: trimesh.Trimesh,
+    mesh: trimesh.Trimesh,  # noqa: ARG001
 ) -> dict[str, Any]:
     """Generate legacy summary fields for CNC milling process.
 
     Extracts key metrics from issues list for backward compatibility.
     """
     from src.core.dfm_thresholds import MILLING_RULES
-    from src.core.cnc_analyzers import detect_internal_radii, detect_tool_access
 
     summary = {
         "sharpCornerCount": 0,
@@ -3370,23 +3557,24 @@ def _compute_dfm_single_body(
             logger.info(f"Processing body {body_id} (worker diagnostics unavailable)")
 
         # Read STL bytes
-        with open(stl_path, "rb") as fh:
+        with open(stl_path, "rb") as fh:  # noqa: PTH123
             stl_bytes = fh.read()
 
         # Read CAD bytes if available
         cad_bytes = None
-        if cad_path and os.path.exists(cad_path):
-            with open(cad_path, "rb") as fh:
+        if cad_path and os.path.exists(cad_path):  # noqa: PTH110
+            with open(cad_path, "rb") as fh:  # noqa: PTH123
                 cad_bytes = fh.read()
 
         # Collect any garbage from previous tasks before starting — workers live
         # for maxtasksperchild tasks and can accumulate trimesh/numpy residuals.
         import gc
+
         gc.collect()
 
         # Run DFM analysis with timeout to prevent indefinite hangs
         # Use 90s timeout to allow complex geometries to complete
-        SINGLE_BODY_DFM_TIMEOUT = (
+        SINGLE_BODY_DFM_TIMEOUT = (  # noqa: N806
             90  # seconds - increased from 50s for complex geometries
         )
 
@@ -3395,9 +3583,9 @@ def _compute_dfm_single_body(
             # Unix: use signal.SIGALRM
             import signal
 
-            def _timeout_handler(signum, frame):
+            def _timeout_handler(signum, frame):  # noqa: ARG001
                 raise TimeoutError(
-                    f"Single-body DFM analysis timed out after {SINGLE_BODY_DFM_TIMEOUT}s"
+                    f"Single-body DFM analysis timed out after {SINGLE_BODY_DFM_TIMEOUT}s"  # noqa: E501
                 )
 
             old_handler = signal.signal(signal.SIGALRM, _timeout_handler)
@@ -3425,7 +3613,7 @@ def _compute_dfm_single_body(
             def _run_analysis():
                 try:
                     result_container[0] = _analyze_single_body(
-                        stl_bytes, cad_bytes, cad_ext
+                        stl_bytes, cad_bytes, cad_ext  # noqa: F821
                     )
                 except Exception as e:
                     exception_container[0] = e
@@ -3437,7 +3625,7 @@ def _compute_dfm_single_body(
             if worker_thread.is_alive():
                 # Thread is still running - timeout
                 raise TimeoutError(
-                    f"Single-body DFM analysis timed out after {SINGLE_BODY_DFM_TIMEOUT}s"
+                    f"Single-body DFM analysis timed out after {SINGLE_BODY_DFM_TIMEOUT}s"  # noqa: E501
                 )
 
             if exception_container[0] is not None:
@@ -3445,7 +3633,7 @@ def _compute_dfm_single_body(
 
             if result_container[0] is None:
                 raise TimeoutError(
-                    f"Single-body DFM analysis timed out after {SINGLE_BODY_DFM_TIMEOUT}s (no result)"
+                    f"Single-body DFM analysis timed out after {SINGLE_BODY_DFM_TIMEOUT}s (no result)"  # noqa: E501
                 )
 
             result = result_container[0]
@@ -3479,10 +3667,11 @@ def _compute_dfm_single_body(
         # Free large byte buffers regardless of success/failure — GC collects
         # any remaining trimesh/numpy residuals before the next body runs.
         import gc
-        try: del stl_bytes
-        except NameError: pass
-        try: del cad_bytes
-        except NameError: pass
+
+        with contextlib.suppress(NameError):
+            del stl_bytes
+        with contextlib.suppress(NameError):
+            del cad_bytes
         gc.collect()
 
 
@@ -3689,7 +3878,7 @@ def _compute_dfm_worker(
       - Legacy summary fields for backward-compat with existing C# consumers.
 
     Runs in a separate process via ProcessPoolExecutor.
-    """
+    """  # noqa: E501
     # Handle multi-body input
     is_multi_body = isinstance(stl_bytes, dict)
 
@@ -3710,7 +3899,7 @@ def _compute_dfm_worker(
         # Each body analysis is independent, so we can process them concurrently
         # Max 4 workers to balance parallelism with resource usage
         # Per-body timeout prevents indefinite hangs (90s for complex geometries)
-        PER_BODY_TIMEOUT = 90  # seconds - increased from 50s for complex geometries
+        PER_BODY_TIMEOUT = 90  # noqa: N806
 
         with ThreadPoolExecutor(max_workers=4) as executor:
             # Submit all bodies for analysis
@@ -3798,9 +3987,8 @@ def _compute_dfm_worker(
             "per_body_reports": per_body_reports,  # Include for debugging
             "body_count": len(stl_bytes),
         }
-    else:
-        # Legacy single-body path
-        return _analyze_single_body(stl_bytes, cad_bytes, cad_extension)
+    # Legacy single-body path
+    return _analyze_single_body(stl_bytes, cad_bytes, cad_extension)
 
 
 def _generate_overlays_worker(
@@ -3818,7 +4006,7 @@ def _generate_overlays_worker(
         stl_bytes: EITHER single bytes (legacy) OR dict mapping body_id → stl_bytes (multi-body).
                    Tessellated mesh(es) in STL format (Z-up, mm).
         reports:   DFM reports dict from ``_compute_dfm_worker``.
-    """
+    """  # noqa: E501
     try:
         from src.core.overlay_generator import (
             generate_multi_body_overlay_glb,
@@ -3897,15 +4085,25 @@ def _generate_overlays_worker(
                 except Exception as _mb_err:
                     logger.debug("Multi-body overlay GLB failed: %s", _mb_err)
 
-        # OPTIMIZATION: Only process actual DFM reports, skip quality metrics and deferred reports
+        # OPTIMIZATION: Only process actual DFM reports, skip quality metrics and deferred reports  # noqa: E501
         from src.core.dfm_thresholds import PRINTING_RULES
 
         # Valid process codes that can have overlay visualizations
         process_keys = set(PRINTING_RULES.keys()) | {"CNC_MILL", "CNC", "CNC_TURN"}
 
+        logger.info(
+            "Overlay worker: report_keys=%s valid_process_keys=%s",
+            list(reports.keys()),
+            sorted(process_keys),
+        )
+
         for process_code, report in reports.items():
             # Skip if not a process report (e.g., "quality", "hollow_regions")
             if process_code not in process_keys:
+                logger.warning(
+                    "Overlay worker: skipping unknown process_code=%r (not in valid process keys)",  # noqa: E501
+                    process_code,
+                )
                 continue
 
             # Skip CNC turning (overlays not yet supported)
@@ -3917,6 +4115,13 @@ def _generate_overlays_worker(
                 continue
 
             issues = report.get("issues", [])
+            issues_with_faces = sum(1 for i in issues if i.get("faceIndices"))
+            logger.info(
+                "Overlay worker: process=%s total_issues=%d issues_with_face_indices=%d",  # noqa: E501
+                process_code,
+                len(issues),
+                issues_with_faces,
+            )
             seen_keys: set[str] = set()
             for issue in issues:
                 category: str = issue.get("category", "")
@@ -3952,8 +4157,8 @@ def _generate_overlays_worker(
                         _glb_err,
                     )
 
-            # Support-tower overlay: union of all overhang face indices for this process.
-            # Generates {process}__overhang_support alongside the regular overhang overlay.
+            # Support-tower overlay: union of all overhang face indices for this process.  # noqa: E501
+            # Generates {process}__overhang_support alongside the regular overhang overlay.  # noqa: E501
             all_overhang_indices: list[int] = []
             for issue in issues:
                 if issue.get("category") == "overhang":
@@ -3982,7 +4187,7 @@ def _generate_overlays_worker(
 
 
 def _render_large_preview_worker(stl_bytes: bytes) -> dict[str, bytes | None]:
-    """Phase 2 worker: generates 7 preview images (6 ortho + 1 iso) + 1200px ISO in PARALLEL. Runs in a separate process."""
+    """Phase 2 worker: generates 7 preview images (6 ortho + 1 iso) + 1200px ISO in PARALLEL. Runs in a separate process."""  # noqa: E501
     try:
         mesh = trimesh.load(io.BytesIO(stl_bytes), file_type="stl", force="mesh")
         if not isinstance(mesh, trimesh.Trimesh):
@@ -4002,10 +4207,8 @@ def _render_preview_from_glb_worker(glb_bytes: bytes) -> dict[str, bytes | None]
 
     Implements progressive rendering: if one view fails, returns partial results
     instead of discarding all successful views.
-    """
+    """  # noqa: E501
     import trimesh
-    import pyvista as pv
-    import numpy as np
 
     # Return empty result structure for failures
     empty_result = {f"{view}_small": None for view in ORTHO_VIEWS}
@@ -4088,7 +4291,7 @@ def _render_thumbnail_worker(glb_path: str) -> bytes | None:
 
     GLB-first pipeline: all formats produce GLB in Phase 1, Phase 2 always uses GLB.
     """
-    if not os.path.exists(glb_path):
+    if not os.path.exists(glb_path):  # noqa: PTH110
         logger.warning(f"GLB thumbnail source not found: {glb_path}")
         return None
 
@@ -4096,7 +4299,6 @@ def _render_thumbnail_worker(glb_path: str) -> bytes | None:
     cached_glb = _get_cached_glb(glb_path)
     if cached_glb:
         # Export cached GLB to bytes for the worker
-        import io
 
         glb_bytes = (
             cached_glb.export(file_type="glb")
@@ -4107,7 +4309,7 @@ def _render_thumbnail_worker(glb_path: str) -> bytes | None:
             return _render_thumbnail_from_glb_worker(glb_bytes)
 
     # Fallback: load from disk
-    with open(glb_path, "rb") as fh:
+    with open(glb_path, "rb") as fh:  # noqa: PTH123
         return _render_thumbnail_from_glb_worker(fh.read())
 
 
@@ -4120,7 +4322,7 @@ def _export_glb_from_paths(cad_glb_path: str, file_ext: str = "") -> bytes | Non
         cad_glb_path: Path to cad.glb file written by Phase 1
         file_ext: Original file extension (with dot, e.g., ".step", ".stl")
     """
-    if not os.path.exists(cad_glb_path):
+    if not os.path.exists(cad_glb_path):  # noqa: PTH110
         logger.warning(f"GLB export source not found: {cad_glb_path}")
         return None
 
@@ -4137,7 +4339,7 @@ def _export_glb_from_paths(cad_glb_path: str, file_ext: str = "") -> bytes | Non
             return _export_glb_worker(glb_bytes, file_ext)
 
     # Fallback: load from disk
-    with open(cad_glb_path, "rb") as fh:
+    with open(cad_glb_path, "rb") as fh:  # noqa: PTH123
         return _export_glb_worker(fh.read(), file_ext)
 
 
@@ -4146,7 +4348,7 @@ def _render_preview_worker(glb_path: str) -> dict[str, bytes | None]:
 
     GLB-first pipeline: all formats produce GLB in Phase 1, Phase 2 always uses GLB.
     """
-    if not os.path.exists(glb_path):
+    if not os.path.exists(glb_path):  # noqa: PTH110
         logger.warning(f"GLB preview source not found: {glb_path}")
         return {}
 
@@ -4154,7 +4356,6 @@ def _render_preview_worker(glb_path: str) -> dict[str, bytes | None]:
     cached_glb = _get_cached_glb(glb_path)
     if cached_glb:
         # Export cached GLB to bytes for the worker
-        import io
 
         glb_bytes = (
             cached_glb.export(file_type="glb")
@@ -4165,7 +4366,7 @@ def _render_preview_worker(glb_path: str) -> dict[str, bytes | None]:
             return _render_preview_from_glb_worker(glb_bytes)
 
     # Fallback: load from disk
-    with open(glb_path, "rb") as fh:
+    with open(glb_path, "rb") as fh:  # noqa: PTH123
         return _render_preview_from_glb_worker(fh.read())
 
 
@@ -4187,17 +4388,18 @@ def _compute_dfm_from_paths(
 
     For pure STL/OBJ uploads:
     - Uses pre-exported STL files
-    """
+    """  # noqa: E501
     stl_bytes_dict: dict[int, bytes] = {}
 
     # Priority 1: Use GLB for multi-body mesh extraction (CAD files with cascadio)
-    if glb_path and os.path.exists(glb_path) and not stl_paths:
+    if glb_path and os.path.exists(glb_path) and not stl_paths:  # noqa: PTH110
         logger.info("Extracting per-body meshes from GLB for multi-body DFM analysis")
         try:
-            import trimesh
             import io
 
-            with open(glb_path, "rb") as fh:
+            import trimesh
+
+            with open(glb_path, "rb") as fh:  # noqa: PTH123
                 glb_bytes = fh.read()
 
             # Load GLB scene with trimesh
@@ -4246,13 +4448,13 @@ def _compute_dfm_from_paths(
     # Priority 2: Use pre-exported per-body STL files (legacy path)
     if not stl_bytes_dict and stl_paths:
         for idx, path in stl_paths.items():
-            with open(path, "rb") as fh:
+            with open(path, "rb") as fh:  # noqa: PTH123
                 stl_bytes_dict[idx] = fh.read()
 
     # Load CAD file for B-Rep analysis (fallback or single-body)
     cad_bytes: bytes | None = None
-    if cad_path and os.path.exists(cad_path):
-        with open(cad_path, "rb") as fh:
+    if cad_path and os.path.exists(cad_path):  # noqa: PTH110
+        with open(cad_path, "rb") as fh:  # noqa: PTH123
             cad_bytes = fh.read()
 
     # Multi-body: Run DFM per body using extracted meshes
@@ -4284,7 +4486,6 @@ def _generate_overlays_from_paths(
     Note: This returns GLB bytes, not GCS paths. The caller (upload_consumer)
     is responsible for uploading these bytes to GCS and converting to paths.
     """
-    import io
 
     # Use cached GLB to avoid redundant disk I/O
     scene_data = _get_cached_glb(glb_path)
@@ -4295,7 +4496,7 @@ def _generate_overlays_from_paths(
     # Extract per-body meshes for multi-body files
     mesh_bytes_dict: dict[int, bytes] = {}
     if isinstance(scene_data, trimesh.Scene):
-        for idx, (name, geom) in enumerate(scene_data.geometry.items()):
+        for idx, (_name, geom) in enumerate(scene_data.geometry.items()):
             if isinstance(geom, trimesh.Trimesh) and len(geom.vertices) > 0:
                 try:
                     mesh_bytes_dict[idx] = geom.export(file_type="stl")
@@ -4318,10 +4519,9 @@ def _generate_overlays_from_paths(
     )
 
     # Generate overlay GLBs (returns dict[str, bytes])
-    overlay_glbs = _generate_overlays_worker(mesh_bytes_dict, reports)
+    return _generate_overlays_worker(mesh_bytes_dict, reports)
 
     # Return GLB bytes - caller will upload to GCS
-    return overlay_glbs
 
 
 class GeometryProcessor:
@@ -4361,7 +4561,7 @@ class GeometryProcessor:
                 )
             except ImportError:
                 logger.warning(
-                    "DiagnosticExecutor unavailable, falling back to PoolExecutorWrapper"
+                    "DiagnosticExecutor unavailable, falling back to PoolExecutorWrapper"  # noqa: E501
                 )
                 self.executor = PoolExecutorWrapper(
                     processes=_workers,
@@ -4400,7 +4600,7 @@ class GeometryProcessor:
             initializer=_dfm_worker_initializer,
         )
 
-    def shutdown(self, timeout: int = 30) -> None:
+    def shutdown(self, timeout: int = 30) -> None:  # noqa: ARG002
         """Shutdown executors gracefully with timeout.
 
         Args:
@@ -4474,7 +4674,7 @@ class GeometryProcessor:
                         gmsh.initialize()
                         gmsh.option.setNumber("General.Verbosity", 0)
                         gmsh.open(tmp_path)
-                        # Use finer mesh for Phase 2 GLB quality (0.05mm) but with geometry healing
+                        # Use finer mesh for Phase 2 GLB quality (0.05mm) but with geometry healing  # noqa: E501
                         gmsh.option.setNumber("Mesh.CharacteristicLengthMax", 0.05)
                         gmsh.option.setNumber("Mesh.AngleSmoothNormals", 0.30)
                         # Enable geometry healing for problematic STEP files
@@ -4631,7 +4831,7 @@ def _get_legacy_processor() -> GeometryProcessor:
 
 def compute_dfm_analysis_for_stl(
     stl_bytes: bytes,
-    timeout_seconds: float = 30,
+    timeout_seconds: float = 30,  # noqa: ARG001
 ) -> dict[str, Any] | None:
     """Legacy compatibility wrapper for DFM analysis.
 
@@ -4648,7 +4848,10 @@ def compute_dfm_analysis_for_stl(
         # Convert the per-process report dict to a list of report objects
         reports = []
         for process_code, report in body_result.items():
-            if isinstance(report, dict) and process_code not in ("quality", "hollow_regions"):
+            if isinstance(report, dict) and process_code not in (
+                "quality",
+                "hollow_regions",
+            ):
                 reports.append({"body_id": 0, "process": process_code, **report})
 
         return {
@@ -4691,12 +4894,12 @@ def load_cascadio_geometry(
           error: str (only present on failure)
     """
     try:
-        meshes, _combined_glb, body_count, body_names = _load_cad_with_cascadio_isolated(
-            file_bytes, timeout_seconds
+        meshes, _combined_glb, body_count, body_names = (
+            _load_cad_with_cascadio_isolated(file_bytes, timeout_seconds)
         )
         bodies = [
             {"mesh": mesh.export(file_type="glb"), "name": name}
-            for mesh, name in zip(meshes, body_names)
+            for mesh, name in zip(meshes, body_names, strict=False)
         ]
         return {
             "success": True,
