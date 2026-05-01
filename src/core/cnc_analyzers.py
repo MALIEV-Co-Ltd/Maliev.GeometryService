@@ -10,8 +10,10 @@ from __future__ import annotations
 
 import logging
 import math
+from typing import Any
 
 import numpy as np
+import numpy.typing as npt
 
 from .dfm_models import (
     AxisSymmetryReport,
@@ -497,10 +499,14 @@ def _compute_z_slice_profile(
             if section is None:
                 continue
             try:
-                path2d, _ = section.to_planar()
-                if path2d is None or len(path2d.vertices) < 4:
+                if hasattr(section, "to_planar"):
+                    path2d, _ = section.to_planar()
+                else:
+                    path2d = section
+
+                pts = _extract_section_points(path2d)
+                if pts is None or len(pts) < 4:
                     continue
-                pts = path2d.vertices
                 centroid = pts.mean(axis=0)
                 radii = np.linalg.norm(pts - centroid, axis=1)
                 mean_r = float(radii.mean())
@@ -517,6 +523,22 @@ def _compute_z_slice_profile(
         logger.debug("_compute_z_slice_profile failed: %s", exc)
 
     return z_values, mean_radii, std_radii, max_radii
+
+
+def _extract_section_points(path2d: Any) -> npt.NDArray[np.float64] | None:
+    """Return ordered 2D boundary points from a trimesh section path."""
+    loops = getattr(path2d, "discrete", None)
+    if loops:
+        pts = np.asarray(max(loops, key=len), dtype=float)
+        if len(pts) > 1 and np.allclose(pts[0], pts[-1]):
+            pts = pts[:-1]
+        return pts
+
+    vertices = getattr(path2d, "vertices", None)
+    if vertices is None:
+        return None
+
+    return np.asarray(vertices, dtype=float)
 
 
 # ---------------------------------------------------------------------------

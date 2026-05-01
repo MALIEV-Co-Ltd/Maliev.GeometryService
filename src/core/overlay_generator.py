@@ -226,13 +226,12 @@ def generate_support_tower_overlay_glb(
     grid_spacing_mm: float = 2.0,
     wall_half: float = 0.2,
 ) -> bytes | None:
-    """Build a rectilinear-grid support structure GLB from overhanging faces.
+    """Build a face-following support mockup GLB from overhanging faces.
 
-    Creates two sets of thin walls: X-direction walls at fixed Y intervals and
-    Y-direction walls at fixed X intervals, spaced grid_spacing_mm apart.  Each
-    wall gets its own base height from a per-wall downward ray cast so pillars
-    hug the nearest upward-facing mesh surface below rather than starting from
-    the build plate, correctly handling stacked horizontal holes.
+    The support overlay is intentionally a translucent mockup, not generated
+    slicer support geometry. It preserves the selected mesh triangles instead
+    of replacing them with rectangular towers, so curved holes and organic
+    surfaces keep their real top/bottom boundaries in the viewer.
 
     The resulting GLB uses the same coordinate transform as generate_overlay_glb
     so it aligns with the main model.  OVERLAY_STYLES in part-viewer.js controls
@@ -242,15 +241,15 @@ def generate_support_tower_overlay_glb(
         mesh:             Source trimesh.Trimesh (Z-up, mm).
         face_indices:     Overhang triangle indices.
         reference_center: Centre used when the main GLB was exported.
-        grid_spacing_mm:  Spacing between adjacent parallel walls in mm.
-        wall_half:        Half-thickness of each wall cross-section in mm.
+        grid_spacing_mm:  Legacy parameter; ignored for face-following mockups.
+        wall_half:        Legacy parameter; ignored for face-following mockups.
 
     Returns:
         GLB bytes or None on failure.
     """
     import trimesh
 
-    support_clearance = 0.2  # mm gap above mesh face so pillar doesn't z-fight
+    _ = (grid_spacing_mm, wall_half)
 
     try:
         if not isinstance(mesh, trimesh.Trimesh):
@@ -263,143 +262,12 @@ def generate_support_tower_overlay_glb(
         if not valid_indices:
             return None
 
-        z_min = float(mesh.vertices[:, 2].min())
-        face_verts = mesh.vertices[mesh.faces[valid_indices]]  # (N, 3, 3)
-
-        all_xy = face_verts[:, :, :2].reshape(-1, 2)
-        xy_min = all_xy.min(axis=0)
-        xy_max = all_xy.max(axis=0)
-
-        z_top = float(face_verts.mean(axis=1)[:, 2].mean())
-        x_mid = float((xy_min[0] + xy_max[0]) / 2)
-        y_mid = float((xy_min[1] + xy_max[1]) / 2)
-
-        # Build intersector once for per-wall ray queries.
-        overhang_set = set(valid_indices)
-        fn = mesh.face_normals
-        try:
-            intersector = trimesh.ray.ray_triangle.RayMeshIntersector(mesh)
-        except Exception:
-            intersector = None
-
-        def _ray_z_bot(ox: float, oy: float) -> float:
-            """Downward ray at (ox, oy) → highest upward face below z_top."""
-            if intersector is None:
-                return z_min
-            try:
-                locs, _, face_idx_hit = intersector.intersects_location(
-                    ray_origins=np.array([[ox, oy, z_top + 0.1]]),
-                    ray_directions=np.array([[0.0, 0.0, -1.0]]),
-                    multiple_hits=True,
-                )
-                best = z_min
-                for loc, fi in zip(locs, face_idx_hit, strict=False):
-                    if fi in overhang_set:
-                        continue
-                    if fn[fi][2] <= 0.1:  # skip downward/vertical faces
-                        continue
-                    hz = float(loc[2])
-                    if hz < z_top - 0.05 and hz > best:
-                        best = hz
-                return best + support_clearance if best > z_min else z_min
-            except Exception:
-                return z_min
-
-        # Grid lines for X-direction walls (at fixed Y) and Y-direction walls (at fixed X).  # noqa: E501
-        y_lines = np.arange(
-            xy_min[1], xy_max[1] + grid_spacing_mm * 0.5, grid_spacing_mm
-        )
-        x_lines = np.arange(
-            xy_min[0], xy_max[0] + grid_spacing_mm * 0.5, grid_spacing_mm
-        )
-        if len(y_lines) == 0:
-            y_lines = np.array([y_mid])
-        if len(x_lines) == 0:
-            x_lines = np.array([x_mid])
-
-        # Wall extents (full overhang span + tiny margin for clean edges).
-        x_lo = float(xy_min[0]) - wall_half
-        x_hi = float(xy_max[0]) + wall_half
-        y_lo_full = float(xy_min[1]) - wall_half
-        y_hi_full = float(xy_max[1]) + wall_half
-
-        # Box topology: 8 verts, 12 triangles (6 quads × 2 tris).
-        local_tris = np.array(
-            [
-                [0, 1, 2],
-                [0, 2, 3],  # top cap
-                [4, 6, 5],
-                [4, 7, 6],  # bot cap (flipped winding)
-                [0, 4, 5],
-                [0, 5, 1],  # -Y side
-                [1, 5, 6],
-                [1, 6, 2],  # +X side
-                [2, 6, 7],
-                [2, 7, 3],  # +Y side
-                [3, 7, 4],
-                [3, 4, 0],  # -X side
-            ],
-            dtype=np.int64,
-        )
-
-        all_verts_list: list = []
-        all_faces_list: list = []
-        vert_offset = 0
-
-        def _add_wall(
-            x0: float, x1: float, y0: float, y1: float, z_bot: float
-        ) -> None:
-            nonlocal vert_offset
-            if z_top - z_bot < 0.1:
-                return  # pillar too short to render
-            verts = np.array(
-                [
-                    [x0, y0, z_top],
-                    [x1, y0, z_top],
-                    [x1, y1, z_top],
-                    [x0, y1, z_top],
-                    [x0, y0, z_bot],
-                    [x1, y0, z_bot],
-                    [x1, y1, z_bot],
-                    [x0, y1, z_bot],
-                ],
-                dtype=float,
-            )
-            all_verts_list.append(verts)
-            all_faces_list.append(local_tris + vert_offset)
-            vert_offset += 8
-
-        # X-direction walls: span full X range, thin in Y. Ray at x_mid for each y.
-        for y_pos in y_lines:
-            local_z = _ray_z_bot(x_mid, float(y_pos))
-            _add_wall(
-                x_lo,
-                x_hi,
-                float(y_pos) - wall_half,
-                float(y_pos) + wall_half,
-                local_z,
-            )
-
-        # Y-direction walls: span full Y range, thin in X. Ray at y_mid for each x.
-        for x_pos in x_lines:
-            local_z = _ray_z_bot(float(x_pos), y_mid)
-            _add_wall(
-                float(x_pos) - wall_half,
-                float(x_pos) + wall_half,
-                y_lo_full,
-                y_hi_full,
-                local_z,
-            )
-
-        if not all_verts_list:
+        support_mesh = mesh.submesh([valid_indices], append=True)
+        if (
+            not isinstance(support_mesh, trimesh.Trimesh)
+            or len(support_mesh.vertices) == 0
+        ):
             return None
-
-        all_verts = np.vstack(all_verts_list)
-        all_faces = np.vstack(all_faces_list)
-
-        support_mesh = trimesh.Trimesh(
-            vertices=all_verts, faces=all_faces, process=False
-        )
 
         center = reference_center if reference_center is not None else mesh.center_mass
         support_mesh.apply_translation(-center)

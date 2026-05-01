@@ -1297,7 +1297,6 @@ def _load_cad_with_cascadio_isolated(
     Returns:
         tuple[list[trimesh.Trimesh], bytes, int, list[str]]: meshes, glb_bytes, body_count, body_names
     """  # noqa: E501
-    import concurrent.futures
     import multiprocessing
     import os
     import tempfile
@@ -1327,21 +1326,23 @@ def _load_cad_with_cascadio_isolated(
 
         try:
             ret = future.get(timeout=timeout_seconds)
-        except concurrent.futures.TimeoutError:
+        except multiprocessing.TimeoutError as exc:
             pool.terminate()
             pool.join()
+            pool = None
 
             logger.warning(
                 f"cascadio timed out after {timeout_seconds}s loading {inp_path} - "
                 f"terminated process for clean cleanup"
             )
 
-            raise TimeoutError(  # noqa: B904
+            raise TimeoutError(
                 f"cascadio timed out after {timeout_seconds}s loading {inp_path}"
-            )
+            ) from exc
         finally:
-            pool.close()
-            pool.join()
+            if pool is not None:
+                pool.close()
+                pool.join()
 
         if ret != 0:
             raise ValueError(f"cascadio.step_to_glb returned {ret}")
@@ -1820,7 +1821,7 @@ def compute_metrics_trimesh_only(
         "overhangFaceCount": overhang_face_count,
         "overhangAreaCm2": 0.0,
         "overhangRegions": [],
-        "supportRequired": overhang_face_count > 0 or thin_wall_count > 0,
+        "supportRequired": overhang_face_count > 0,
         "estimatedSupportVolumeCm3": support_mm3 / 1000.0
         if overhang_face_count > 0
         else None,
@@ -3434,7 +3435,6 @@ def _generate_printing_summary(issues: list[dict[str, Any]]) -> dict[str, Any]:
         if cat == "thin_wall":
             summary["thinWallCount"] = issue.get("value", 0)
             summary["thinWallRegions"] = [issue.get("centroid", [0, 0, 0])]
-            summary["supportRequired"] = True
 
         elif cat == "overhang":
             summary["overhangFaceCount"] = issue.get("metadata", {}).get(
@@ -3442,9 +3442,6 @@ def _generate_printing_summary(issues: list[dict[str, Any]]) -> dict[str, Any]:
             )
             summary["overhangAreaCm2"] = issue.get("value", 0.0)
             summary["overhangRegions"] = [issue.get("centroid", [0, 0, 0])]
-            summary["supportRequired"] = True
-
-        elif cat == "unsupported_wall":
             summary["supportRequired"] = True
 
         elif cat in ("small_feature", "pin"):

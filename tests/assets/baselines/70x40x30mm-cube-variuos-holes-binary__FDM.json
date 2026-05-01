@@ -102,7 +102,7 @@
   "overhangRegions": [],
   "reportType": "FDM",
   "smallDetailCount": 5.0,
-  "supportRequired": true,
+  "supportRequired": false,
   "thinWallCount": 2.0,
   "thinWallRegions": [
     [

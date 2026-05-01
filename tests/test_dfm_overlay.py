@@ -220,75 +220,50 @@ def test_generate_overlays_worker_no_multi_body_key_for_single_body():
 # ---------------------------------------------------------------------------
 
 
-class TestSupportTowerBase:
-    """generate_support_tower_overlay_glb must project from mesh-below, not always to floor."""  # noqa: E501
+class TestSupportMockupBase:
+    """generate_support_tower_overlay_glb must preserve selected mesh faces."""
 
-    def test_tower_base_stops_at_lower_body_top(self):
-        """With a lower box and a floating overhang above it, tower bottoms should reach
-        the top of the lower box (z=5), not the global z_min (z=0)."""
+    def test_support_mockup_preserves_curved_face_boundaries(self):
+        """Curved overhang faces should not become a rectangular patch."""
         from src.core.overlay_generator import generate_support_tower_overlay_glb
 
-        # Lower body: 10×10×5 mm box sitting on the floor (z = 0..5).
-        lower = trimesh.creation.box([10, 10, 5])
-        lower.apply_translation([0, 0, 2.5])  # centred at z=2.5, top face at z=5
-
-        # Overhang plate: thin 10×10×1 mm box floating at z = 8..9, with a 3 mm air gap
-        # above the lower body.  Its bottom face is the overhang surface.
-        overhang_plate = trimesh.creation.box([10, 10, 1])
-        overhang_plate.apply_translation([0, 0, 8.5])  # centred at z=8.5, bottom at z=8
-
-        combined = trimesh.util.concatenate([lower, overhang_plate])
-
-        # Select downward-facing faces of the floating overhang plate (centroid near z=8).  # noqa: E501
+        mesh = trimesh.creation.cylinder(radius=10, height=4, sections=48)
         overhang_indices = [
             i
-            for i, n in enumerate(combined.face_normals)
-            if n[2] < -0.9 and combined.triangles_center[i, 2] >= 7.5
+            for i, normal in enumerate(mesh.face_normals)
+            if normal[0] > 0.35
         ]
-        assert (
-            overhang_indices
-        ), "Test setup error: no downward-facing overhang faces found"
-
-        center = combined.center_mass
-        glb = generate_support_tower_overlay_glb(combined, overhang_indices, center)
-        assert glb is not None, "GLB generation failed"
-
-        # Load GLB (Y-up BabylonJS space) and measure tower height.
-        loaded = trimesh.load(io.BytesIO(glb), file_type="glb")
-        if isinstance(loaded, trimesh.Scene):
-            verts = np.vstack(
-                [m.vertices for m in loaded.geometry.values() if len(m.vertices)]
-            )
-        else:
-            verts = loaded.vertices
-
-        # Tower height in the Y-up GLB.
-        tower_height = float(verts[:, 1].max()) - float(verts[:, 1].min())
-
-        # Without ray-cast: tower goes from z=0 (floor) to z=8 → height ≈ 8 mm.
-        # With ray-cast:    tower goes from z=5 (lower body top) to z=8 → height ≈ 3 mm.
-        # Accept anything < 5 mm as evidence the ray-cast found the lower body top.
-        assert tower_height < 5.0, (
-            f"Tower height {tower_height:.2f} mm suggests base was at floor (z=0), "
-            f"not lower body top (z=5)"
-        )
-
-    def test_tower_falls_back_to_floor_when_no_mesh_below(self):
-        """Without any mesh below the overhang, tower bottoms fall back to z_min."""
-        from src.core.overlay_generator import generate_support_tower_overlay_glb
-
-        # Elevated box: z_min≈17.5. Top-face centroid at z≈22.5, which is above z_min.
-        # No upward-facing mesh surface exists below these faces, so ray-casts find nothing  # noqa: E501
-        # and columns fall back to z_min — giving column height ≈ 5 mm (non-degenerate).
-        mesh = trimesh.creation.box([10, 10, 5])
-        mesh.apply_translation([0, 0, 20])  # z range ≈ [17.5..22.5]
-
-        # Top faces (upward-facing): centroid z≈22.5 is clearly above z_min≈17.5.
-        overhang_indices = [i for i, n in enumerate(mesh.face_normals) if n[2] > 0.9]
         assert overhang_indices
 
-        glb = generate_support_tower_overlay_glb(mesh, overhang_indices)
+        glb = generate_support_tower_overlay_glb(
+            mesh, overhang_indices, reference_center=np.zeros(3)
+        )
+        assert glb is not None, "GLB generation failed"
+
+        loaded = trimesh.load(io.BytesIO(glb), file_type="glb")
+        out_mesh = loaded.to_geometry() if isinstance(loaded, trimesh.Scene) else loaded
+
+        radial = np.sqrt(out_mesh.vertices[:, 0] ** 2 + out_mesh.vertices[:, 2] ** 2)
+        assert float(radial.min()) > 9.5
+        assert float(radial.max()) < 10.5
+        assert len(np.unique(np.round(out_mesh.vertices[:, 0], 2))) > 4
+
+    def test_support_mockup_exports_selected_faces_only(self):
+        """The support mockup should not add synthetic tower or bbox faces."""
+        from src.core.overlay_generator import generate_support_tower_overlay_glb
+
+        mesh = trimesh.creation.box([10, 10, 10])
+        face_indices = [i for i, n in enumerate(mesh.face_normals) if n[2] > 0.9]
+        assert face_indices
+
+        glb = generate_support_tower_overlay_glb(
+            mesh, face_indices, reference_center=np.zeros(3)
+        )
         assert glb is not None
+
+        loaded = trimesh.load(io.BytesIO(glb), file_type="glb")
+        out_mesh = loaded.to_geometry() if isinstance(loaded, trimesh.Scene) else loaded
+        assert len(out_mesh.faces) == len(face_indices)
 
 
 # ---------------------------------------------------------------------------
@@ -447,17 +422,41 @@ class TestSupportTowerOverlay:
         result = _generate_overlays_worker(stl_bytes, reports)
         assert "FDM__overhang_support" not in result
 
-    def test_support_tower_prism_geometry(self):
-        """Grid columns are generated correctly; bottoms fall to z_min after Z→Y rotation."""  # noqa: E501
+    def test_support_required_overlay_ignores_non_overhang_face_indices(self):
+        """Support mockups should not be generated from non-overhang warnings."""  # noqa: E501
+        from src.core.geometry import _generate_overlays_worker
+
+        mesh = trimesh.creation.box([10, 10, 10])
+        stl_bytes = mesh.export(file_type="stl")
+        face_indices = [0, 1, 2]
+
+        reports = {
+            "FDM": {
+                "supportRequired": True,
+                "issues": [
+                    {
+                        "category": "unsupported_wall",
+                        "faceIndices": face_indices,
+                        "severity": "warning",
+                        "title": "Unsupported walls",
+                        "description": "test",
+                        "value": 1,
+                        "threshold": 0.8,
+                        "centroid": [0, 0, 0],
+                    }
+                ],
+            }
+        }
+
+        result = _generate_overlays_worker(stl_bytes, reports)
+        assert "FDM__support_required" not in result
+        assert "FDM__overhang_support" not in result
+
+    def test_support_mockup_face_geometry(self):
+        """Selected faces are exported directly after the Z→Y rotation."""
         from src.core.overlay_generator import generate_support_tower_overlay_glb
 
-        # Box at z=[0..10]: z_min=0. Top-face centroids at z=10, clearly above z_min,
-        # so column height=10 mm (non-degenerate).  reference_center=zeros → no translation  # noqa: E501
-        # before _Z_TO_YUP, so z=0 maps to y=0 in the output GLB.
         mesh = trimesh.creation.box([20, 20, 10])
-        mesh.apply_translation([0, 0, 5])  # z range [0..10]
-
-        # Top faces (upward-facing) serve as the overhang region.
         face_indices = [i for i, n in enumerate(mesh.face_normals) if n[2] > 0.9]
         assert face_indices, "Expected upward-facing faces on box"
 
@@ -470,17 +469,82 @@ class TestSupportTowerOverlay:
         loaded = trimesh.load(io.BytesIO(glb), file_type="glb")
         out_mesh = loaded.to_geometry() if isinstance(loaded, trimesh.Scene) else loaded
 
-        # Grid geometry: each box column has exactly 12 triangles (6 quad faces × 2 tris).  # noqa: E501
-        assert len(out_mesh.faces) > 0, "Expected at least one column to be generated"
-        assert (
-            len(out_mesh.faces) % 12 == 0
-        ), f"Face count {len(out_mesh.faces)} must be a multiple of 12 (one per box column)"  # noqa: E501
+        assert len(out_mesh.faces) == len(face_indices)
 
-        # After Z→Y rotation, z=0 (z_min / column bottoms) maps to y=0.
+        # After Z→Y rotation, the selected top face at z=+5 maps to y=+5.
         y_min = float(out_mesh.bounds[0, 1])
-        assert (
-            abs(y_min) < 1.0
-        ), f"GLB Y-min {y_min:.3f} mm should be near 0 (mesh Z-min after Z→Y rotation)"
+        y_max = float(out_mesh.bounds[1, 1])
+        assert abs(y_min - 5.0) < 1.0
+        assert abs(y_max - 5.0) < 1.0
+
+    def test_support_tower_does_not_bridge_disconnected_regions(self):
+        """Disconnected overhang regions must get separate grids, not one spanning wall."""  # noqa: E501
+        from src.core.overlay_generator import generate_support_tower_overlay_glb
+
+        left = trimesh.creation.box([4, 4, 6])
+        left.apply_translation([-12, 0, 3])
+        right = trimesh.creation.box([4, 4, 6])
+        right.apply_translation([12, 0, 3])
+        mesh = trimesh.util.concatenate([left, right])
+
+        face_indices = [
+            i
+            for i, normal in enumerate(mesh.face_normals)
+            if normal[2] > 0.9
+        ]
+        assert face_indices
+
+        glb = generate_support_tower_overlay_glb(
+            mesh, face_indices, reference_center=np.zeros(3)
+        )
+        assert glb is not None
+
+        loaded = trimesh.load(io.BytesIO(glb), file_type="glb")
+        out_mesh = loaded.to_geometry() if isinstance(loaded, trimesh.Scene) else loaded
+        tri_x = out_mesh.vertices[out_mesh.faces][:, :, 0]
+        bridges_gap = np.any((tri_x.min(axis=1) < -5.0) & (tri_x.max(axis=1) > 5.0))
+
+        assert not bridges_gap, (
+            "Support grid should not span the solid gap between regions"
+        )
+
+
+def test_printing_summary_bridge_only_does_not_require_support():
+    """Bridge warnings alone must not advertise support material."""
+    from src.core.geometry import _generate_printing_summary
+
+    summary = _generate_printing_summary(
+        [
+            {
+                "category": "bridge",
+                "value": 1,
+                "centroid": [0.0, 0.0, 5.0],
+                "faceIndices": [0, 1],
+            }
+        ]
+    )
+
+    assert summary["supportRequired"] is False
+    assert summary["overhangFaceCount"] == 0
+
+
+def test_printing_summary_thin_wall_does_not_require_support():
+    """Thin-wall warnings are manufacturability issues, not support material."""
+    from src.core.geometry import _generate_printing_summary
+
+    summary = _generate_printing_summary(
+        [
+            {
+                "category": "thin_wall",
+                "value": 2,
+                "centroid": [0.0, 0.0, 5.0],
+                "faceIndices": [0, 1],
+            }
+        ]
+    )
+
+    assert summary["thinWallCount"] == 2
+    assert summary["supportRequired"] is False
 
 
 class TestDetectSmallFeaturesFallbackImproved:

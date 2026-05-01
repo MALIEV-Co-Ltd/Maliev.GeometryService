@@ -84,7 +84,7 @@
   "overhangRegions": [],
   "reportType": "SLA",
   "smallDetailCount": 0,
-  "supportRequired": true,
+  "supportRequired": false,
   "thinWallCount": 6.0,
   "thinWallRegions": [
     [
