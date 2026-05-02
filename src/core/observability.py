@@ -29,6 +29,7 @@ def setup_observability(app: FastAPI | None = None) -> None:
 
     # Set logging level for libraries
     logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
+    logging.getLogger("httpx").setLevel(logging.WARNING)
 
     if not _is_configured:
         resource = Resource.create(attributes={SERVICE_NAME: settings.SERVICE_NAME})

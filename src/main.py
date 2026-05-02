@@ -31,6 +31,8 @@ if not settings.OTEL_EXPORTER_OTLP_ENDPOINT:
         stream=sys.stdout,
     )
 
+logging.getLogger("httpx").setLevel(logging.WARNING)
+
 # Enable faulthandler to catch segfaults in worker processes
 import faulthandler
 
