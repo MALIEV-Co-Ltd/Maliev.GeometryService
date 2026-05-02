@@ -21,7 +21,9 @@ class Settings(BaseSettings):
     GEOMETRY_DFM_WORKERS: int = 2
     GEOMETRY_PREVIEW_RENDER_WORKERS: int = 8
     GEOMETRY_DFM_BODY_WORKERS: int = 4
-    GEOMETRY_RABBITMQ_PREFETCH: int = 2
+    GEOMETRY_FILE_INGEST_CONCURRENCY: int = 2
+    GEOMETRY_ARTIFACT_CONCURRENCY: int = 2
+    GEOMETRY_RABBITMQ_PREFETCH: int | None = None
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
