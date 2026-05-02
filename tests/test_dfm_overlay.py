@@ -19,6 +19,11 @@ import math
 import numpy as np
 import trimesh
 
+_YUP_TO_ZUP = np.array(
+    [[1, 0, 0, 0], [0, 0, -1, 0], [0, 1, 0, 0], [0, 0, 0, 1]],
+    dtype=float,
+)
+
 # ---------------------------------------------------------------------------
 # Issue 1 — overlay unit correctness
 # ---------------------------------------------------------------------------
@@ -102,6 +107,39 @@ def _make_two_body_mesh() -> list[trimesh.Trimesh]:
     body2 = trimesh.creation.box([5, 5, 5])
     body2.apply_translation([20, 0, 0])  # far apart so split() recovers them
     return [body1, body2]
+
+
+def _make_push_button_mesh(sections: int = 96) -> trimesh.Trimesh:
+    """Return a flange + stem push-button shape in CAD Z-up coordinates."""
+
+    def cylinder_along_x(radius: float, length: float) -> trimesh.Trimesh:
+        mesh = trimesh.creation.cylinder(
+            radius=radius,
+            height=length,
+            sections=sections,
+        )
+        mesh.apply_transform(
+            trimesh.transformations.rotation_matrix(math.pi / 2.0, [0, 1, 0])
+        )
+        return mesh
+
+    flange = cylinder_along_x(radius=20.0, length=6.0)
+    flange.apply_translation([0.0, 0.0, 20.0])
+
+    stem = cylinder_along_x(radius=6.0, length=38.0)
+    stem.apply_translation([22.0, 0.0, 20.0])
+
+    mesh = trimesh.util.concatenate([flange, stem])
+    mesh.merge_vertices()
+    trimesh.repair.fix_winding(mesh)
+    return mesh
+
+
+def _load_overlay_as_zup_mesh(glb_bytes: bytes) -> trimesh.Trimesh:
+    loaded = trimesh.load(io.BytesIO(glb_bytes), file_type="glb")
+    mesh = loaded.to_geometry() if isinstance(loaded, trimesh.Scene) else loaded
+    mesh.apply_transform(_YUP_TO_ZUP)
+    return mesh
 
 
 class TestMultiBodyOverlay:
@@ -221,39 +259,64 @@ def test_generate_overlays_worker_no_multi_body_key_for_single_body():
 
 
 class TestSupportMockupBase:
-    """generate_support_tower_overlay_glb must preserve selected mesh faces."""
+    """generate_support_tower_overlay_glb must create projected support geometry."""
 
-    def test_support_mockup_preserves_curved_face_boundaries(self):
-        """Curved overhang faces should not become a rectangular patch."""
+    def test_push_button_overhang_selection_excludes_vertical_end_caps(self):
+        """The push-button repro should flag lower curved surfaces, not cap faces."""
+        from src.core.mesh_analyzers import compute_overhang_analysis
+
+        mesh = _make_push_button_mesh()
+
+        count, _, _, face_indices = compute_overhang_analysis(mesh, 45.0)
+
+        assert count == 2
+        assert face_indices
+
+        cap_faces = {
+            i for i, normal in enumerate(mesh.face_normals) if abs(normal[0]) > 0.95
+        }
+        assert not (cap_faces & set(face_indices)), (
+            "Overhang detection should not mark vertical flange/stem cap faces"
+        )
+
+        selected_z = mesh.vertices[mesh.faces[face_indices]].reshape(-1, 3)[:, 2]
+        assert float(selected_z.max()) < 20.0
+
+    def test_support_mockup_projects_push_button_overhangs_to_build_plate(self):
+        """Support mockup should extend from overhangs down to the build plate."""
+        from src.core.mesh_analyzers import compute_overhang_analysis
         from src.core.overlay_generator import generate_support_tower_overlay_glb
 
-        mesh = trimesh.creation.cylinder(radius=10, height=4, sections=48)
-        overhang_indices = [
-            i
-            for i, normal in enumerate(mesh.face_normals)
-            if normal[0] > 0.35
-        ]
-        assert overhang_indices
+        mesh = _make_push_button_mesh()
+        _, _, _, overhang_indices = compute_overhang_analysis(mesh, 45.0)
 
         glb = generate_support_tower_overlay_glb(
             mesh, overhang_indices, reference_center=np.zeros(3)
         )
         assert glb is not None, "GLB generation failed"
 
-        loaded = trimesh.load(io.BytesIO(glb), file_type="glb")
-        out_mesh = loaded.to_geometry() if isinstance(loaded, trimesh.Scene) else loaded
+        out_mesh = _load_overlay_as_zup_mesh(glb)
 
-        radial = np.sqrt(out_mesh.vertices[:, 0] ** 2 + out_mesh.vertices[:, 2] ** 2)
-        assert float(radial.min()) > 9.5
-        assert float(radial.max()) < 10.5
-        assert len(np.unique(np.round(out_mesh.vertices[:, 0], 2))) > 4
+        build_z = float(mesh.vertices[:, 2].min())
+        selected_z = mesh.vertices[mesh.faces[overhang_indices]].reshape(-1, 3)[:, 2]
+        assert abs(float(out_mesh.vertices[:, 2].min()) - build_z) < 1e-6
+        assert float(out_mesh.vertices[:, 2].max()) >= float(selected_z.max()) - 0.2
+        assert len(out_mesh.faces) > len(overhang_indices)
 
-    def test_support_mockup_exports_selected_faces_only(self):
-        """The support mockup should not add synthetic tower or bbox faces."""
+    def test_support_mockup_projects_elevated_underside_to_build_plate(self):
         from src.core.overlay_generator import generate_support_tower_overlay_glb
 
-        mesh = trimesh.creation.box([10, 10, 10])
-        face_indices = [i for i, n in enumerate(mesh.face_normals) if n[2] > 0.9]
+        base = trimesh.creation.box([8, 8, 2])
+        base.apply_translation([0, 0, 1])
+        plate = trimesh.creation.box([16, 10, 2])
+        plate.apply_translation([0, 0, 12])
+        mesh = trimesh.util.concatenate([base, plate])
+
+        face_indices = [
+            i
+            for i, normal in enumerate(mesh.face_normals)
+            if normal[2] < -0.9 and mesh.triangles_center[i][2] > 5.0
+        ]
         assert face_indices
 
         glb = generate_support_tower_overlay_glb(
@@ -261,9 +324,10 @@ class TestSupportMockupBase:
         )
         assert glb is not None
 
-        loaded = trimesh.load(io.BytesIO(glb), file_type="glb")
-        out_mesh = loaded.to_geometry() if isinstance(loaded, trimesh.Scene) else loaded
-        assert len(out_mesh.faces) == len(face_indices)
+        out_mesh = _load_overlay_as_zup_mesh(glb)
+        assert abs(float(out_mesh.vertices[:, 2].min())) < 1e-6
+        assert 10.9 < float(out_mesh.vertices[:, 2].max()) < 11.1
+        assert len(out_mesh.faces) > len(face_indices)
 
 
 # ---------------------------------------------------------------------------
@@ -452,13 +516,22 @@ class TestSupportTowerOverlay:
         assert "FDM__support_required" not in result
         assert "FDM__overhang_support" not in result
 
-    def test_support_mockup_face_geometry(self):
-        """Selected faces are exported directly after the Z→Y rotation."""
+    def test_support_mockup_projected_geometry(self):
+        """Selected faces produce projected supports after Z->Y rotation."""
         from src.core.overlay_generator import generate_support_tower_overlay_glb
 
-        mesh = trimesh.creation.box([20, 20, 10])
-        face_indices = [i for i, n in enumerate(mesh.face_normals) if n[2] > 0.9]
-        assert face_indices, "Expected upward-facing faces on box"
+        base = trimesh.creation.box([8, 8, 2])
+        base.apply_translation([0, 0, 1])
+        plate = trimesh.creation.box([20, 20, 2])
+        plate.apply_translation([0, 0, 12])
+        mesh = trimesh.util.concatenate([base, plate])
+
+        face_indices = [
+            i
+            for i, normal in enumerate(mesh.face_normals)
+            if normal[2] < -0.9 and mesh.triangles_center[i][2] > 5.0
+        ]
+        assert face_indices, "Expected elevated downward-facing faces on box"
 
         glb = generate_support_tower_overlay_glb(
             mesh, face_indices, reference_center=np.zeros(3)
@@ -466,16 +539,11 @@ class TestSupportTowerOverlay:
         assert glb is not None
         assert len(glb) > 0
 
-        loaded = trimesh.load(io.BytesIO(glb), file_type="glb")
-        out_mesh = loaded.to_geometry() if isinstance(loaded, trimesh.Scene) else loaded
+        out_mesh = _load_overlay_as_zup_mesh(glb)
 
-        assert len(out_mesh.faces) == len(face_indices)
-
-        # After Z→Y rotation, the selected top face at z=+5 maps to y=+5.
-        y_min = float(out_mesh.bounds[0, 1])
-        y_max = float(out_mesh.bounds[1, 1])
-        assert 5.0 < y_min < 5.2
-        assert 5.0 < y_max < 5.2
+        assert len(out_mesh.faces) > len(face_indices)
+        assert abs(float(out_mesh.bounds[0, 2])) < 1e-6
+        assert 10.9 < float(out_mesh.bounds[1, 2]) < 11.1
 
     def test_support_tower_does_not_bridge_disconnected_regions(self):
         """Disconnected overhang regions must get separate grids, not one spanning wall."""  # noqa: E501
