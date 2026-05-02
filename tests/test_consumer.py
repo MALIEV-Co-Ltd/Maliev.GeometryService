@@ -7,7 +7,7 @@ from uuid import uuid4
 
 import pytest
 
-from src.consumers.upload_consumer import UploadConsumer
+from src.consumers.upload_consumer import ArtifactProcessingJob, UploadConsumer
 from src.core.schemas import (
     FileUploadedEvent,
     FileUploadedMessage,
@@ -180,6 +180,73 @@ async def test_process_message_acks_after_metrics_without_waiting_for_artifacts(
     artifact_release.set()
     if hasattr(consumer, "wait_for_artifact_tasks"):
         await consumer.wait_for_artifact_tasks()
+
+
+@pytest.mark.asyncio
+async def test_artifact_job_waits_for_viewer_glb_before_secondary_artifacts(
+    consumer: UploadConsumer,
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+    glb_started = asyncio.Event()
+    allow_glb_to_finish = asyncio.Event()
+
+    artifact_temp_dir = tmp_path / "artifact"
+    artifact_temp_dir.mkdir()
+    job = ArtifactProcessingJob(
+        file_id=str(uuid4()),
+        upload_id=str(uuid4()),
+        storage_path="projects/test/model.step",
+        file_ext=".step",
+        file_name="model.step",
+        file_size=1024,
+        correlation_id=uuid4(),
+        metrics=MagicMock(),
+        body_count=1,
+        body_infos=None,
+        temp_dir=artifact_temp_dir,
+        cad_glb_path=artifact_temp_dir / "cad.glb",
+        executor=MagicMock(),
+        queued_at=0.0,
+    )
+
+    async def fake_publish_glb(job: ArtifactProcessingJob) -> bool:  # noqa: ARG001
+        events.append("glb-start")
+        glb_started.set()
+        await allow_glb_to_finish.wait()
+        events.append("glb-end")
+        return True
+
+    async def fake_publish_small_thumbnail(
+        job: ArtifactProcessingJob,  # noqa: ARG001
+    ) -> bool:
+        events.append("thumb-start")
+        return True
+
+    async def fake_publish_previews(job: ArtifactProcessingJob) -> bool:  # noqa: ARG001
+        events.append("previews-start")
+        return True
+
+    monkeypatch.setattr(consumer, "_publish_glb", fake_publish_glb)
+    monkeypatch.setattr(
+        consumer, "_publish_small_thumbnail", fake_publish_small_thumbnail
+    )
+    monkeypatch.setattr(consumer, "_publish_previews", fake_publish_previews)
+    consumer.publish_failure = AsyncMock()
+
+    task = asyncio.create_task(consumer._run_artifact_job(job))
+    await asyncio.wait_for(glb_started.wait(), timeout=1)
+    await asyncio.sleep(0)
+
+    assert events == ["glb-start"]
+
+    allow_glb_to_finish.set()
+    await task
+
+    assert events.index("thumb-start") > events.index("glb-end")
+    assert events.index("previews-start") > events.index("glb-end")
+    consumer.publish_failure.assert_not_called()
 
 
 @pytest.mark.asyncio

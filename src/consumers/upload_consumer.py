@@ -675,16 +675,31 @@ class UploadConsumer:
                         "queue_wait_ms": queue_wait_ms,
                     },
                 )
-                tasks = {
-                    "thumb": asyncio.create_task(self._publish_small_thumbnail(job)),
-                    "glb": asyncio.create_task(self._publish_glb(job)),
-                    "previews": asyncio.create_task(self._publish_previews(job)),
-                }
-
                 try:
+                    glb_published = await self._publish_glb(job)
+                    if not glb_published:
+                        await self.publish_failure(
+                            job.correlation_id,
+                            job.file_id,
+                            "GEOMETRY_NO_RESULT",
+                            "Phase 2 did not produce a GLB artifact",
+                            job.storage_path,
+                        )
+                        return
+
+                    secondary_timeout_s = max(
+                        0.0,
+                        _PHASE2_HARD_DEADLINE_S - (time.perf_counter() - started_at),
+                    )
+                    tasks = {
+                        "thumb": asyncio.create_task(
+                            self._publish_small_thumbnail(job)
+                        ),
+                        "previews": asyncio.create_task(self._publish_previews(job)),
+                    }
                     done, pending = await asyncio.wait(
                         tasks.values(),
-                        timeout=_PHASE2_HARD_DEADLINE_S,
+                        timeout=secondary_timeout_s,
                     )
                     for pending_task in pending:
                         pending_task.cancel()
@@ -699,14 +714,11 @@ class UploadConsumer:
                             },
                         )
 
-                    glb_published = False
                     for name, task in tasks.items():
                         if task not in done:
                             continue
                         try:
-                            result = task.result()
-                            if name == "glb":
-                                glb_published = bool(result)
+                            task.result()
                         except Exception as exc:
                             logger.warning(
                                 "Phase 2 artifact task failed",
@@ -718,14 +730,6 @@ class UploadConsumer:
                                 },
                             )
 
-                    if not glb_published:
-                        await self.publish_failure(
-                            job.correlation_id,
-                            job.file_id,
-                            "GEOMETRY_NO_RESULT",
-                            "Phase 2 did not produce a GLB artifact",
-                            job.storage_path,
-                        )
                 finally:
                     import shutil
 
