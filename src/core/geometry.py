@@ -2593,6 +2593,7 @@ def _analyze_single_process(
                 )
 
         issues: list[dict[str, Any]] = []
+        cnc_turning_summary: dict[str, Any] | None = None
 
         # ── Process-specific analysis ───────────────────────────────────────
         if process_code in PRINTING_RULES:
@@ -2607,7 +2608,10 @@ def _analyze_single_process(
             issues.extend(_analyze_cnc_milling(mesh, occ_features, all_holes))
 
         elif process_code == "CNC_TURN":
-            issues.extend(_analyze_cnc_turning(mesh, occ_features))
+            turning_issues, cnc_turning_summary = _analyze_cnc_turning(
+                mesh, occ_features
+            )
+            issues.extend(turning_issues)
 
         else:
             return {
@@ -2631,7 +2635,7 @@ def _analyze_single_process(
         elif process_code in ("CNC_MILL", "CNC"):
             report.update(_generate_cnc_milling_summary(issues, mesh))
         elif process_code == "CNC_TURN":
-            report.update(_generate_cnc_turning_summary(issues))
+            report.update(cnc_turning_summary or _generate_cnc_turning_summary(issues))
 
         return report
 
@@ -3319,7 +3323,7 @@ def _analyze_cnc_milling(
 def _analyze_cnc_turning(
     mesh: trimesh.Trimesh,
     occ_features: list[Any],  # noqa: ARG001
-) -> list[dict[str, Any]]:
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Analyze mesh for CNC turning process.
 
     Args:
@@ -3330,18 +3334,17 @@ def _analyze_cnc_turning(
         List of DFM issue dicts
     """
     from src.core.cnc_analyzers import (
-        _compute_z_slice_profile,
+        _compute_axis_slice_profile,
         detect_axial_symmetry,
         detect_grooves,
     )
     from src.core.dfm_thresholds import TURNING_RULES
 
-    # T3e: compute Z-slice profile once; share between detect_axial_symmetry
-    # and detect_grooves so only one section_multiplane pass is needed.
-    _slice_profile = _compute_z_slice_profile(mesh, n_slices=100)
-
     issues: list[dict[str, Any]] = []
-    axis_report = detect_axial_symmetry(mesh, slice_profile=_slice_profile)
+    axis_report = detect_axial_symmetry(mesh)
+    axis_name = axis_report.primary_axis or "Z"
+    _slice_profile = _compute_axis_slice_profile(mesh, n_slices=100, axis=axis_name)
+    summary = _generate_cnc_turning_summary(issues, axis_report)
 
     if not axis_report.is_turnable:
         issues.append(
@@ -3357,7 +3360,10 @@ def _analyze_cnc_turning(
                 "threshold": 0.15,
                 "faceIndices": [],
                 "centroid": [0.0, 0.0, 0.0],
-                "metadata": {},
+                "metadata": {
+                    "primaryAxis": axis_report.primary_axis,
+                    "axisVector": axis_report.axis_vector,
+                },
             }
         )
     else:
@@ -3378,12 +3384,14 @@ def _analyze_cnc_turning(
                     "threshold": float(TURNING_RULES.max_length_diameter_ratio),
                     "faceIndices": [],
                     "centroid": [0.0, 0.0, 0.0],
-                    "metadata": {},
+                    "metadata": {
+                        "primaryAxis": axis_report.primary_axis,
+                        "axisVector": axis_report.axis_vector,
+                    },
                 }
             )
 
-        # Grooves — reuse the already-computed slice profile (T3e)
-        grooves = detect_grooves(mesh, slice_profile=_slice_profile)
+        grooves = detect_grooves(mesh, slice_profile=_slice_profile, axis=axis_name)
         narrow_grooves = [
             g for g in grooves if g.width_mm < TURNING_RULES.min_groove_width_mm
         ]
@@ -3410,7 +3418,8 @@ def _analyze_cnc_turning(
                 }
             )
 
-    return issues
+    summary = _generate_cnc_turning_summary(issues, axis_report)
+    return issues, summary
 
 
 def _generate_printing_summary(issues: list[dict[str, Any]]) -> dict[str, Any]:
@@ -3504,17 +3513,27 @@ def _generate_cnc_milling_summary(
     return summary
 
 
-def _generate_cnc_turning_summary(issues: list[dict[str, Any]]) -> dict[str, Any]:
+def _generate_cnc_turning_summary(
+    issues: list[dict[str, Any]],
+    axis_report: Any | None = None,
+) -> dict[str, Any]:
     """Generate legacy summary fields for CNC turning process.
 
     Extracts key metrics from issues list for backward compatibility.
     """
     # Default values assuming part is turnable
     summary = {
-        "isTurnable": True,
-        "primaryAxis": "Z",
-        "lengthDiameterRatio": 0.0,
-        "symmetryDeviation": 0.0,
+        "isTurnable": bool(axis_report.is_turnable) if axis_report else True,
+        "primaryAxis": axis_report.primary_axis if axis_report else "Z",
+        "axisVector": axis_report.axis_vector if axis_report else [0.0, 0.0, 1.0],
+        "lengthDiameterRatio": (
+            axis_report.length_diameter_ratio
+            if axis_report and axis_report.length_diameter_ratio is not None
+            else 0.0
+        ),
+        "symmetryDeviation": (
+            axis_report.symmetry_deviation if axis_report else 0.0
+        ),
     }
 
     for issue in issues:
@@ -3862,6 +3881,8 @@ def _aggregate_dfm_reports(
             (r.get("symmetryDeviation", 0.0) for r in cnc_turn_reports),
             default=0.0,
         )
+        base_turn["primaryAxis"] = base_turn.get("primaryAxis", "Z")
+        base_turn["axisVector"] = base_turn.get("axisVector", [0.0, 0.0, 1.0])
 
         aggregated["CNC_TURN"] = base_turn
 

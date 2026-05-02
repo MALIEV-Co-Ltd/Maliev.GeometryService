@@ -460,33 +460,48 @@ def detect_deep_narrow_cavities(
 # ---------------------------------------------------------------------------
 
 
-def _compute_z_slice_profile(
+_AXIS_INDEX = {"X": 0, "Y": 1, "Z": 2}
+_AXIS_VECTOR = {
+    "X": [1.0, 0.0, 0.0],
+    "Y": [0.0, 1.0, 0.0],
+    "Z": [0.0, 0.0, 1.0],
+}
+
+
+def _compute_axis_slice_profile(
     mesh: trimesh.Trimesh,  # type: ignore[name-defined]  # noqa: F821
     n_slices: int = 100,
+    axis: str = "Z",
 ) -> tuple[list[float], list[float], list[float], list[float]]:
-    """Compute per-slice (z, mean_r, std_r, max_r) using section_multiplane.
+    """Compute per-slice (axis value, mean_r, std_r, max_r) using section_multiplane.
 
-    Returns four parallel lists: z_values, mean_radii, std_radii, max_radii.
+    Returns four parallel lists: axis_values, mean_radii, std_radii, max_radii.
     Returns empty lists if mesh is invalid or slicing fails.
     """
-    z_values: list[float] = []
+    axis_values: list[float] = []
     mean_radii: list[float] = []
     std_radii: list[float] = []
     max_radii: list[float] = []
 
     try:
+        axis_name = axis.upper()
+        axis_index = _AXIS_INDEX.get(axis_name)
+        if axis_index is None:
+            return [], [], [], []
+
         bounds = mesh.bounds
-        z_min, z_max = float(bounds[0, 2]), float(bounds[1, 2])
-        total_length = z_max - z_min
+        axis_min, axis_max = float(bounds[0, axis_index]), float(bounds[1, axis_index])
+        total_length = axis_max - axis_min
         if total_length < 1.0:
             return [], [], [], []
 
         heights = np.linspace(
-            z_min + total_length / (2 * n_slices),
-            z_max - total_length / (2 * n_slices),
+            axis_min + total_length / (2 * n_slices),
+            axis_max - total_length / (2 * n_slices),
             n_slices,
         )
-        plane_normal = np.array([0.0, 0.0, 1.0])
+        plane_normal = np.zeros(3)
+        plane_normal[axis_index] = 1.0
         plane_orig = np.array([0.0, 0.0, 0.0])
 
         sections = mesh.section_multiplane(
@@ -495,7 +510,7 @@ def _compute_z_slice_profile(
             heights=heights,
         )
 
-        for z, section in zip(heights, sections, strict=False):
+        for axis_value, section in zip(heights, sections, strict=False):
             if section is None:
                 continue
             try:
@@ -512,7 +527,7 @@ def _compute_z_slice_profile(
                 mean_r = float(radii.mean())
                 if mean_r < 1e-6:
                     continue
-                z_values.append(float(z))
+                axis_values.append(float(axis_value))
                 mean_radii.append(mean_r)
                 std_radii.append(float(radii.std()))
                 max_radii.append(float(radii.max()))
@@ -520,9 +535,17 @@ def _compute_z_slice_profile(
                 continue
 
     except Exception as exc:
-        logger.debug("_compute_z_slice_profile failed: %s", exc)
+        logger.debug("_compute_axis_slice_profile failed for %s: %s", axis, exc)
 
-    return z_values, mean_radii, std_radii, max_radii
+    return axis_values, mean_radii, std_radii, max_radii
+
+
+def _compute_z_slice_profile(
+    mesh: trimesh.Trimesh,  # type: ignore[name-defined]  # noqa: F821
+    n_slices: int = 100,
+) -> tuple[list[float], list[float], list[float], list[float]]:
+    """Compute a legacy Z-axis turning profile."""
+    return _compute_axis_slice_profile(mesh, n_slices=n_slices, axis="Z")
 
 
 def _extract_section_points(path2d: Any) -> npt.NDArray[np.float64] | None:
@@ -555,14 +578,14 @@ def detect_axial_symmetry(
     """Determine if the part is a surface of revolution (suitable for turning).
 
     Strategy:
-    1. Take cross-sections at ``n_slices`` heights along the candidate axis (Z).
+    1. Take cross-sections at ``n_slices`` heights along candidate axes (X/Y/Z).
     2. For each cross-section, fit a circle to the boundary contour.
     3. Measure deviation from circularity: std(radius) / mean(radius).
     4. If mean deviation < symmetry_threshold → turnable.
 
     Args:
         mesh: The mesh to analyse.
-        n_slices: Number of Z slices to sample.
+        n_slices: Number of slices to sample per candidate axis.
         symmetry_threshold: Max std/mean ratio for a turnable part.
         slice_profile: Optional pre-computed (z, mean_r, std_r, max_r) tuple
                        from _compute_z_slice_profile (T3e optimisation).
@@ -583,44 +606,62 @@ def detect_axial_symmetry(
         if not isinstance(mesh, trimesh.Trimesh) or len(mesh.faces) < 10:
             return _FAIL
 
-        total_length = float(mesh.bounds[1, 2]) - float(mesh.bounds[0, 2])
-        if total_length < 1.0:
-            return _FAIL
-
         if slice_profile is not None:
-            z_vals, mean_rs, std_rs, _max_rs = slice_profile
+            profile_candidates = [("Z", slice_profile)]
         else:
-            z_vals, mean_rs, std_rs, _max_rs = _compute_z_slice_profile(mesh, n_slices)
+            profile_candidates = [
+                (axis, _compute_axis_slice_profile(mesh, n_slices, axis))
+                for axis in ("X", "Y", "Z")
+            ]
 
-        if not z_vals:
+        best_report: AxisSymmetryReport | None = None
+
+        for axis_name, profile in profile_candidates:
+            axis_vals, mean_rs, std_rs, _max_rs = profile
+            if not axis_vals:
+                continue
+
+            axis_index = _AXIS_INDEX[axis_name]
+            total_length = float(mesh.bounds[1, axis_index]) - float(
+                mesh.bounds[0, axis_index]
+            )
+            if total_length < 1.0:
+                continue
+
+            # Sample every k-th slice when profile has more than n_slices entries
+            step = max(1, len(axis_vals) // n_slices)
+            deviations = [
+                std_rs[i] / mean_rs[i]
+                for i in range(0, len(axis_vals), step)
+                if mean_rs[i] > 0
+            ]
+            radii_at_slices = [
+                mean_rs[i] for i in range(0, len(axis_vals), step) if mean_rs[i] > 0
+            ]
+
+            if not deviations:
+                continue
+
+            mean_deviation = float(np.mean(deviations))
+            mean_diameter = float(np.mean(radii_at_slices)) * 2.0
+            ld_ratio = total_length / mean_diameter if mean_diameter > 0 else None
+            candidate = AxisSymmetryReport(
+                is_turnable=mean_deviation < symmetry_threshold,
+                primary_axis=axis_name if mean_deviation < symmetry_threshold else None,
+                axis_vector=_AXIS_VECTOR[axis_name],
+                length_diameter_ratio=ld_ratio,
+                symmetry_deviation=mean_deviation,
+            )
+            if (
+                best_report is None
+                or candidate.symmetry_deviation < best_report.symmetry_deviation
+            ):
+                best_report = candidate
+
+        if best_report is None:
             return _FAIL
 
-        # Sample every k-th slice when profile has more than n_slices entries
-        step = max(1, len(z_vals) // n_slices)
-        deviations = [
-            std_rs[i] / mean_rs[i]
-            for i in range(0, len(z_vals), step)
-            if mean_rs[i] > 0
-        ]
-        radii_at_slices = [
-            mean_rs[i] for i in range(0, len(z_vals), step) if mean_rs[i] > 0
-        ]
-
-        if not deviations:
-            return _FAIL
-
-        mean_deviation = float(np.mean(deviations))
-        is_turnable = mean_deviation < symmetry_threshold
-        mean_diameter = float(np.mean(radii_at_slices)) * 2.0
-        ld_ratio = total_length / mean_diameter if mean_diameter > 0 else None
-
-        return AxisSymmetryReport(
-            is_turnable=is_turnable,
-            primary_axis="Z" if is_turnable else None,
-            axis_vector=[0.0, 0.0, 1.0],
-            length_diameter_ratio=ld_ratio,
-            symmetry_deviation=mean_deviation,
-        )
+        return best_report
 
     except Exception as exc:
         logger.warning("axial symmetry detection failed: %s", exc)
@@ -642,18 +683,19 @@ def detect_grooves(
     mesh: trimesh.Trimesh,  # type: ignore[name-defined]  # noqa: F821
     n_slices: int = 100,
     slice_profile: tuple[list, list, list, list] | None = None,
+    axis: str = "Z",
 ) -> list[GrooveFeature]:
     """Detect circumferential grooves on a turned part.
 
     Strategy:
-    1. Take many cross-sections along Z and measure the outer radius at each.
+    1. Take many cross-sections along the turning axis and measure the outer radius.
     2. A groove is a local dip in the radius profile (local minimum in radius).
 
     Args:
         mesh: The mesh to analyse.
-        n_slices: Number of Z slices if computing from scratch.
-        slice_profile: Optional pre-computed (z, mean_r, std_r, max_r) from
-                       _compute_z_slice_profile (T3e optimisation).
+        n_slices: Number of axis slices if computing from scratch.
+        slice_profile: Optional pre-computed (axis, mean_r, std_r, max_r) profile.
+        axis: Turning axis name ("X", "Y", or "Z").
 
     Returns a list of GrooveFeature objects.
     """
@@ -665,47 +707,50 @@ def detect_grooves(
         if not isinstance(mesh, trimesh.Trimesh) or len(mesh.faces) < 10:
             return grooves
 
+        axis_name = axis.upper()
+        axis_index = _AXIS_INDEX.get(axis_name, 2)
         if slice_profile is not None:
-            z_values, _mean_rs, _std_rs, outer_radii = slice_profile
+            axis_values, _mean_rs, _std_rs, outer_radii = slice_profile
         else:
-            z_values, _mean_rs, _std_rs, outer_radii = _compute_z_slice_profile(
-                mesh, n_slices
+            axis_values, _mean_rs, _std_rs, outer_radii = _compute_axis_slice_profile(
+                mesh, n_slices, axis_name
             )
 
         if len(outer_radii) < 5:
             return grooves
 
         radii_arr = np.array(outer_radii)
-        z_arr = np.array(z_values)
+        axis_arr = np.array(axis_values)
         mean_r = float(radii_arr.mean())
 
         # Find local minima (grooves = dips below mean)
         GROOVE_DEPTH_THRESH = mean_r * 0.05  # at least 5% dip  # noqa: N806
 
         in_groove = False
-        groove_start_z = 0.0
+        groove_start = 0.0
         groove_min_r = mean_r
 
-        for i in range(len(z_arr)):
+        for i in range(len(axis_arr)):
             r = float(radii_arr[i])
             if not in_groove and r < mean_r - GROOVE_DEPTH_THRESH:
                 in_groove = True
-                groove_start_z = float(z_arr[i])
+                groove_start = float(axis_arr[i])
                 groove_min_r = r
             elif in_groove:
                 if r < groove_min_r:
                     groove_min_r = r
-                if r >= mean_r - GROOVE_DEPTH_THRESH * 0.5 or i == len(z_arr) - 1:
-                    groove_end_z = float(z_arr[i])
-                    width = groove_end_z - groove_start_z
+                if r >= mean_r - GROOVE_DEPTH_THRESH * 0.5 or i == len(axis_arr) - 1:
+                    groove_end = float(axis_arr[i])
+                    width = groove_end - groove_start
                     depth = mean_r - groove_min_r
-                    centroid_z = (groove_start_z + groove_end_z) / 2.0
+                    centroid = [0.0, 0.0, 0.0]
+                    centroid[axis_index] = (groove_start + groove_end) / 2.0
                     grooves.append(
                         GrooveFeature(
                             width_mm=width,
                             depth_mm=depth,
                             diameter_at_groove_mm=groove_min_r * 2.0,
-                            centroid=[0.0, 0.0, centroid_z],
+                            centroid=centroid,
                             face_indices=[],
                         )
                     )
