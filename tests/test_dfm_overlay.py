@@ -474,8 +474,8 @@ class TestSupportTowerOverlay:
         # After Z→Y rotation, the selected top face at z=+5 maps to y=+5.
         y_min = float(out_mesh.bounds[0, 1])
         y_max = float(out_mesh.bounds[1, 1])
-        assert abs(y_min - 5.0) < 1.0
-        assert abs(y_max - 5.0) < 1.0
+        assert 5.0 < y_min < 5.2
+        assert 5.0 < y_max < 5.2
 
     def test_support_tower_does_not_bridge_disconnected_regions(self):
         """Disconnected overhang regions must get separate grids, not one spanning wall."""  # noqa: E501

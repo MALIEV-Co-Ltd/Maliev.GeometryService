@@ -225,6 +225,7 @@ def generate_support_tower_overlay_glb(
     reference_center: np.ndarray | None = None,
     grid_spacing_mm: float = 2.0,
     wall_half: float = 0.2,
+    surface_offset_mm: float = 0.08,
 ) -> bytes | None:
     """Build a face-following support mockup GLB from overhanging faces.
 
@@ -243,6 +244,8 @@ def generate_support_tower_overlay_glb(
         reference_center: Centre used when the main GLB was exported.
         grid_spacing_mm:  Legacy parameter; ignored for face-following mockups.
         wall_half:        Legacy parameter; ignored for face-following mockups.
+        surface_offset_mm: Small outward offset so the translucent support layer
+                           does not z-fight with the red overhang overlay.
 
     Returns:
         GLB bytes or None on failure.
@@ -268,6 +271,11 @@ def generate_support_tower_overlay_glb(
             or len(support_mesh.vertices) == 0
         ):
             return None
+
+        if surface_offset_mm > 0:
+            support_mesh.vertices = (
+                support_mesh.vertices + support_mesh.vertex_normals * surface_offset_mm
+            )
 
         center = reference_center if reference_center is not None else mesh.center_mass
         support_mesh.apply_translation(-center)
