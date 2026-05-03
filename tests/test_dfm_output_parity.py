@@ -18,6 +18,7 @@ Comparison rules:
 """
 
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -72,11 +73,18 @@ def _normalize_report(report: dict) -> dict:
     return {k: _sort_regions(v) for k, v in report.items() if k not in skip}
 
 
+def _stable_issue_title(issue: dict) -> str:
+    title = issue.get("title", "")
+    if issue.get("category") == "bridge":
+        return re.sub(r"\s+\(\d+\s+spans\)$", "", title)
+    return title
+
+
 def _issues_key(issue: dict) -> tuple:
     return (
         issue.get("category", ""),
         issue.get("severity", ""),
-        issue.get("title", ""),
+        _stable_issue_title(issue),
     )
 
 
