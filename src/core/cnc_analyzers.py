@@ -548,20 +548,191 @@ def _compute_z_slice_profile(
     return _compute_axis_slice_profile(mesh, n_slices=n_slices, axis="Z")
 
 
-def _extract_section_points(path2d: Any) -> npt.NDArray[np.float64] | None:
-    """Return ordered 2D boundary points from a trimesh section path."""
+def _extract_section_loops(path2d: Any) -> list[npt.NDArray[np.float64]]:
+    """Return closed or open 2D loops from a trimesh section path."""
     loops = getattr(path2d, "discrete", None)
     if loops:
-        pts = np.asarray(max(loops, key=len), dtype=float)
-        if len(pts) > 1 and np.allclose(pts[0], pts[-1]):
-            pts = pts[:-1]
-        return pts
+        result: list[npt.NDArray[np.float64]] = []
+        for loop in loops:
+            pts = np.asarray(loop, dtype=float)
+            if len(pts) > 1 and np.allclose(pts[0], pts[-1]):
+                pts = pts[:-1]
+            if len(pts) >= 4:
+                result.append(pts)
+        return result
+
+    vertices = getattr(path2d, "vertices", None)
+    if vertices is None:
+        return []
+
+    pts = np.asarray(vertices, dtype=float)
+    return [pts] if len(pts) >= 4 else []
+
+
+def _extract_section_points(path2d: Any) -> npt.NDArray[np.float64] | None:
+    """Return ordered 2D boundary points from a trimesh section path."""
+    loops = _extract_section_loops(path2d)
+    if loops:
+        return max(loops, key=len)
 
     vertices = getattr(path2d, "vertices", None)
     if vertices is None:
         return None
 
     return np.asarray(vertices, dtype=float)
+
+
+def _fit_circle_2d(
+    points: npt.NDArray[np.float64],
+) -> tuple[npt.NDArray[np.float64], float, float] | None:
+    """Fit a 2D circle and return center, radius, and normalized deviation."""
+    if len(points) < 8:
+        return None
+
+    pts = np.asarray(points[:, :2], dtype=float)
+    x = pts[:, 0]
+    y = pts[:, 1]
+    if np.ptp(x) < 1e-6 or np.ptp(y) < 1e-6:
+        return None
+
+    try:
+        matrix = np.column_stack((2.0 * x, 2.0 * y, np.ones_like(x)))
+        rhs = x * x + y * y
+        cx, cy, radius_term = np.linalg.lstsq(matrix, rhs, rcond=None)[0]
+        radius_sq = float(radius_term + (cx * cx) + (cy * cy))
+        if radius_sq <= 1e-9:
+            return None
+
+        center = np.array([float(cx), float(cy)], dtype=float)
+        radius = math.sqrt(radius_sq)
+        radii = np.linalg.norm(pts - center, axis=1)
+        deviation = float(radii.std() / radius) if radius > 1e-9 else 1.0
+        return center, radius, deviation
+    except Exception:
+        return None
+
+
+def _round_axis_point(axis_point: npt.NDArray[np.float64]) -> list[float]:
+    """Round axis coordinates for stable JSON/test output without hiding mm detail."""
+    rounded: list[float] = []
+    for value in axis_point:
+        coordinate = round(float(value), 6)
+        rounded.append(0.0 if abs(coordinate) < 1e-9 else coordinate)
+    return rounded
+
+
+def _compute_axis_point_from_circular_sections(
+    mesh: trimesh.Trimesh,  # type: ignore[name-defined]  # noqa: F821
+    axis: str,
+    n_slices: int = 24,
+) -> list[float] | None:
+    """Find a model-space point on the turning axis from circular section loops."""
+    import trimesh
+
+    axis_name = axis.upper()
+    axis_index = _AXIS_INDEX.get(axis_name)
+    if axis_index is None:
+        return None
+
+    try:
+        bounds = np.asarray(mesh.bounds, dtype=float)
+        axis_min = float(bounds[0, axis_index])
+        axis_max = float(bounds[1, axis_index])
+        total_length = axis_max - axis_min
+        if total_length < 1.0:
+            return None
+
+        diagonal = float(np.linalg.norm(bounds[1] - bounds[0]))
+        min_radius = max(diagonal * 0.002, 0.05)
+        center_tolerance = max(diagonal * 0.015, 0.25)
+        heights = np.linspace(
+            axis_min + total_length * 0.08,
+            axis_max - total_length * 0.08,
+            max(8, n_slices),
+        )
+        plane_normal = np.zeros(3)
+        plane_normal[axis_index] = 1.0
+
+        samples: list[tuple[np.ndarray, float, float]] = []
+        for axis_value in heights:
+            plane_origin = np.zeros(3)
+            plane_origin[axis_index] = float(axis_value)
+            section = mesh.section(
+                plane_origin=plane_origin,
+                plane_normal=plane_normal,
+            )
+            if section is None or (
+                not hasattr(section, "to_2D") and not hasattr(section, "to_planar")
+            ):
+                continue
+
+            try:
+                if hasattr(section, "to_2D"):
+                    path2d, to_3d = section.to_2D()
+                else:
+                    path2d, to_3d = section.to_planar()
+            except Exception:
+                continue
+
+            for loop in _extract_section_loops(path2d):
+                fitted = _fit_circle_2d(loop)
+                if fitted is None:
+                    continue
+
+                center_2d, radius, deviation = fitted
+                if radius < min_radius or deviation > 0.08:
+                    continue
+
+                center_3d = trimesh.transformations.transform_points(
+                    np.array([[center_2d[0], center_2d[1], 0.0]], dtype=float),
+                    to_3d,
+                )[0]
+                samples.append((center_3d, radius, deviation))
+
+        if not samples:
+            return None
+
+        groups: list[dict[str, Any]] = []
+        perp_indices = [idx for idx in range(3) if idx != axis_index]
+        for center_3d, radius, deviation in samples:
+            matched = False
+            for group in groups:
+                group_center = group["sum"] / group["count"]
+                if (
+                    np.linalg.norm(center_3d[perp_indices] - group_center[perp_indices])
+                    <= center_tolerance
+                ):
+                    group["sum"] += center_3d
+                    group["count"] += 1
+                    group["radius_sum"] += radius
+                    group["deviation_sum"] += deviation
+                    matched = True
+                    break
+
+            if not matched:
+                groups.append(
+                    {
+                        "sum": center_3d.copy(),
+                        "count": 1,
+                        "radius_sum": radius,
+                        "deviation_sum": deviation,
+                    }
+                )
+
+        selected = max(
+            groups,
+            key=lambda group: (
+                int(group["count"]),
+                -float(group["deviation_sum"]) / int(group["count"]),
+                -float(group["radius_sum"]) / int(group["count"]),
+            ),
+        )
+        axis_point = selected["sum"] / selected["count"]
+        axis_point[axis_index] = (axis_min + axis_max) / 2.0
+        return _round_axis_point(axis_point)
+    except Exception as exc:
+        logger.debug("axis point detection failed for %s: %s", axis_name, exc)
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -598,6 +769,7 @@ def detect_axial_symmetry(
         is_turnable=False,
         primary_axis=None,
         axis_vector=[0.0, 0.0, 1.0],
+        axis_point=None,
         length_diameter_ratio=None,
         symmetry_deviation=1.0,
     )
@@ -614,6 +786,7 @@ def detect_axial_symmetry(
                 for axis in ("X", "Y", "Z")
             ]
 
+        best_axis_name: str | None = None
         best_report: AxisSymmetryReport | None = None
 
         for axis_name, profile in profile_candidates:
@@ -649,6 +822,7 @@ def detect_axial_symmetry(
                 is_turnable=mean_deviation < symmetry_threshold,
                 primary_axis=axis_name if mean_deviation < symmetry_threshold else None,
                 axis_vector=_AXIS_VECTOR[axis_name],
+                axis_point=None,
                 length_diameter_ratio=ld_ratio,
                 symmetry_deviation=mean_deviation,
             )
@@ -657,9 +831,17 @@ def detect_axial_symmetry(
                 or candidate.symmetry_deviation < best_report.symmetry_deviation
             ):
                 best_report = candidate
+                best_axis_name = axis_name
 
         if best_report is None:
             return _FAIL
+
+        if best_axis_name is not None:
+            best_report.axis_point = _compute_axis_point_from_circular_sections(
+                mesh,
+                best_axis_name,
+                n_slices=max(12, n_slices),
+            )
 
         return best_report
 
@@ -669,6 +851,7 @@ def detect_axial_symmetry(
             is_turnable=False,
             primary_axis=None,
             axis_vector=[0.0, 0.0, 1.0],
+            axis_point=None,
             length_diameter_ratio=None,
             symmetry_deviation=1.0,
         )

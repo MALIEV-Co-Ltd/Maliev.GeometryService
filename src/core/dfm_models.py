@@ -94,6 +94,7 @@ class AxisSymmetryReport:
     is_turnable: bool
     primary_axis: str | None  # "X", "Y", or "Z"
     axis_vector: list[float]  # unit vector
+    axis_point: list[float] | None  # point on the axis in model coordinates
     length_diameter_ratio: float | None
     symmetry_deviation: float  # 0 = perfect, >0 = deviation from round
 

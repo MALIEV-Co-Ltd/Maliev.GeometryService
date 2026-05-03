@@ -400,6 +400,12 @@ class CncDfmReport(BaseModel):
     requires_edm: bool = Field(default=False, alias="requiresEdm")
     requires_grinding: bool = Field(default=False, alias="requiresGrinding")
     minimum_feature_size_mm: float = Field(default=1.0, alias="minimumFeatureSizeMm")
+    is_turnable: bool = Field(default=True, alias="isTurnable")
+    primary_axis: str | None = Field(default=None, alias="primaryAxis")
+    axis_vector: list[float] = Field(default_factory=list, alias="axisVector")
+    axis_point: list[float] = Field(default_factory=list, alias="axisPoint")
+    length_diameter_ratio: float = Field(default=0.0, alias="lengthDiameterRatio")
+    symmetry_deviation: float = Field(default=0.0, alias="symmetryDeviation")
     issues: list[DfmIssueItem] = Field(default_factory=list)
 
 
@@ -3361,6 +3367,7 @@ def _analyze_cnc_turning(
                 "metadata": {
                     "primaryAxis": axis_report.primary_axis,
                     "axisVector": axis_report.axis_vector,
+                    "axisPoint": axis_report.axis_point or [],
                 },
             }
         )
@@ -3385,6 +3392,7 @@ def _analyze_cnc_turning(
                     "metadata": {
                         "primaryAxis": axis_report.primary_axis,
                         "axisVector": axis_report.axis_vector,
+                        "axisPoint": axis_report.axis_point or [],
                     },
                 }
             )
@@ -3524,6 +3532,7 @@ def _generate_cnc_turning_summary(
         "isTurnable": bool(axis_report.is_turnable) if axis_report else True,
         "primaryAxis": axis_report.primary_axis if axis_report else "Z",
         "axisVector": axis_report.axis_vector if axis_report else [0.0, 0.0, 1.0],
+        "axisPoint": axis_report.axis_point if axis_report else [],
         "lengthDiameterRatio": (
             axis_report.length_diameter_ratio
             if axis_report and axis_report.length_diameter_ratio is not None
@@ -3881,6 +3890,7 @@ def _aggregate_dfm_reports(
         )
         base_turn["primaryAxis"] = base_turn.get("primaryAxis", "Z")
         base_turn["axisVector"] = base_turn.get("axisVector", [0.0, 0.0, 1.0])
+        base_turn["axisPoint"] = base_turn.get("axisPoint", [])
 
         aggregated["CNC_TURN"] = base_turn
 
