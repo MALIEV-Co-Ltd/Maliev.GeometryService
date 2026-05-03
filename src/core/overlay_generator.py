@@ -227,12 +227,13 @@ def generate_support_tower_overlay_glb(
     wall_half: float = 0.2,
     surface_offset_mm: float = 0.08,
 ) -> bytes | None:
-    """Build a face-following support mockup GLB from overhanging faces.
+    """Build a projected support mockup GLB from overhanging faces.
 
     The support overlay is intentionally a translucent mockup, not generated
-    slicer support geometry. It preserves the selected mesh triangles instead
-    of replacing them with rectangular towers, so curved holes and organic
-    surfaces keep their real top/bottom boundaries in the viewer.
+    slicer support geometry. It projects the selected overhang footprint down
+    to the build plate and adds vertical perimeter walls so users see where
+    support material would sit, instead of seeing the same highlighted part
+    faces duplicated as "support".
 
     The resulting GLB uses the same coordinate transform as generate_overlay_glb
     so it aligns with the main model.  OVERLAY_STYLES in part-viewer.js controls
@@ -252,7 +253,7 @@ def generate_support_tower_overlay_glb(
     """
     import trimesh
 
-    _ = (grid_spacing_mm, wall_half)
+    _ = (grid_spacing_mm, wall_half, surface_offset_mm)
 
     try:
         if not isinstance(mesh, trimesh.Trimesh):
@@ -265,17 +266,97 @@ def generate_support_tower_overlay_glb(
         if not valid_indices:
             return None
 
-        support_mesh = mesh.submesh([valid_indices], append=True)
+        source_vertices = np.asarray(mesh.vertices, dtype=float)
+        source_faces = np.asarray(mesh.faces, dtype=int)
+        selected_faces = source_faces[valid_indices]
+        build_z = float(source_vertices[:, 2].min())
+
+        support_vertices: list[list[float]] = []
+        support_faces: list[list[int]] = []
+
+        def triangle_area(points: np.ndarray) -> float:
+            return float(
+                np.linalg.norm(np.cross(points[1] - points[0], points[2] - points[0]))
+                * 0.5
+            )
+
+        def add_vertex(point: np.ndarray) -> int:
+            support_vertices.append(
+                [float(point[0]), float(point[1]), float(point[2])]
+            )
+            return len(support_vertices) - 1
+
+        def add_triangle(p0: np.ndarray, p1: np.ndarray, p2: np.ndarray) -> None:
+            points = np.array([p0, p1, p2], dtype=float)
+            if triangle_area(points) < 1e-8:
+                return
+            support_faces.append(
+                [add_vertex(points[0]), add_vertex(points[1]), add_vertex(points[2])]
+            )
+
+        def add_quad(
+            p0: np.ndarray,
+            p1: np.ndarray,
+            p2: np.ndarray,
+            p3: np.ndarray,
+        ) -> None:
+            add_triangle(p0, p1, p2)
+            add_triangle(p0, p2, p3)
+
+        # Bottom footprint: project each selected overhang triangle onto the
+        # build plate. Keeping the original triangle footprint preserves curved
+        # boundaries without spanning across disconnected support regions.
+        for face in selected_faces:
+            tri = source_vertices[face]
+            bottom = tri.copy()
+            bottom[:, 2] = build_z
+            add_triangle(bottom[0], bottom[2], bottom[1])
+
+        # Vertical perimeter walls: only boundary edges of the selected overhang
+        # region should create walls. Interior edges would create hidden duplicate
+        # sheets inside the mockup and make the overlay visually noisy.
+        edge_counts: dict[tuple[int, int], int] = {}
+        for face in selected_faces:
+            for idx in range(3):
+                a = int(face[idx])
+                b = int(face[(idx + 1) % 3])
+                key = (min(a, b), max(a, b))
+                edge_counts[key] = edge_counts.get(key, 0) + 1
+
+        for edge, count in edge_counts.items():
+            if count != 1:
+                continue
+            top0 = source_vertices[edge[0]].copy()
+            top1 = source_vertices[edge[1]].copy()
+            base0 = top0.copy()
+            base1 = top1.copy()
+            base0[2] = build_z
+            base1[2] = build_z
+            if (
+                np.linalg.norm(top0 - base0) < 1e-8
+                and np.linalg.norm(top1 - base1) < 1e-8
+            ):
+                continue
+            add_quad(top0, top1, base1, base0)
+
+        if not support_vertices or not support_faces:
+            return None
+
+        support_mesh = trimesh.Trimesh(
+            vertices=np.asarray(support_vertices, dtype=float),
+            faces=np.asarray(support_faces, dtype=int),
+            process=False,
+        )
         if (
             not isinstance(support_mesh, trimesh.Trimesh)
             or len(support_mesh.vertices) == 0
         ):
             return None
-
-        if surface_offset_mm > 0:
-            support_mesh.vertices = (
-                support_mesh.vertices + support_mesh.vertex_normals * surface_offset_mm
-            )
+        support_mesh.update_faces(support_mesh.nondegenerate_faces())
+        support_mesh.remove_unreferenced_vertices()
+        support_mesh.merge_vertices()
+        if len(support_mesh.faces) == 0:
+            return None
 
         center = reference_center if reference_center is not None else mesh.center_mass
         support_mesh.apply_translation(-center)

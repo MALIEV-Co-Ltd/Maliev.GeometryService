@@ -30,6 +30,7 @@ async def test_lifespan():
 
         mock_consumer_instance = mock_consumer_class.return_value
         mock_consumer_instance.start = AsyncMock()
+        mock_consumer_instance.stop = AsyncMock()
 
         # Create a real task-like mock that is awaitable
         import asyncio
@@ -47,5 +48,6 @@ async def test_lifespan():
 
         # Shutdown happened
         assert mock_task.cancelled()
+        mock_consumer_instance.stop.assert_called_once()
         mock_storage_instance.close.assert_called_once()
         mock_geometry_instance.shutdown.assert_called_once()

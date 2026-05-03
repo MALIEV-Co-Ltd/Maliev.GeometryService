@@ -8,7 +8,9 @@ import os
 import sys
 import tempfile
 import threading
+import time
 from concurrent.futures.process import BrokenProcessPool
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, cast
@@ -101,6 +103,25 @@ _GLB_BUDGET_S = 180  # viewer GLB export
 _PREVIEW_BUDGET_S = (
     60  # 7-view preview generation (reduced for faster failure detection)
 )
+_PHASE2_HARD_DEADLINE_S = 300
+
+
+@dataclass(frozen=True)
+class ArtifactProcessingJob:
+    file_id: str
+    upload_id: str
+    storage_path: str
+    file_ext: str
+    file_name: str
+    file_size: int
+    correlation_id: UUID | None
+    metrics: GeometryMetrics
+    body_count: int
+    body_infos: list[BodyInfo] | None
+    temp_dir: Path
+    cad_glb_path: Path
+    executor: Any
+    queued_at: float
 
 
 def _shutdown_executor_gracefully(
@@ -156,6 +177,7 @@ class UploadConsumer:
     def __init__(
         self, storage_service: IStorageService, geometry_processor: GeometryProcessor
     ):
+        self._settings = settings
         self.storage_service = storage_service
         self.geometry_processor = geometry_processor
         self._token_provider = ServiceAccountTokenProvider()
@@ -163,6 +185,10 @@ class UploadConsumer:
         self.channel: aio_pika.abc.AbstractChannel | None = None
         self.queue: aio_pika.abc.AbstractRobustQueue | None = None
         self.exchange: aio_pika.abc.AbstractRobustExchange | None = None
+        self._artifact_semaphore = asyncio.Semaphore(
+            max(1, self._settings.GEOMETRY_ARTIFACT_CONCURRENCY)
+        )
+        self._artifact_tasks: set[asyncio.Task[None]] = set()
         # T4a: single shared client — avoids a TLS handshake per artifact upload.
         # Limits is set high enough to saturate the upload fan-out (4 Phase-2
         # tasks + N overlay GLBs).  keepalive_expiry keeps connections warm
@@ -171,6 +197,13 @@ class UploadConsumer:
             limits=httpx.Limits(max_connections=20, max_keepalive_connections=10),
             timeout=httpx.Timeout(connect=10.0, read=300.0, write=300.0, pool=5.0),
         )
+
+    def _rabbitmq_prefetch_count(self) -> int:
+        configured_prefetch = self._settings.GEOMETRY_RABBITMQ_PREFETCH
+        if configured_prefetch is not None and configured_prefetch > 0:
+            return configured_prefetch
+
+        return max(1, self._settings.GEOMETRY_FILE_INGEST_CONCURRENCY)
 
     async def connect(self) -> None:
         max_retries = 10
@@ -182,7 +215,7 @@ class UploadConsumer:
                 self.connection = await aio_pika.connect_robust(settings.RABBITMQ_URI)
                 self.channel = await self.connection.channel()
                 await self.channel.set_qos(
-                    prefetch_count=max(1, settings.GEOMETRY_RABBITMQ_PREFETCH)
+                    prefetch_count=self._rabbitmq_prefetch_count()
                 )
 
                 self.queue = cast(
@@ -199,7 +232,13 @@ class UploadConsumer:
                 )
                 # Initialize the standalone event publisher with the exchange
                 initialize_event_publisher(self.exchange)
-                logger.info("Successfully connected to RabbitMQ")
+                logger.info(
+                    "Successfully connected to RabbitMQ",
+                    extra={
+                        "event": "rabbitmq_connected",
+                        "prefetch": self._rabbitmq_prefetch_count(),
+                    },
+                )
                 return
             except Exception as e:
                 if attempt == max_retries - 1:
@@ -451,626 +490,29 @@ class UploadConsumer:
                             "maliev.geometryservice.v1.metrics.ready",
                         )
 
-                        # 3b. Phase 2 — 4 independent parallel workers using GLB directly  # noqa: E501
-                        # For CAD files (STEP/IGES), cascadio produces GLB — use it directly  # noqa: E501
-                        # For pure STL/OBJ uploads, fall back to original bytes
-                        cad_glb_bytes = metrics_result.get("cad_glb_bytes")
-                        original_stl_bytes = metrics_result.get(
-                            "mesh_stl_bytes"
-                        )  # For pure STL uploads
-                        body_count = metrics_result.get("body_count", 1)
-                        body_names = metrics_result.get("body_names", [])
-                        mesh_stl_bytes_dict = metrics_result.get(
-                            "mesh_stl_bytes_dict", {}
-                        )  # For DFM only
-
-                        # Debug logging
-                        logger.info(
-                            f"Phase 2 inputs: cad_glb_bytes={len(cad_glb_bytes) if cad_glb_bytes else None}, "  # noqa: E501
-                            f"original_stl_bytes={len(original_stl_bytes) if original_stl_bytes else None}, "  # noqa: E501
-                            f"file_ext={file_ext}, body_count={body_count}, has_bodies={bool(mesh_stl_bytes_dict)}"  # noqa: E501
+                        await self._schedule_artifact_job_from_metrics(
+                            metrics_result=metrics_result,
+                            metrics=metrics,
+                            file_id=str(file_id),
+                            upload_id=inner_msg.upload_id,
+                            storage_path=inner_msg.storage_path,
+                            file_ext=file_ext,
+                            file_name=inner_msg.file_name,
+                            file_size=inner_msg.file_size,
+                            correlation_id=correlation_id,
+                            body_count=body_count,
+                            body_infos=body_infos,
                         )
-
-                        if not cad_glb_bytes and not original_stl_bytes:
-                            logger.warning(
-                                "No GLB or STL bytes available — skipping Phase 2",
-                                extra={"event": "phase2_skip", "file_id": str(file_id)},
-                            )
-                            try:
-                                await self.publish_failure(
-                                    correlation_id,
-                                    file_id,
-                                    "GEOMETRY_NO_RESULT",
-                                    "Phase 1 produced no GLB or STL bytes",
-                                    inner_msg.storage_path,
-                                )
-                            except Exception as pub_err:
-                                logger.warning(
-                                    "Failed to publish GEOMETRY_NO_RESULT for Phase 2 skip: %s",  # noqa: E501
-                                    pub_err,
-                                )
-                        else:
-                            upload_id = inner_msg.upload_id
-                            _glb_published = [False]
-
-                            # Create message-scoped temp directory for Phase 2 artifacts
-                            temp_dir: str | None = None
-                            try:
-                                temp_dir = tempfile.mkdtemp(prefix="geom_")
-                                logger.info(
-                                    f"Created temp directory for Phase 2: {temp_dir}",
-                                    extra={
-                                        "event": "phase2_temp_dir",
-                                        "file_id": str(file_id),
-                                    },
-                                )
-
-                                # Write CAD GLB for thumbnail/GLB/previews (fast, multi-body aware)  # noqa: E501
-                                cad_glb_path: str | None = None
-                                if cad_glb_bytes:
-                                    cad_glb_path = os.path.join(temp_dir, "cad.glb")  # noqa: PTH118
-                                    with open(cad_glb_path, "wb") as f:  # noqa: PTH123
-                                        f.write(cad_glb_bytes)
-
-                                # Write original CAD file for DFM B-Rep analysis (only for STEP/IGES)  # noqa: E501
-                                cad_path_for_dfm: str | None = None
-                                cad_ext = file_ext.strip(".")
-                                if cad_ext in ("step", "stp", "igs", "iges") and data:
-                                    cad_path_for_dfm = os.path.join(  # noqa: PTH118
-                                        temp_dir, f"original.{cad_ext}"
-                                    )
-                                    with open(cad_path_for_dfm, "wb") as f:  # noqa: PTH123
-                                        f.write(data)
-
-                                # ── Fix: release large in-memory buffers immediately ──────────  # noqa: E501
-                                # `data` (original uploaded file, 10-200 MB) and `cad_glb_bytes`  # noqa: E501
-                                # (converted GLB, up to 100 MB) are both now flushed to disk.  # noqa: E501
-                                # Setting them to None lets GC reclaim the bytes while the four  # noqa: E501
-                                # Phase 2 tasks run (up to 300 s).  With prefetch_count=2, a  # noqa: E501
-                                # second large file can arrive before Phase 2 finishes; without  # noqa: E501
-                                # this release, both payloads co-exist in the parent process.  # noqa: E501
-                                #
-                                # DO NOT clear original_stl_bytes here — _run_dfm uses it as an  # noqa: E501
-                                # early-exit check for pure STL uploads (cad_glb_path = None).  # noqa: E501
-                                # DO NOT clear mesh_stl_bytes_dict here — _run_dfm reads it to  # noqa: E501
-                                # write per-body temp STL files; it frees the dict itself after.  # noqa: E501
-                                data = None  # noqa: F841
-                                cad_glb_bytes = None  # noqa: F841
-
-                                logger.info(
-                                    f"Phase 2 temp files written: CAD GLB={bool(cad_glb_path)}, "  # noqa: E501
-                                    f"original CAD={bool(cad_path_for_dfm)}",
-                                    extra={
-                                        "event": "phase2_temp_files",
-                                        "file_id": str(file_id),
-                                    },
-                                )
-
-                                # ------------------------------------------------------------------  # noqa: E501
-                                # Phase 2 fan-out: 4 independent tasks, each publishes when done  # noqa: E501
-                                # ------------------------------------------------------------------  # noqa: E501
-
-                                async def _run_small_thumbnail() -> None:
-                                    try:
-                                        # Use extended timeout for multi-body files (they have larger GLBs)  # noqa: E501
-                                        # Multi-body GLBs can be 100MB+ vs 1-5MB for single body  # noqa: E501
-                                        small_timeout = (
-                                            180
-                                            if (body_count and body_count > 1)
-                                            else 60
-                                        )
-                                        thumb = await asyncio.wait_for(
-                                            loop.run_in_executor(
-                                                executor,
-                                                _render_thumbnail_worker,
-                                                cad_glb_path,
-                                            ),
-                                            timeout=small_timeout,
-                                        )
-                                        if not thumb:
-                                            return
-                                        thumb_path = f"{inner_msg.storage_path}_thumbnail_small.webp"  # noqa: E501
-                                        thumb_uploaded = await self.upload_artifact(
-                                            thumb, thumb_path, "image/webp", upload_id
-                                        )
-                                        if not thumb_uploaded:
-                                            logger.warning(
-                                                "Small thumbnail upload failed — skipping event",  # noqa: E501
-                                                extra={"file_id": str(file_id)},
-                                            )
-                                            return
-                                        _now = datetime.now(timezone.utc)
-                                        thumb_event = SmallThumbnailReadyEvent(
-                                            messageId=uuid4(),
-                                            correlationId=correlation_id,
-                                            messageType=[
-                                                "urn:message:Maliev.MessagingContracts.Contracts.Geometry:SmallThumbnailReadyEvent"
-                                            ],
-                                            message=SmallThumbnailReadyMessageBody(
-                                                messageId=uuid4(),
-                                                messageName="SmallThumbnailReadyEvent",
-                                                messageType=MessageTypeEnum.Event,
-                                                messageVersion="1.0.0",
-                                                publishedBy="GeometryService",
-                                                consumedBy=["IntranetBff"],
-                                                correlationId=correlation_id,
-                                                causationId=None,
-                                                occurredAtUtc=_now,
-                                                isPublic=False,
-                                                payload=SmallThumbnailReadyPayload(
-                                                    fileId=file_id,
-                                                    storagePath=inner_msg.storage_path,
-                                                    thumbnailStoragePath=thumb_path,
-                                                ),
-                                            ),
-                                        )
-                                        await self.publish_event(
-                                            thumb_event,
-                                            "maliev.geometryservice.v1.thumbnail.small.ready",
-                                        )
-                                        logger.info(
-                                            "Small thumbnail published",
-                                            extra={
-                                                "event": "thumbnail_small_published",
-                                                "file_id": str(file_id),
-                                            },
-                                        )
-                                    except asyncio.TimeoutError:
-                                        # Log timeout with actual duration and file details  # noqa: E501
-                                        logger.warning(
-                                            f"Small thumbnail timed out after {small_timeout}s (file: {inner_msg.file_name}, size: {inner_msg.file_size} bytes, bodies: {body_count})",  # noqa: E501
-                                            extra={
-                                                "event": "thumbnail_small_timeout",
-                                                "file_id": str(file_id),
-                                            },
-                                        )
-                                    except Exception as e:
-                                        logger.warning(
-                                            f"Small thumbnail task failed (non-fatal): {e}",  # noqa: E501
-                                            extra={
-                                                "event": "thumbnail_small_error",
-                                                "file_id": str(file_id),
-                                            },
-                                        )
-
-                                async def _run_glb() -> None:
-                                    try:
-                                        glb = await asyncio.wait_for(
-                                            loop.run_in_executor(
-                                                executor,
-                                                _export_glb_from_paths,
-                                                cad_glb_path,
-                                                file_ext,
-                                            ),
-                                            timeout=_GLB_BUDGET_S,
-                                        )
-                                        if not glb:
-                                            return
-                                        glb_path = (
-                                            f"{inner_msg.storage_path}_viewer.glb"
-                                        )
-                                        uploaded = await self.upload_artifact(
-                                            glb,
-                                            glb_path,
-                                            "model/gltf-binary",
-                                            upload_id,
-                                        )
-                                        if not uploaded:
-                                            logger.warning(
-                                                "GLB upload failed — skipping FileAnalyzedEvent",  # noqa: E501
-                                                extra={"file_id": str(file_id)},
-                                            )
-                                            return
-                                        _now = datetime.now(timezone.utc)
-                                        glb_event = FileAnalyzedEvent(
-                                            messageId=uuid4(),
-                                            correlationId=correlation_id,
-                                            messageType=[
-                                                "urn:message:Maliev.MessagingContracts.Contracts.Geometry:FileAnalyzedEvent"
-                                            ],
-                                            message=FileAnalyzedMessageBody(
-                                                messageId=uuid4(),
-                                                messageName="FileAnalyzedEvent",
-                                                messageType=MessageTypeEnum.Event,
-                                                messageVersion="1.0.0",
-                                                publishedBy="GeometryService",
-                                                consumedBy=["IntranetBff"],
-                                                correlationId=correlation_id,
-                                                causationId=None,
-                                                occurredAtUtc=_now,
-                                                isPublic=False,
-                                                payload=FileAnalyzedPayload(
-                                                    fileId=file_id,
-                                                    metrics=metrics,
-                                                    processedAt=_now,
-                                                    glbStoragePath=glb_path,
-                                                    thumbnailStoragePath=None,
-                                                    storagePath=inner_msg.storage_path,
-                                                    dfmReport=None,
-                                                    bodyCount=body_count,
-                                                    bodies=body_infos,
-                                                ),
-                                            ),
-                                        )
-                                        await self.publish_event(
-                                            glb_event,
-                                            "maliev.geometryservice.v1.analysis.completed",
-                                        )
-                                        _glb_published[0] = True
-                                        logger.info(
-                                            "GLB published",
-                                            extra={
-                                                "event": "glb_published",
-                                                "file_id": str(file_id),
-                                            },
-                                        )
-                                    except asyncio.TimeoutError:
-                                        logger.warning(
-                                            f"GLB export timed out after {_GLB_BUDGET_S}s",  # noqa: E501
-                                            extra={
-                                                "event": "glb_timeout",
-                                                "file_id": str(file_id),
-                                            },
-                                        )
-                                    except Exception as e:
-                                        logger.warning(
-                                            f"GLB task failed (non-fatal): {e}",
-                                            extra={
-                                                "event": "glb_error",
-                                                "file_id": str(file_id),
-                                            },
-                                        )
-
-                                async def _run_previews() -> None:
-                                    try:
-                                        preview_images = await asyncio.wait_for(
-                                            loop.run_in_executor(
-                                                executor,
-                                                _render_preview_worker,
-                                                cad_glb_path,
-                                            ),
-                                            timeout=_PREVIEW_BUDGET_S,
-                                        )
-
-                                        preview_paths: dict[str, str] = {}
-                                        thumbnail_large_path: str | None = None
-
-                                        for side, image_bytes in preview_images.items():
-                                            if side in (
-                                                "thumbnail_small",
-                                                "thumbnail_large",
-                                            ):
-                                                continue
-                                            if image_bytes:
-                                                preview_path = f"{inner_msg.storage_path}_preview_{side}.webp"  # noqa: E501
-                                                ok = await self.upload_artifact(
-                                                    image_bytes,
-                                                    preview_path,
-                                                    "image/webp",
-                                                    upload_id,
-                                                )
-                                                if ok:
-                                                    preview_paths[side] = preview_path
-
-                                        thumbnail_large_bytes = preview_images.get(
-                                            "thumbnail_large"
-                                        )
-                                        if thumbnail_large_bytes:
-                                            thumbnail_large_path = f"{inner_msg.storage_path}_thumbnail_large.webp"  # noqa: E501
-                                            large_ok = await self.upload_artifact(
-                                                thumbnail_large_bytes,
-                                                thumbnail_large_path,
-                                                "image/webp",
-                                                upload_id,
-                                            )
-                                            if not large_ok:
-                                                thumbnail_large_path = None
-
-                                        _now = datetime.now(timezone.utc)
-                                        preview_event = PreviewImagesGeneratedEvent(
-                                            messageId=uuid4(),
-                                            correlationId=correlation_id,
-                                            messageType=[
-                                                "urn:message:Maliev.MessagingContracts.Contracts.Geometry:PreviewImagesGeneratedEvent"
-                                            ],
-                                            message=PreviewImagesGeneratedMessageBody(
-                                                messageId=uuid4(),
-                                                messageName="PreviewImagesGeneratedEvent",
-                                                messageType=MessageTypeEnum.Event,
-                                                messageVersion="1.0.0",
-                                                publishedBy="GeometryService",
-                                                consumedBy=["IntranetBff"],
-                                                correlationId=correlation_id,
-                                                causationId=None,
-                                                occurredAtUtc=_now,
-                                                isPublic=False,
-                                                payload=PreviewImagesGeneratedPayload(
-                                                    storagePath=inner_msg.storage_path,
-                                                    previewImages=PreviewImagesMessage(
-                                                        frontSmall=preview_paths.get(
-                                                            "front_small"
-                                                        ),
-                                                        backSmall=preview_paths.get(
-                                                            "back_small"
-                                                        ),
-                                                        leftSmall=preview_paths.get(
-                                                            "left_small"
-                                                        ),
-                                                        rightSmall=preview_paths.get(
-                                                            "right_small"
-                                                        ),
-                                                        topSmall=preview_paths.get(
-                                                            "top_small"
-                                                        ),
-                                                        bottomSmall=preview_paths.get(
-                                                            "bottom_small"
-                                                        ),
-                                                        thumbnailSmall=None,
-                                                        thumbnailLarge=thumbnail_large_path,
-                                                    ),
-                                                    generatedAt=_now,
-                                                ),
-                                            ),
-                                        )
-                                        await self.publish_event(
-                                            preview_event,
-                                            "maliev.geometryservice.v1.preview-images.generated",
-                                        )
-                                        logger.info(
-                                            "Previews published",
-                                            extra={
-                                                "event": "previews_published",
-                                                "file_id": str(file_id),
-                                            },
-                                        )
-                                    except asyncio.TimeoutError:
-                                        logger.warning(
-                                            "Previews timed out after 300s",
-                                            extra={
-                                                "event": "previews_timeout",
-                                                "file_id": str(file_id),
-                                            },
-                                        )
-                                    except Exception as e:
-                                        logger.warning(
-                                            f"Previews task failed (non-fatal): {e}",
-                                            extra={
-                                                "event": "previews_error",
-                                                "file_id": str(file_id),
-                                            },
-                                        )
-
-                                # ------------------------------------------------------------------  # noqa: E501
-                                # Fan-out: all three tasks start immediately, each publishes  # noqa: E501
-                                # when done. 15-minute hard deadline prevents runaway.
-                                # ------------------------------------------------------------------  # noqa: E501
-                                PHASE2_HARD_DEADLINE_SECONDS = 300  # 5 minutes for all Phase 2 tasks (thumbnail, GLB, previews)  # noqa: N806, E501
-                                logger.info(
-                                    "Phase 2 fan-out starting (thumbnail, GLB, previews)",  # noqa: E501
-                                    extra={
-                                        "event": "phase2_fanout_start",
-                                        "file_id": str(file_id),
-                                    },
-                                )
-
-                                # Track which tasks have completed for progressive cleanup  # noqa: E501
-                                completed_tasks = set()
-
-                                async def _run_with_cleanup(
-                                    task_name: str, task_coro, cleanup_fn=None
-                                ) -> None:
-                                    """Run a task and optionally clean up resources after completion."""  # noqa: E501
-                                    try:
-                                        await task_coro
-                                        completed_tasks.add(task_name)
-                                        logger.info(
-                                            f"Task {task_name} completed ({len(completed_tasks)}/3)",  # noqa: E501
-                                            extra={
-                                                "event": f"phase2_task_{task_name}_complete",  # noqa: E501
-                                                "file_id": str(file_id),
-                                            },
-                                        )
-
-                                        # Progressive cleanup: remove temp files as soon as tasks finish  # noqa: E501
-                                        if cleanup_fn and temp_dir:
-                                            try:
-                                                cleanup_fn()
-                                                logger.info(
-                                                    f"Progressive cleanup after {task_name}",  # noqa: E501
-                                                    extra={
-                                                        "event": "phase2_progressive_cleanup",  # noqa: E501
-                                                        "task": task_name,
-                                                    },
-                                                )
-                                            except Exception as cleanup_err:
-                                                logger.warning(
-                                                    f"Progressive cleanup failed after {task_name}: {cleanup_err}",  # noqa: E501
-                                                    extra={
-                                                        "event": "phase2_cleanup_error",
-                                                        "task": task_name,
-                                                    },
-                                                )
-                                    except Exception as e:
-                                        completed_tasks.add(task_name)
-                                        logger.warning(
-                                            f"Task {task_name} failed: {e}",
-                                            extra={
-                                                "event": f"phase2_task_{task_name}_failed",  # noqa: E501
-                                                "file_id": str(file_id),
-                                            },
-                                        )
-
-                                def cleanup_cad_glb():
-                                    """Clean up CAD GLB after ALL Phase 2 tasks complete.
-
-                                    cad.glb is needed by rendering tasks (thumb, previews, glb).
-                                    Do NOT delete it until every task is done.
-                                    """  # noqa: E501
-                                    if len(completed_tasks) >= 3 and cad_glb_path:
-                                        try:
-                                            if os.path.exists(cad_glb_path):  # noqa: PTH110
-                                                size_mb = (
-                                                    os.path.getsize(cad_glb_path)  # noqa: PTH202
-                                                    / 1024
-                                                    / 1024
-                                                )
-                                                os.unlink(cad_glb_path)  # noqa: PTH108
-                                                logger.info(
-                                                    f"Removed cad.glb ({size_mb:.1f} MB freed)",  # noqa: E501
-                                                    extra={
-                                                        "event": "phase2_cad_glb_removed"  # noqa: E501
-                                                    },
-                                                )
-                                            else:
-                                                logger.debug(
-                                                    "cad.glb already removed or never created"  # noqa: E501
-                                                )
-                                        except Exception as e:
-                                            logger.warning(
-                                                f"Failed to remove cad.glb: {e}"
-                                            )
-
-                                def cleanup_cad_file():
-                                    """Clean up original CAD file after Phase 2 completes."""  # noqa: E501
-                                    # Original CAD file no longer needed after rendering tasks finish  # noqa: E501
-                                    if len(completed_tasks) >= 3 and cad_path_for_dfm:
-                                        try:
-                                            if os.path.exists(cad_path_for_dfm):  # noqa: PTH110
-                                                size_mb = (
-                                                    os.path.getsize(cad_path_for_dfm)  # noqa: PTH202
-                                                    / 1024
-                                                    / 1024
-                                                )
-                                                os.unlink(cad_path_for_dfm)  # noqa: PTH108
-                                                logger.info(
-                                                    f"Removed original.{cad_ext} ({size_mb:.1f} MB freed)",  # noqa: E501
-                                                    extra={
-                                                        "event": "phase2_cad_file_removed"  # noqa: E501
-                                                    },
-                                                )
-                                            else:
-                                                logger.debug(
-                                                    f"original.{cad_ext} already removed"  # noqa: E501
-                                                )
-                                        except Exception as e:
-                                            logger.warning(
-                                                f"Failed to remove original.{cad_ext}: {e}"  # noqa: E501
-                                            )
-
-                                # Create tasks with progressive cleanup hooks.
-                                # Shared file (cad.glb) is only deleted when ALL 4 tasks complete —  # noqa: E501
-                                # the cleanup function checks len(completed_tasks) >= 4.
-                                # Per-task files (original CAD) are cleaned up after DFM only.  # noqa: E501
-                                def cleanup_shared():
-                                    """Run shared-file cleanup; safe to call from any task."""  # noqa: E501
-                                    cleanup_cad_glb()
-                                    cleanup_cad_file()
-
-                                tasks = {
-                                    "thumb": asyncio.create_task(
-                                        _run_with_cleanup(
-                                            "thumb",
-                                            _run_small_thumbnail(),
-                                            cleanup_shared,
-                                        )
-                                    ),
-                                    "glb": asyncio.create_task(
-                                        _run_with_cleanup(
-                                            "glb", _run_glb(), cleanup_shared
-                                        )
-                                    ),
-                                    "previews": asyncio.create_task(
-                                        _run_with_cleanup(
-                                            "previews", _run_previews(), cleanup_shared
-                                        )
-                                    ),
-                                }
-
-                                done, pending = await asyncio.wait(
-                                    tasks.values(),
-                                    timeout=PHASE2_HARD_DEADLINE_SECONDS,
-                                )
-                                for t in pending:
-                                    t.cancel()
-                                    logger.warning(
-                                        "Phase 2 task cancelled after deadline",
-                                        extra={
-                                            "event": "phase2_task_cancelled",
-                                            "file_id": str(file_id),
-                                        },
-                                    )
-
-                                rss_mb = _check_rss_and_maybe_gc("post-phase2")
-                                logger.info(
-                                    "Phase 2 complete (all tasks finished or timed out)",  # noqa: E501
-                                    extra={
-                                        "event": "phase2_complete",
-                                        "file_id": str(file_id),
-                                        "rss_mb": round(rss_mb, 1),
-                                    },
-                                )
-
-                                # Safety net: if no GLB was published, fail explicitly
-                                if not _glb_published[0]:
-                                    logger.warning(
-                                        "Phase 2 completed without publishing a GLB artifact — "  # noqa: E501
-                                        "publishing GEOMETRY_NO_RESULT failure event",
-                                        extra={
-                                            "event": "phase2_no_result",
-                                            "file_id": str(file_id),
-                                        },
-                                    )
-                                    try:
-                                        await self.publish_failure(
-                                            correlation_id,
-                                            file_id,
-                                            "GEOMETRY_NO_RESULT",
-                                            "Phase 2 did not produce a GLB artifact",
-                                            inner_msg.storage_path,
-                                        )
-                                    except Exception as pub_err:
-                                        logger.warning(
-                                            "Failed to publish GEOMETRY_NO_RESULT: %s",
-                                            pub_err,
-                                            extra={
-                                                "event": "phase2_no_result_publish_error",  # noqa: E501
-                                                "file_id": str(file_id),
-                                            },
-                                        )
-
-                            finally:
-                                # Clean up temp directory
-                                if temp_dir and os.path.exists(temp_dir):  # noqa: PTH110
-                                    try:
-                                        import shutil
-
-                                        shutil.rmtree(temp_dir)
-                                        logger.info(
-                                            f"Cleaned up temp directory: {temp_dir}",
-                                            extra={
-                                                "event": "phase2_temp_cleanup",
-                                                "file_id": str(file_id),
-                                            },
-                                        )
-                                    except Exception as cleanup_err:
-                                        logger.warning(
-                                            f"Failed to clean up temp directory {temp_dir}: {cleanup_err}",  # noqa: E501
-                                            extra={
-                                                "event": "phase2_temp_cleanup_error",
-                                                "file_id": str(file_id),
-                                            },
-                                        )
-
-                                extra: dict[str, Any] = {
-                                    "file.id": str(file_id),
-                                    "volume_cm3": metrics.volume_cm3,
-                                    "surface_area_cm2": metrics.surface_area_cm2,
-                                    "bounding_box": f"{metrics.bounding_box.x} x {metrics.bounding_box.y} x {metrics.bounding_box.z}",  # noqa: E501
-                                }
-                                logger.info(
-                                    "Successfully analyzed file",
-                                    extra=extra,
-                                )
+                        logger.info(
+                            "Upload message acknowledged after metrics stage; "
+                            "artifact processing continues asynchronously",
+                            extra={
+                                "event": "upload_ingest_complete",
+                                "file_id": str(file_id),
+                                "body_count": body_count,
+                            },
+                        )
+                        return
 
                     finally:
                         file_stream.close()
@@ -1105,6 +547,496 @@ class UploadConsumer:
                         str(e),
                         inner_msg.storage_path,
                     )
+
+    async def _schedule_artifact_job_from_metrics(
+        self,
+        *,
+        metrics_result: dict[str, Any],
+        metrics: GeometryMetrics,
+        file_id: str,
+        upload_id: str,
+        storage_path: str,
+        file_ext: str,
+        file_name: str,
+        file_size: int,
+        correlation_id: UUID | None,
+        body_count: int,
+        body_infos: list[BodyInfo] | None,
+    ) -> None:
+        cad_glb_bytes = metrics_result.get("cad_glb_bytes")
+        original_stl_bytes = metrics_result.get("mesh_stl_bytes")
+        logger.info(
+            "Phase 2 artifact job inputs prepared",
+            extra={
+                "event": "phase2_inputs",
+                "file_id": file_id,
+                "cad_glb_bytes": len(cad_glb_bytes) if cad_glb_bytes else 0,
+                "mesh_stl_bytes": len(original_stl_bytes)
+                if original_stl_bytes
+                else 0,
+                "body_count": body_count,
+            },
+        )
+
+        if not cad_glb_bytes:
+            logger.warning(
+                "No GLB bytes available from Phase 1; artifact job not scheduled",
+                extra={"event": "phase2_skip", "file_id": file_id},
+            )
+            await self.publish_failure(
+                correlation_id,
+                file_id,
+                "GEOMETRY_NO_RESULT",
+                "Phase 1 produced no GLB bytes",
+                storage_path,
+            )
+            return
+
+        temp_dir = Path(tempfile.mkdtemp(prefix="geom_"))
+        cad_glb_path = temp_dir / "cad.glb"
+        try:
+            cad_glb_path.write_bytes(cad_glb_bytes)
+        except Exception:
+            import shutil
+
+            shutil.rmtree(temp_dir, ignore_errors=True)
+            raise
+
+        job = ArtifactProcessingJob(
+            file_id=file_id,
+            upload_id=upload_id,
+            storage_path=storage_path,
+            file_ext=file_ext,
+            file_name=file_name,
+            file_size=file_size,
+            correlation_id=correlation_id,
+            metrics=metrics,
+            body_count=body_count,
+            body_infos=body_infos,
+            temp_dir=temp_dir,
+            cad_glb_path=cad_glb_path,
+            executor=self.geometry_processor.executor,
+            queued_at=time.perf_counter(),
+        )
+        task = asyncio.create_task(self._run_artifact_job(job))
+        self._track_artifact_task(task, job)
+        logger.info(
+            "Phase 2 artifact job scheduled",
+            extra={
+                "event": "phase2_scheduled",
+                "file_id": file_id,
+                "active_artifact_tasks": len(self._artifact_tasks),
+            },
+        )
+
+    def _track_artifact_task(
+        self, task: asyncio.Task[None], job: ArtifactProcessingJob
+    ) -> None:
+        self._artifact_tasks.add(task)
+
+        def _on_done(done_task: asyncio.Task[None]) -> None:
+            self._artifact_tasks.discard(done_task)
+            with contextlib.suppress(asyncio.CancelledError):
+                exc = done_task.exception()
+                if exc:
+                    logger.error(
+                        "Artifact job failed",
+                        exc_info=(type(exc), exc, exc.__traceback__),
+                        extra={
+                            "event": "phase2_task_unhandled_error",
+                            "file_id": job.file_id,
+                        },
+                    )
+
+        task.add_done_callback(_on_done)
+
+    async def wait_for_artifact_tasks(self) -> None:
+        while self._artifact_tasks:
+            await asyncio.gather(*list(self._artifact_tasks), return_exceptions=True)
+
+    async def stop(self) -> None:
+        for task in list(self._artifact_tasks):
+            task.cancel()
+        await self.wait_for_artifact_tasks()
+        await self._http_client.aclose()
+
+    async def _run_artifact_job(self, job: ArtifactProcessingJob) -> None:
+        async with self._artifact_semaphore:
+            queue_wait_ms = round((time.perf_counter() - job.queued_at) * 1000, 1)
+            started_at = time.perf_counter()
+            with tracer.start_as_current_span("process_file_artifacts") as span:
+                span.set_attribute("file_id", job.file_id)
+                span.set_attribute("artifact.queue_wait_ms", queue_wait_ms)
+                logger.info(
+                    "Phase 2 artifact job started",
+                    extra={
+                        "event": "phase2_start",
+                        "file_id": job.file_id,
+                        "queue_wait_ms": queue_wait_ms,
+                    },
+                )
+                try:
+                    glb_published = await self._publish_glb(job)
+                    if not glb_published:
+                        await self.publish_failure(
+                            job.correlation_id,
+                            job.file_id,
+                            "GEOMETRY_NO_RESULT",
+                            "Phase 2 did not produce a GLB artifact",
+                            job.storage_path,
+                        )
+                        return
+
+                    secondary_timeout_s = max(
+                        0.0,
+                        _PHASE2_HARD_DEADLINE_S - (time.perf_counter() - started_at),
+                    )
+                    tasks = {
+                        "thumb": asyncio.create_task(
+                            self._publish_small_thumbnail(job)
+                        ),
+                        "previews": asyncio.create_task(self._publish_previews(job)),
+                    }
+                    done, pending = await asyncio.wait(
+                        tasks.values(),
+                        timeout=secondary_timeout_s,
+                    )
+                    for pending_task in pending:
+                        pending_task.cancel()
+                    if pending:
+                        await asyncio.gather(*pending, return_exceptions=True)
+                        logger.warning(
+                            "Phase 2 artifact tasks cancelled after deadline",
+                            extra={
+                                "event": "phase2_deadline",
+                                "file_id": job.file_id,
+                                "pending_count": len(pending),
+                            },
+                        )
+
+                    for name, task in tasks.items():
+                        if task not in done:
+                            continue
+                        try:
+                            task.result()
+                        except Exception as exc:
+                            logger.warning(
+                                "Phase 2 artifact task failed",
+                                extra={
+                                    "event": "phase2_artifact_error",
+                                    "file_id": job.file_id,
+                                    "artifact": name,
+                                    "error": str(exc),
+                                },
+                            )
+
+                finally:
+                    import shutil
+
+                    shutil.rmtree(job.temp_dir, ignore_errors=True)
+                    duration_ms = round((time.perf_counter() - started_at) * 1000, 1)
+                    _check_rss_and_maybe_gc("post-phase2")
+                    logger.info(
+                        "Phase 2 artifact job finished",
+                        extra={
+                            "event": "phase2_complete",
+                            "file_id": job.file_id,
+                            "duration_ms": duration_ms,
+                        },
+                    )
+
+    async def _publish_small_thumbnail(self, job: ArtifactProcessingJob) -> bool:
+        timeout_s = 180 if job.body_count > 1 else 60
+        started_at = time.perf_counter()
+        try:
+            loop = asyncio.get_running_loop()
+            thumb = await asyncio.wait_for(
+                loop.run_in_executor(
+                    job.executor,
+                    _render_thumbnail_worker,
+                    str(job.cad_glb_path),
+                ),
+                timeout=timeout_s,
+            )
+            if not thumb:
+                return False
+            thumb_path = f"{job.storage_path}_thumbnail_small.webp"
+            uploaded = await self.upload_artifact(
+                thumb,
+                thumb_path,
+                "image/webp",
+                job.upload_id,
+            )
+            if not uploaded:
+                return False
+            now = datetime.now(timezone.utc)
+            event = SmallThumbnailReadyEvent(
+                messageId=uuid4(),
+                correlationId=job.correlation_id,
+                messageType=[
+                    "urn:message:Maliev.MessagingContracts.Contracts.Geometry:SmallThumbnailReadyEvent"
+                ],
+                message=SmallThumbnailReadyMessageBody(
+                    messageId=uuid4(),
+                    messageName="SmallThumbnailReadyEvent",
+                    messageType=MessageTypeEnum.Event,
+                    messageVersion="1.0.0",
+                    publishedBy="GeometryService",
+                    consumedBy=["IntranetBff"],
+                    correlationId=job.correlation_id,
+                    causationId=None,
+                    occurredAtUtc=now,
+                    isPublic=False,
+                    payload=SmallThumbnailReadyPayload(
+                        fileId=job.file_id,
+                        storagePath=job.storage_path,
+                        thumbnailStoragePath=thumb_path,
+                    ),
+                ),
+            )
+            await self.publish_event(
+                event,
+                "maliev.geometryservice.v1.thumbnail.small.ready",
+            )
+            return True
+        except asyncio.TimeoutError:
+            logger.warning(
+                "Small thumbnail timed out",
+                extra={
+                    "event": "thumbnail_small_timeout",
+                    "file_id": job.file_id,
+                    "timeout_s": timeout_s,
+                },
+            )
+            return False
+        except Exception as exc:
+            logger.warning(
+                "Small thumbnail task failed",
+                extra={
+                    "event": "thumbnail_small_error",
+                    "file_id": job.file_id,
+                    "error": str(exc),
+                },
+            )
+            return False
+        finally:
+            logger.info(
+                "Small thumbnail artifact stage finished",
+                extra={
+                    "event": "thumbnail_small_finished",
+                    "file_id": job.file_id,
+                    "duration_ms": round(
+                        (time.perf_counter() - started_at) * 1000,
+                        1,
+                    ),
+                },
+            )
+
+    async def _publish_glb(self, job: ArtifactProcessingJob) -> bool:
+        started_at = time.perf_counter()
+        try:
+            loop = asyncio.get_running_loop()
+            glb = await asyncio.wait_for(
+                loop.run_in_executor(
+                    job.executor,
+                    _export_glb_from_paths,
+                    str(job.cad_glb_path),
+                    job.file_ext,
+                ),
+                timeout=_GLB_BUDGET_S,
+            )
+            if not glb:
+                return False
+            glb_path = f"{job.storage_path}_viewer.glb"
+            uploaded = await self.upload_artifact(
+                glb,
+                glb_path,
+                "model/gltf-binary",
+                job.upload_id,
+            )
+            if not uploaded:
+                return False
+            now = datetime.now(timezone.utc)
+            event = FileAnalyzedEvent(
+                messageId=uuid4(),
+                correlationId=job.correlation_id,
+                messageType=[
+                    "urn:message:Maliev.MessagingContracts.Contracts.Geometry:FileAnalyzedEvent"
+                ],
+                message=FileAnalyzedMessageBody(
+                    messageId=uuid4(),
+                    messageName="FileAnalyzedEvent",
+                    messageType=MessageTypeEnum.Event,
+                    messageVersion="1.0.0",
+                    publishedBy="GeometryService",
+                    consumedBy=["IntranetBff"],
+                    correlationId=job.correlation_id,
+                    causationId=None,
+                    occurredAtUtc=now,
+                    isPublic=False,
+                    payload=FileAnalyzedPayload(
+                        fileId=job.file_id,
+                        metrics=job.metrics,
+                        processedAt=now,
+                        glbStoragePath=glb_path,
+                        thumbnailStoragePath=None,
+                        storagePath=job.storage_path,
+                        dfmReport=None,
+                        bodyCount=job.body_count,
+                        bodies=job.body_infos,
+                    ),
+                ),
+            )
+            await self.publish_event(
+                event,
+                "maliev.geometryservice.v1.analysis.completed",
+            )
+            return True
+        except asyncio.TimeoutError:
+            logger.warning(
+                "GLB export timed out",
+                extra={
+                    "event": "glb_timeout",
+                    "file_id": job.file_id,
+                    "timeout_s": _GLB_BUDGET_S,
+                },
+            )
+            return False
+        except Exception as exc:
+            logger.warning(
+                "GLB artifact task failed",
+                extra={
+                    "event": "glb_error",
+                    "file_id": job.file_id,
+                    "error": str(exc),
+                },
+            )
+            return False
+        finally:
+            logger.info(
+                "GLB artifact stage finished",
+                extra={
+                    "event": "glb_finished",
+                    "file_id": job.file_id,
+                    "duration_ms": round(
+                        (time.perf_counter() - started_at) * 1000,
+                        1,
+                    ),
+                },
+            )
+
+    async def _publish_previews(self, job: ArtifactProcessingJob) -> bool:
+        started_at = time.perf_counter()
+        try:
+            loop = asyncio.get_running_loop()
+            preview_images = await asyncio.wait_for(
+                loop.run_in_executor(
+                    job.executor,
+                    _render_preview_worker,
+                    str(job.cad_glb_path),
+                ),
+                timeout=_PREVIEW_BUDGET_S,
+            )
+
+            preview_paths: dict[str, str] = {}
+            thumbnail_large_path: str | None = None
+            for side, image_bytes in preview_images.items():
+                if side in ("thumbnail_small", "thumbnail_large"):
+                    continue
+                if image_bytes:
+                    preview_path = f"{job.storage_path}_preview_{side}.webp"
+                    ok = await self.upload_artifact(
+                        image_bytes,
+                        preview_path,
+                        "image/webp",
+                        job.upload_id,
+                    )
+                    if ok:
+                        preview_paths[side] = preview_path
+
+            thumbnail_large_bytes = preview_images.get("thumbnail_large")
+            if thumbnail_large_bytes:
+                thumbnail_large_path = f"{job.storage_path}_thumbnail_large.webp"
+                large_ok = await self.upload_artifact(
+                    thumbnail_large_bytes,
+                    thumbnail_large_path,
+                    "image/webp",
+                    job.upload_id,
+                )
+                if not large_ok:
+                    thumbnail_large_path = None
+
+            now = datetime.now(timezone.utc)
+            event = PreviewImagesGeneratedEvent(
+                messageId=uuid4(),
+                correlationId=job.correlation_id,
+                messageType=[
+                    "urn:message:Maliev.MessagingContracts.Contracts.Geometry:PreviewImagesGeneratedEvent"
+                ],
+                message=PreviewImagesGeneratedMessageBody(
+                    messageId=uuid4(),
+                    messageName="PreviewImagesGeneratedEvent",
+                    messageType=MessageTypeEnum.Event,
+                    messageVersion="1.0.0",
+                    publishedBy="GeometryService",
+                    consumedBy=["IntranetBff"],
+                    correlationId=job.correlation_id,
+                    causationId=None,
+                    occurredAtUtc=now,
+                    isPublic=False,
+                    payload=PreviewImagesGeneratedPayload(
+                        storagePath=job.storage_path,
+                        previewImages=PreviewImagesMessage(
+                            frontSmall=preview_paths.get("front_small"),
+                            backSmall=preview_paths.get("back_small"),
+                            leftSmall=preview_paths.get("left_small"),
+                            rightSmall=preview_paths.get("right_small"),
+                            topSmall=preview_paths.get("top_small"),
+                            bottomSmall=preview_paths.get("bottom_small"),
+                            thumbnailSmall=None,
+                            thumbnailLarge=thumbnail_large_path,
+                        ),
+                        generatedAt=now,
+                    ),
+                ),
+            )
+            await self.publish_event(
+                event,
+                "maliev.geometryservice.v1.preview-images.generated",
+            )
+            return True
+        except asyncio.TimeoutError:
+            logger.warning(
+                "Previews timed out",
+                extra={
+                    "event": "previews_timeout",
+                    "file_id": job.file_id,
+                    "timeout_s": _PREVIEW_BUDGET_S,
+                },
+            )
+            return False
+        except Exception as exc:
+            logger.warning(
+                "Previews artifact task failed",
+                extra={
+                    "event": "previews_error",
+                    "file_id": job.file_id,
+                    "error": str(exc),
+                },
+            )
+            return False
+        finally:
+            logger.info(
+                "Previews artifact stage finished",
+                extra={
+                    "event": "previews_finished",
+                    "file_id": job.file_id,
+                    "duration_ms": round(
+                        (time.perf_counter() - started_at) * 1000,
+                        1,
+                    ),
+                },
+            )
 
     async def validate_file_size_before_download(self, url: str) -> bool:
         """Check Content-Length header before downloading to reject oversized files early.

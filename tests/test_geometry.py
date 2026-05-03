@@ -570,6 +570,27 @@ class TestThumbnailRenderingWithLighting:
         assert len(thumbnail_bytes) > 1000, "Thumbnail should have content"
 
 
+class TestHeadlessThumbnailRendererSource:
+    """Regression guards for CAD-style thumbnail rendering."""
+
+    def test_pyvista_renderer_splits_feature_edge_normals_before_smooth_shading(self):
+        """Thumbnail renderer must not smooth normals across CAD face boundaries."""
+        import inspect
+
+        from src.core.headless_thumbnail import _render_with_pyvista
+
+        source = inspect.getsource(_render_with_pyvista)
+
+        assert "compute_normals" in source, (
+            "PyVista thumbnail renderer should compute normals explicitly instead "
+            "of relying on loader defaults."
+        )
+        assert "split_vertices=True" in source, (
+            "PyVista thumbnail renderer should split normals at CAD feature edges "
+            "before smooth shading."
+        )
+
+
 class TestAutoRotationCameraPreset:
     """Tests that camera presets properly stop auto-rotation."""
 

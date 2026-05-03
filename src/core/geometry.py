@@ -400,6 +400,12 @@ class CncDfmReport(BaseModel):
     requires_edm: bool = Field(default=False, alias="requiresEdm")
     requires_grinding: bool = Field(default=False, alias="requiresGrinding")
     minimum_feature_size_mm: float = Field(default=1.0, alias="minimumFeatureSizeMm")
+    is_turnable: bool = Field(default=True, alias="isTurnable")
+    primary_axis: str | None = Field(default=None, alias="primaryAxis")
+    axis_vector: list[float] = Field(default_factory=list, alias="axisVector")
+    axis_point: list[float] = Field(default_factory=list, alias="axisPoint")
+    length_diameter_ratio: float = Field(default=0.0, alias="lengthDiameterRatio")
+    symmetry_deviation: float = Field(default=0.0, alias="symmetryDeviation")
     issues: list[DfmIssueItem] = Field(default_factory=list)
 
 
@@ -2096,20 +2102,18 @@ def _render_small_thumbnail_worker(stl_bytes: bytes) -> bytes | None:
 
 def _render_thumbnail_from_glb_worker(glb_bytes: bytes) -> bytes | None:
     """Phase 2 worker: renders a 256px isometric thumbnail from GLB bytes directly.
-    Uses headless matplotlib rendering (Kubernetes-friendly).
-    Falls back to PyVista if matplotlib unavailable.
+    Uses the headless thumbnail renderer (Kubernetes-friendly).
+    The renderer handles its own backend fallback chain.
     """
     try:
         from src.core.headless_thumbnail import render_thumbnail_from_glb_headless
 
-        # Try headless matplotlib rendering first (truly headless, K8s-friendly)
+        # Emit WebP bytes because the artifact path and content type are WebP.
         thumbnail = render_thumbnail_from_glb_headless(
-            glb_bytes, size=256, format="png"
+            glb_bytes, size=256, format="webp"
         )
         if thumbnail:
-            logger.info(
-                "Successfully rendered thumbnail using headless matplotlib renderer"
-            )
+            logger.info("Successfully rendered thumbnail using headless renderer")
             return thumbnail
         logger.warning("Headless rendering failed, falling back to PyVista")
 
@@ -3363,6 +3367,7 @@ def _analyze_cnc_turning(
                 "metadata": {
                     "primaryAxis": axis_report.primary_axis,
                     "axisVector": axis_report.axis_vector,
+                    "axisPoint": axis_report.axis_point or [],
                 },
             }
         )
@@ -3387,6 +3392,7 @@ def _analyze_cnc_turning(
                     "metadata": {
                         "primaryAxis": axis_report.primary_axis,
                         "axisVector": axis_report.axis_vector,
+                        "axisPoint": axis_report.axis_point or [],
                     },
                 }
             )
@@ -3526,14 +3532,13 @@ def _generate_cnc_turning_summary(
         "isTurnable": bool(axis_report.is_turnable) if axis_report else True,
         "primaryAxis": axis_report.primary_axis if axis_report else "Z",
         "axisVector": axis_report.axis_vector if axis_report else [0.0, 0.0, 1.0],
+        "axisPoint": axis_report.axis_point if axis_report else [],
         "lengthDiameterRatio": (
             axis_report.length_diameter_ratio
             if axis_report and axis_report.length_diameter_ratio is not None
             else 0.0
         ),
-        "symmetryDeviation": (
-            axis_report.symmetry_deviation if axis_report else 0.0
-        ),
+        "symmetryDeviation": (axis_report.symmetry_deviation if axis_report else 0.0),
     }
 
     for issue in issues:
@@ -3642,7 +3647,9 @@ def _compute_dfm_single_body(
             def _run_analysis():
                 try:
                     result_container[0] = _analyze_single_body(
-                        stl_bytes, cad_bytes, cad_ext  # noqa: F821
+                        stl_bytes,  # noqa: F821
+                        cad_bytes,  # noqa: F821
+                        cad_ext,  # noqa: F821
                     )
                 except Exception as e:
                     exception_container[0] = e
@@ -3883,6 +3890,7 @@ def _aggregate_dfm_reports(
         )
         base_turn["primaryAxis"] = base_turn.get("primaryAxis", "Z")
         base_turn["axisVector"] = base_turn.get("axisVector", [0.0, 0.0, 1.0])
+        base_turn["axisPoint"] = base_turn.get("axisPoint", [])
 
         aggregated["CNC_TURN"] = base_turn
 

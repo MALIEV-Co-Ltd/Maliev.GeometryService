@@ -1,4 +1,5 @@
 import asyncio
+import faulthandler
 import logging
 import os
 import sys
@@ -22,19 +23,14 @@ from src.infrastructure.event_publisher import publish_event
 from src.infrastructure.iam_registration import register_iam_permissions
 from src.infrastructure.storage import HttpDownloadService
 
-# Set up logging
-# When OTEL endpoint is not configured (local dev), add stdout handler
-if not settings.OTEL_EXPORTER_OTLP_ENDPOINT:
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(levelname)s:%(name)s:%(message)s",
-        stream=sys.stdout,
-    )
+# Set up stdout logging so Aspire console logs remain useful even when OTLP is on.
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(levelname)s:%(name)s:%(message)s",
+    stream=sys.stdout,
+)
 
 logging.getLogger("httpx").setLevel(logging.WARNING)
-
-# Enable faulthandler to catch segfaults in worker processes
-import faulthandler
 
 faulthandler.enable(file=sys.stderr, all_threads=True)
 logging.getLogger(__name__).info("Faulthandler enabled for crash diagnostics")
@@ -91,6 +87,7 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
         consumer_task.cancel()
         with suppress(asyncio.CancelledError):
             await consumer_task
+        await consumer.stop()
         await storage_service.close()
         geometry_processor.shutdown()
 
