@@ -1,12 +1,15 @@
 """
-Headless GLB thumbnail renderer using trimesh's built-in rendering (PyOpenGL/pyglet).
-Produces lit, shaded thumbnails with proper depth cues — no flat grey.
-Falls back to matplotlib when trimesh rendering is unavailable.
+Headless GLB thumbnail renderer.
+
+The primary path uses PyVista's off-screen renderer with CAD-style lighting and
+normal handling. It falls back to trimesh's native renderer when PyVista is not
+available.
 """
 
 import io
 import logging
 import os
+from typing import Any, cast
 
 import numpy as np
 
@@ -39,7 +42,7 @@ def _render_with_trimesh(
         scene_data = trimesh.load(io.BytesIO(glb_bytes), file_type="glb")
 
         # Collect all mesh bodies (handles both single-mesh and Scene)
-        meshes: list = []
+        meshes: list[Any] = []
         if isinstance(scene_data, trimesh.Scene):
             for geom in scene_data.geometry.values():
                 if isinstance(geom, trimesh.Trimesh) and len(geom.vertices) > 0:
@@ -106,20 +109,27 @@ def _render_with_pyvista(
         # Ensure off-screen rendering
         pv.OFF_SCREEN = True
 
-        # Load GLB using trimesh (supports glTF/GLB, including multi-body Scenes)
-        tmesh = trimesh.load(io.BytesIO(glb_bytes), file_type="glb")
+        # Load GLB using trimesh (supports glTF/GLB, including multi-body scenes)
+        scene_data = trimesh.load(io.BytesIO(glb_bytes), file_type="glb")
 
-        # trimesh.load returns a Scene for multi-body GLBs — dump to a single Trimesh
-        if isinstance(tmesh, trimesh.Scene):
-            # Use the largest mesh by vertex count for thumbnail
-            geometries = list(tmesh.geometry.values())
-            if not geometries:
+        # Combine scene geometry for a single thumbnail render while preserving
+        # scene graph transforms, so multi-body files are represented by the
+        # complete assembly instead of only the largest body.
+        tmesh: Any
+        if isinstance(scene_data, trimesh.Scene):
+            if not scene_data.geometry:
                 logger.warning("PyVista thumbnail: empty scene")
                 return None
-            tmesh = max(
-                geometries,
-                key=lambda g: len(g.vertices) if isinstance(g, trimesh.Trimesh) else 0,
-            )
+            flattened_geometry = scene_data.to_geometry()
+            if not isinstance(flattened_geometry, trimesh.Trimesh):
+                logger.warning(
+                    "PyVista thumbnail: scene flatten produced %s instead of Trimesh",
+                    type(flattened_geometry).__name__,
+                )
+                return None
+            tmesh = flattened_geometry
+        else:
+            tmesh = scene_data
 
         if not isinstance(tmesh, trimesh.Trimesh) or len(tmesh.vertices) == 0:
             logger.warning("PyVista thumbnail: invalid mesh after load")
@@ -136,8 +146,27 @@ def _render_with_pyvista(
 
         # Create PyVista mesh from vertices and faces
         mesh = pv.PolyData(vertices.copy(), faces_pv)
-        if not mesh or mesh.n_points == 0:
+        if mesh.n_points == 0:
             return None
+
+        # Center the mesh before computing camera and lighting positions.
+        mesh.points -= np.array(mesh.center)
+
+        # Split point normals at feature edges so smooth shading does not blend
+        # lighting across sharp CAD face boundaries.
+        mesh.compute_normals(
+            cell_normals=True,
+            point_normals=True,
+            split_vertices=False,
+            inplace=True,
+        )
+        mesh.compute_normals(
+            cell_normals=True,
+            point_normals=True,
+            split_vertices=True,
+            feature_angle=30,
+            inplace=True,
+        )
 
         # Calculate bounds for camera positioning (85mm telephoto FOV)
         bounds = mesh.bounds
@@ -145,12 +174,15 @@ def _render_with_pyvista(
         y_extent = bounds[3] - bounds[2]
         z_extent = bounds[5] - bounds[4]
         max_dim = float(np.max([x_extent, y_extent, z_extent]))
+        if max_dim <= 0:
+            logger.warning("PyVista thumbnail: mesh has empty bounds")
+            return None
 
         # 85mm lens equivalent: vertical FOV = 2*atan(24/(2*85)) ≈ 16°
         view_angle = 16.0
 
         # Compute distance so the model's bounding sphere fills the view with padding
-        distance = (max_dim / 2.0) / math.tan(math.radians(view_angle / 2.0)) * 1.3
+        distance = (max_dim / 2.0) / math.tan(math.radians(view_angle / 2.0)) * 1.05
 
         # Create renderer with off-screen rendering
         # lighting=None disables default headlight so we can use custom lights
@@ -160,15 +192,32 @@ def _render_with_pyvista(
         plotter.set_background(None)  # Transparent for light/dark mode theme overlay
         plotter.enable_anti_aliasing("msaa")
 
-        # 3-light rig for even illumination (matches _render_single_view)
+        center = np.array([0.0, 0.0, 0.0])
+        d = max_dim * 4
+
+        # 3-light rig for even illumination (matches _render_single_view).
+        # Positions scale with model bounds; fixed unit-position lights sit inside
+        # larger CAD models and create patchy lighting across flat faces.
         plotter.add_light(
-            pv.Light(position=(1, -1, 1), intensity=0.35, light_type="scene light")
+            pv.Light(
+                position=(center[0] + d, center[1] - d * 0.5, center[2] + d),
+                focal_point=tuple(center),
+                intensity=0.35,
+            )
         )
         plotter.add_light(
-            pv.Light(position=(-1, 0.5, 0.5), intensity=0.30, light_type="scene light")
+            pv.Light(
+                position=(center[0] - d, center[1] - d * 0.3, center[2] + d * 0.8),
+                focal_point=tuple(center),
+                intensity=0.30,
+            )
         )
         plotter.add_light(
-            pv.Light(position=(0, 0, 1), intensity=0.20, light_type="scene light")
+            pv.Light(
+                position=(center[0] + d, center[1] + d, center[2] + d * 0.4),
+                focal_point=tuple(center),
+                intensity=0.20,
+            )
         )
 
         # Add mesh with proper lighting (tuned to avoid overly shiny surfaces)
@@ -182,20 +231,18 @@ def _render_with_pyvista(
             diffuse=0.45,
         )
 
-        # Center the mesh at origin for camera positioning
-        mesh_center = mesh.center
-        mesh.points -= mesh_center
-
         # 85mm telephoto camera (matches _render_single_view)
         # Place camera at center + direction * distance, looking back at center
-        # Direction is (1/√3, -1/√3, 1/√3) for iso view
-        center = np.array([0.0, 0.0, 0.0])
-        camera_dir = np.array([1.0, -1.0, 1.0])
-        camera_dir = camera_dir / np.linalg.norm(camera_dir)
+        # Direction matches GeometryService's ISO preview convention.
+        camera_dir = np.array([1.0, -1.0, 0.5])
         cam_pos = center + camera_dir * distance
 
-        plotter.camera_position = cam_pos
-        plotter.camera.focal_point = center
+        plotter.camera_position = [
+            tuple(cam_pos),
+            tuple(center),
+            (0.0, 0.0, 1.0),
+        ]
+        plotter.camera.view_angle = view_angle
 
         # Set window size
         plotter.window_size = [size, size]
@@ -243,7 +290,6 @@ def render_thumbnail_from_glb_headless(
     Tries renderers in order:
     1. PyVista (proper lighting/shading, works headless)
     2. trimesh native (lit/shaded, requires display/OSMesa)
-    3. matplotlib (flat shading, last resort)
 
     Args:
         glb_bytes: GLB file data (Y-up, millimeters — as produced by cascadio)
@@ -271,9 +317,10 @@ def render_thumbnail_stl_fallback(stl_bytes: bytes, size: int = 256) -> bytes | 
     try:
         import trimesh
 
-        mesh = trimesh.load(io.BytesIO(stl_bytes), file_type="stl")
+        mesh = cast(Any, trimesh.load(io.BytesIO(stl_bytes), file_type="stl"))
+        glb_bytes = cast(bytes, mesh.export(file_type="glb"))
         return render_thumbnail_from_glb_headless(
-            mesh.export(file_type="glb"),
+            glb_bytes,
             size=size,
         )
     except Exception as exc:
@@ -284,7 +331,7 @@ def render_thumbnail_stl_fallback(stl_bytes: bytes, size: int = 256) -> bytes | 
 # ── Simple test ───────────────────────────────────────────────────────────────
 
 
-def test_headless_rendering():
+def test_headless_rendering() -> bool:
     """Test the headless thumbnail rendering with a simple cube."""
     print("Testing headless GLB thumbnail rendering...")
     try:
@@ -321,7 +368,7 @@ def test_headless_rendering():
             dtype=np.int32,
         )
         mesh = trimesh.Trimesh(vertices=vertices, faces=faces)
-        glb_bytes = mesh.export(file_type="glb")
+        glb_bytes = cast(bytes, mesh.export(file_type="glb"))
 
         thumbnail = render_thumbnail_from_glb_headless(glb_bytes, size=256)
         if thumbnail:

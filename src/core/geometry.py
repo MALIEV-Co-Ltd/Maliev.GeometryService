@@ -2096,20 +2096,18 @@ def _render_small_thumbnail_worker(stl_bytes: bytes) -> bytes | None:
 
 def _render_thumbnail_from_glb_worker(glb_bytes: bytes) -> bytes | None:
     """Phase 2 worker: renders a 256px isometric thumbnail from GLB bytes directly.
-    Uses headless matplotlib rendering (Kubernetes-friendly).
-    Falls back to PyVista if matplotlib unavailable.
+    Uses the headless thumbnail renderer (Kubernetes-friendly).
+    The renderer handles its own backend fallback chain.
     """
     try:
         from src.core.headless_thumbnail import render_thumbnail_from_glb_headless
 
-        # Try headless matplotlib rendering first (truly headless, K8s-friendly)
+        # Emit WebP bytes because the artifact path and content type are WebP.
         thumbnail = render_thumbnail_from_glb_headless(
-            glb_bytes, size=256, format="png"
+            glb_bytes, size=256, format="webp"
         )
         if thumbnail:
-            logger.info(
-                "Successfully rendered thumbnail using headless matplotlib renderer"
-            )
+            logger.info("Successfully rendered thumbnail using headless renderer")
             return thumbnail
         logger.warning("Headless rendering failed, falling back to PyVista")
 
@@ -3531,9 +3529,7 @@ def _generate_cnc_turning_summary(
             if axis_report and axis_report.length_diameter_ratio is not None
             else 0.0
         ),
-        "symmetryDeviation": (
-            axis_report.symmetry_deviation if axis_report else 0.0
-        ),
+        "symmetryDeviation": (axis_report.symmetry_deviation if axis_report else 0.0),
     }
 
     for issue in issues:
@@ -3642,7 +3638,9 @@ def _compute_dfm_single_body(
             def _run_analysis():
                 try:
                     result_container[0] = _analyze_single_body(
-                        stl_bytes, cad_bytes, cad_ext  # noqa: F821
+                        stl_bytes,  # noqa: F821
+                        cad_bytes,  # noqa: F821
+                        cad_ext,  # noqa: F821
                     )
                 except Exception as e:
                     exception_container[0] = e
