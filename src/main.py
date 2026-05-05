@@ -7,6 +7,7 @@ import time
 from collections import OrderedDict
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager, suppress
+from typing import Any
 
 # Add src to path for imports
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))  # noqa: PTH118, PTH120
@@ -381,7 +382,7 @@ async def analyze_for_process(
         Process-specific DFM report with issues found for the selected manufacturing method
     """  # noqa: E501
     from datetime import datetime, timezone
-    from uuid import uuid4
+    from uuid import UUID, uuid4
 
     from src.core.geometry import (
         CncDfmReport,
@@ -406,6 +407,112 @@ async def analyze_for_process(
     if request:
         storage_path = request.get("storage_path")
         download_url = request.get("download_url")
+
+    def build_timeout_report() -> dict[str, Any]:
+        issue = {
+            "category": "system",
+            "severity": "error",
+            "title": "DFM analysis timed out",
+            "description": (
+                f"{process_code} analysis exceeded the {timeout} second service limit. "
+                "The model was processed, but this process-specific DFM report "
+                "could not be completed."
+            ),
+            "value": float(timeout),
+            "threshold": float(timeout),
+        }
+
+        report: dict[str, Any] = {
+            "reportType": process_code,
+            "issues": [issue],
+            "analysisTimeSeconds": float(timeout),
+        }
+
+        if process_code in ("FDM", "SLS", "MJF", "MJ", "BJ", "DMLS"):
+            report.update(
+                {
+                    "thinWallCount": 0,
+                    "thinWallRegions": [],
+                    "overhangFaceCount": 0,
+                    "overhangAreaCm2": 0.0,
+                    "overhangRegions": [],
+                    "supportRequired": False,
+                    "estimatedSupportVolumeCm3": 0.0,
+                    "smallDetailCount": 0,
+                }
+            )
+        elif process_code in ("SLA", "SLA_DLP", "DLP"):
+            report.update(
+                {
+                    "thinWallCount": 0,
+                    "thinWallRegions": [],
+                    "overhangFaceCount": 0,
+                    "overhangAreaCm2": 0.0,
+                    "overhangRegions": [],
+                    "resinTrappingRisk": False,
+                    "resinTrappingRegions": [],
+                    "suctionRisk": False,
+                    "suctionRegions": [],
+                    "hollowRegions": [],
+                }
+            )
+
+        return report
+
+    async def publish_dfm_ready_event(
+        result: dict[str, Any], overlay_paths: dict[str, str] | None = None
+    ) -> None:
+        _now = datetime.now(timezone.utc)
+        file_data = _file_analysis_cache.get(upload_id, {})
+
+        fdm_report = None
+        sla_report = None
+        cnc_report = None
+
+        if process_code in ("FDM", "SLS", "MJF", "MJ", "BJ", "DMLS"):
+            fdm_report = FdmDfmReport.model_validate(result)
+        elif process_code in ("SLA", "SLA_DLP", "DLP"):
+            sla_report = SlaDfmReport.model_validate(result)
+        elif process_code in ("CNC", "CNC_MILL", "CNC_TURN"):
+            cnc_report = CncDfmReport.model_validate(result)
+
+        try:
+            file_id = UUID(upload_id)
+        except ValueError:
+            file_id = uuid4()
+
+        dfm_event = DfmAnalysisReadyEvent(
+            messageId=uuid4(),
+            correlationId=upload_id,
+            messageType=[
+                "urn:message:Maliev.MessagingContracts.Contracts.Geometry:DfmAnalysisReadyEvent"
+            ],
+            message=DfmAnalysisReadyMessageBody(
+                messageId=uuid4(),
+                messageName="DfmAnalysisReadyEvent",
+                messageType=MessageTypeEnum.Event,
+                messageVersion="1.0.0",
+                publishedBy="GeometryService",
+                consumedBy=["IntranetBff"],
+                correlationId=upload_id,
+                causationId=None,
+                occurredAtUtc=_now,
+                isPublic=False,
+                payload=DfmAnalysisReadyPayload(
+                    fileId=str(file_id),
+                    storagePath=storage_path or file_data.get("storage_path", ""),
+                    fdmReport=fdm_report,
+                    slaReport=sla_report,
+                    cncReport=cnc_report,
+                    analyzedAt=_now,
+                    overlayPaths=overlay_paths,
+                    bodyCount=file_data.get("body_count"),
+                    nonManifoldReason=file_data.get("non_manifold_reason"),
+                    nonManifoldFaceCount=file_data.get("non_manifold_face_count"),
+                ),
+            ),
+        )
+        await publish_event(dfm_event, "maliev.geometryservice.v1.dfm.ready")
 
     # Cache miss: need to re-download from GCS
     if upload_id not in _file_analysis_cache:
@@ -685,66 +792,7 @@ async def analyze_for_process(
 
         # Publish DfmAnalysisReadyEvent
         try:
-            _now = datetime.now(timezone.utc)
-
-            # Build the report based on process_code
-            fdm_report = None
-            sla_report = None
-            cnc_report = None
-
-            if process_code in ("FDM", "SLS", "MJF", "MJ", "BJ", "DMLS"):
-                fdm_report = FdmDfmReport.model_validate(result)
-            elif process_code in ("SLA", "SLA_DLP", "DLP"):
-                sla_report = SlaDfmReport.model_validate(result)
-            elif process_code in ("CNC", "CNC_MILL", "CNC_TURN"):
-                cnc_report = CncDfmReport.model_validate(result)
-
-            # Use the file_id portion of upload_id if it's a full UUID, otherwise generate one  # noqa: E501
-            try:
-                file_id = uuid4()
-                # Try to parse upload_id as UUID first
-                try:
-                    from uuid import UUID
-
-                    file_id = UUID(upload_id)
-                except ValueError:
-                    # upload_id is not a valid UUID, use a generated one
-                    file_id = uuid4()
-            except Exception:
-                file_id = uuid4()
-
-            dfm_event = DfmAnalysisReadyEvent(
-                messageId=uuid4(),
-                correlationId=upload_id,
-                messageType=[
-                    "urn:message:Maliev.MessagingContracts.Contracts.Geometry:DfmAnalysisReadyEvent"
-                ],
-                message=DfmAnalysisReadyMessageBody(
-                    messageId=uuid4(),
-                    messageName="DfmAnalysisReadyEvent",
-                    messageType=MessageTypeEnum.Event,
-                    messageVersion="1.0.0",
-                    publishedBy="GeometryService",
-                    consumedBy=["IntranetBff"],
-                    correlationId=upload_id,
-                    causationId=None,
-                    occurredAtUtc=_now,
-                    isPublic=False,
-                    payload=DfmAnalysisReadyPayload(
-                        fileId=str(file_id),
-                        storagePath=storage_path or "",
-                        fdmReport=fdm_report,
-                        slaReport=sla_report,
-                        cncReport=cnc_report,
-                        analyzedAt=_now,
-                        overlayPaths=overlay_paths,
-                        bodyCount=file_data.get("body_count"),
-                        nonManifoldReason=file_data.get("non_manifold_reason"),
-                        nonManifoldFaceCount=file_data.get("non_manifold_face_count"),
-                    ),
-                ),
-            )
-            await publish_event(dfm_event, "maliev.geometryservice.v1.dfm.ready")
+            await publish_dfm_ready_event(result, overlay_paths)
             logger.info(
                 f"Published DfmAnalysisReadyEvent for {upload_id}/{process_code}",
                 extra={"upload_id": upload_id, "process_code": process_code},
@@ -769,6 +817,7 @@ async def analyze_for_process(
         )
 
     except asyncio.TimeoutError:
+        timeout_report = build_timeout_report()
         logger.error(
             f"Process analysis timed out after {timeout}s for {upload_id}/{process_code}",  # noqa: E501
             extra={
@@ -777,6 +826,18 @@ async def analyze_for_process(
                 "timeout": timeout,
             },
         )
+        try:
+            await publish_dfm_ready_event(timeout_report)
+            logger.info(
+                f"Published timeout DfmAnalysisReadyEvent for {upload_id}/{process_code}",  # noqa: E501
+                extra={"upload_id": upload_id, "process_code": process_code},
+            )
+        except Exception as e:
+            logger.warning(
+                f"Failed to publish timeout DfmAnalysisReadyEvent for {upload_id}/{process_code}: {e}",  # noqa: E501
+                extra={"upload_id": upload_id, "process_code": process_code},
+                exc_info=True,
+            )
         return JSONResponse(
             content={
                 "upload_id": upload_id,
@@ -784,6 +845,9 @@ async def analyze_for_process(
                 "status": "timeout",
                 "error_type": "TimeoutError",
                 "message": f"Analysis timed out after {timeout} seconds",
+                "dfm_report": timeout_report,
+                "overlay_paths": {},
+                "body_count": _file_analysis_cache.get(upload_id, {}).get("body_count"),
             },
             status_code=504,
         )

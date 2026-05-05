@@ -6,6 +6,7 @@ Tests the new API functions for lazy evaluation without requiring full FastAPI s
 import base64
 import time
 from pathlib import Path
+from uuid import uuid4
 
 import pytest
 
@@ -119,6 +120,40 @@ class TestProcessAnalysisAPI:
         assert response.status_code == 404
         data = response.body.decode()
         assert "NotFound" in data
+
+    @pytest.mark.anyio
+    async def test_process_analysis_timeout_publishes_terminal_dfm_event(
+        self, sample_stl_file, monkeypatch
+    ):
+        """Timeouts must still publish a terminal DFM payload for ProjectNew."""
+        from src import main
+
+        upload_id = str(uuid4())
+        _file_analysis_cache[upload_id] = {
+            "stl_bytes": sample_stl_file.read_bytes(),
+            "storage_path": f"projects/test/{upload_id}/part.stl",
+            "body_count": 1,
+        }
+        published_events = []
+
+        def slow_analysis(*_args, **_kwargs):
+            time.sleep(0.05)
+            return {"reportType": "CNC_MILL", "issues": []}
+
+        async def capture_event(event, _routing_key):
+            published_events.append(event)
+
+        monkeypatch.setattr("src.core.geometry._analyze_single_process", slow_analysis)
+        monkeypatch.setattr(main, "publish_event", capture_event)
+
+        response = await analyze_for_process(upload_id, "CNC_MILL", timeout=0.001)
+
+        assert response.status_code == 504
+        assert published_events, "Expected timeout to publish a terminal DFM event"
+        payload = published_events[0].message.payload
+        assert payload.cnc_report is not None
+        assert payload.cnc_report.issues[0].category == "system"
+        assert payload.cnc_report.issues[0].severity == "error"
 
 
 class TestCleanupAPI:
