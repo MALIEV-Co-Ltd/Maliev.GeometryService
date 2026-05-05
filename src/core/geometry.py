@@ -2198,6 +2198,56 @@ def _render_thumbnail_from_glb_worker_fallback(glb_bytes: bytes) -> bytes | None
         return None
 
 
+def _normalize_source_extension(file_ext: str) -> str:
+    normalized_ext = file_ext.lower().strip()
+    if normalized_ext and not normalized_ext.startswith("."):
+        normalized_ext = f".{normalized_ext}"
+    return normalized_ext
+
+
+def _export_loaded_glb_for_viewer(scene_data: Any, file_ext: str = "") -> bytes | None:
+    """Transform a loaded Phase 1 GLB object into viewer-ready GLB bytes."""
+    # Z-up -> Y-up pre-rotation.
+    # -90 degrees around X: (x, y, z) -> (x, z, -y).
+    z_to_yup = np.array(
+        [[1, 0, 0, 0], [0, 0, 1, 0], [0, -1, 0, 0], [0, 0, 0, 1]], dtype=float
+    )
+
+    try:
+        if hasattr(scene_data, "copy"):
+            scene_data = scene_data.copy()
+
+        # STEP/IGES: cascadio outputs GLB in meters (glTF spec) -> scale to mm.
+        # STL/OBJ/3MF/GLB: Phase 1 has already normalized units for viewer use.
+        if _normalize_source_extension(file_ext) in (".step", ".stp", ".igs", ".iges"):
+            scene_data.apply_scale(1000.0)
+
+        if isinstance(scene_data, trimesh.Scene) and len(scene_data.geometry) > 1:
+            # Multi-body: preserve node hierarchy so the viewer can color/select bodies.
+            with contextlib.suppress(Exception):
+                scene_data.apply_translation(-scene_data.centroid)
+            scene_data.apply_transform(z_to_yup)
+            return cast(bytes, scene_data.export(file_type="glb"))
+
+        # Single-body fallback: flatten to Trimesh for backward compatibility.
+        if isinstance(scene_data, trimesh.Scene):
+            mesh = scene_data.dump(concatenate=True)
+        else:
+            mesh = scene_data
+
+        if not isinstance(mesh, trimesh.Trimesh) or len(mesh.vertices) == 0:
+            return None
+
+        mesh = mesh.copy()
+        mesh.apply_translation(-mesh.center_mass)
+        mesh.apply_transform(z_to_yup)
+        return cast(bytes, mesh.export(file_type="glb"))
+
+    except Exception as e:
+        logger.warning(f"_export_loaded_glb_for_viewer failed: {e}", exc_info=True)
+        return None
+
+
 def _export_glb_worker(cad_glb_bytes: bytes, file_ext: str = "") -> bytes | None:
     """Phase 2 worker: returns GLB bytes for the 3D viewer in Y-up, millimeters.
 
@@ -2216,43 +2266,10 @@ def _export_glb_worker(cad_glb_bytes: bytes, file_ext: str = "") -> bytes | None
         cad_glb_bytes: GLB bytes from Phase 1 (may be meters or mm depending on source)
         file_ext: Original file extension (with dot, e.g., ".step", ".stl") to determine units
     """  # noqa: E501
-    # Z-up → Y-up pre-rotation.
-    # −90° around X: (x, y, z) → (x, z, −y) — original Z (up) becomes glTF Y (up).
-    z_to_yup = np.array(
-        [[1, 0, 0, 0], [0, 0, 1, 0], [0, -1, 0, 0], [0, 0, 0, 1]], dtype=float
-    )
-
     try:
         # Load GLB (from Phase 1 - cascadio for STEP, trimesh export for STL/OBJ/3MF)
         scene_data = trimesh.load(io.BytesIO(cad_glb_bytes), file_type="glb")
-
-        # STEP/IGES: cascadio outputs GLB in meters (glTF spec) → scale to mm
-        # STL/OBJ/3MF: trimesh exports GLB already in mm → no scale
-        # GLB upload: Phase 1 already scaled to mm → no scale
-        if file_ext in (".step", ".stp", ".igs", ".iges"):
-            scene_data.apply_scale(1000.0)
-
-        if isinstance(scene_data, trimesh.Scene) and len(scene_data.geometry) > 1:
-            # Multi-body: preserve node hierarchy so the viewer can color/select bodies.
-            try:  # noqa: SIM105
-                scene_data.apply_translation(-scene_data.centroid)  # center at origin
-            except Exception:
-                pass
-            scene_data.apply_transform(z_to_yup)  # Z-up (OCCT) → Y-up (glTF)
-            return cast(bytes, scene_data.export(file_type="glb"))
-
-        # Single-body fallback: flatten to Trimesh (backward compatible).
-        if isinstance(scene_data, trimesh.Scene):
-            mesh = scene_data.dump(concatenate=True)
-        else:
-            mesh = scene_data
-
-        if not isinstance(mesh, trimesh.Trimesh) or len(mesh.vertices) == 0:
-            return None
-
-        mesh.apply_translation(-mesh.center_mass)  # center at origin
-        mesh.apply_transform(z_to_yup)  # Z-up (OCCT) → Y-up (glTF)
-        return cast(bytes, mesh.export(file_type="glb"))
+        return _export_loaded_glb_for_viewer(scene_data, file_ext)
 
     except Exception as e:
         logger.warning(f"_export_glb_worker failed: {e}", exc_info=True)
@@ -4404,17 +4421,12 @@ def _export_glb_from_paths(cad_glb_path: str, file_ext: str = "") -> bytes | Non
         logger.warning(f"GLB export source not found: {cad_glb_path}")
         return None
 
-    # Use cached GLB to avoid redundant disk I/O
+    # Use cached GLB to avoid redundant disk I/O and GLB parse/export/reparse cycles.
     cached_glb = _get_cached_glb(cad_glb_path)
-    if cached_glb:
-        # Export cached GLB to bytes for the worker
-        glb_bytes = (
-            cached_glb.export(file_type="glb")
-            if hasattr(cached_glb, "export")
-            else None
-        )
+    if cached_glb is not None:
+        glb_bytes = _export_loaded_glb_for_viewer(cached_glb, file_ext)
         if glb_bytes:
-            return _export_glb_worker(glb_bytes, file_ext)
+            return glb_bytes
 
     # Fallback: load from disk
     with open(cad_glb_path, "rb") as fh:  # noqa: PTH123

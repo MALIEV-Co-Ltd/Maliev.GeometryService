@@ -1,5 +1,6 @@
 import io
 from pathlib import Path
+from typing import cast
 
 import numpy as np
 import pytest
@@ -58,6 +59,29 @@ def load_mesh(file_path: Path):
     if isinstance(loaded, trimesh.Scene):
         return list(loaded.geometry.values())[0]
     return loaded
+
+
+def test_export_glb_from_paths_uses_cached_scene_without_reparse(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Cached Phase 1 GLB data should be transformed directly for the viewer."""
+    from src.core import geometry
+
+    mesh = trimesh.creation.box(extents=[10.0, 20.0, 30.0])
+    cad_glb_path = tmp_path / "cad.glb"
+    cad_glb_path.write_bytes(cast(bytes, mesh.export(file_type="glb")))
+
+    def fail_worker(_cad_glb_bytes: bytes, _file_ext: str = "") -> bytes | None:
+        msg = "cached GLB path should not re-export bytes and invoke worker"
+        raise AssertionError(msg)
+
+    monkeypatch.setattr(geometry, "_get_cached_glb", lambda _path: mesh)
+    monkeypatch.setattr(geometry, "_export_glb_worker", fail_worker)
+
+    result = geometry._export_glb_from_paths(str(cad_glb_path), ".stl")
+
+    assert result is not None
+    assert result[:4] == b"glTF"
 
 
 # Test geometries for preview images
