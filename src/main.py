@@ -317,6 +317,7 @@ async def quality_check(upload_id: str, file_data: dict) -> JSONResponse:
             "stl_bytes": stl_bytes,
             "cad_bytes": cad_bytes,
             "cad_extension": cad_extension,
+            "cad_glb_bytes": quality_result.get("cad_glb_bytes"),
             "body_count": quality_result.get("body_count", 1),
             "non_manifold_reason": quality_result.get("non_manifold_reason"),
             "non_manifold_face_count": quality_result.get("non_manifold_face_count"),
@@ -650,6 +651,7 @@ async def analyze_for_process(
             # Pass the already-cached STL bytes so overlay generation never
             # needs to load a GLB file from disk/GCS.
             cached_stl_bytes = file_data.get("stl_bytes")
+            cached_cad_glb_bytes = file_data.get("cad_glb_bytes")
 
             # Generate and upload overlays (120 s hard cap so slow overlay
             # generation never blocks the HTTP response indefinitely).
@@ -663,6 +665,8 @@ async def analyze_for_process(
                     http_client=consumer._http_client,
                     upload_id=upload_id,
                     stl_bytes=cached_stl_bytes,
+                    cad_glb_bytes=cached_cad_glb_bytes,
+                    cad_extension=cad_extension,
                 ),
                 timeout=120,
             )

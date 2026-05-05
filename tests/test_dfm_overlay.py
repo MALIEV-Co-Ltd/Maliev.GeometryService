@@ -142,6 +142,56 @@ def _load_overlay_as_zup_mesh(glb_bytes: bytes) -> trimesh.Trimesh:
     return mesh
 
 
+def test_overlay_worker_uses_viewer_glb_reference_center():
+    """Overlay face coordinates must be centered against the displayed viewer GLB."""
+    from src.core.geometry import _generate_overlays_worker
+
+    mesh = trimesh.creation.box([10.0, 4.0, 6.0])
+    mesh.apply_translation([18.0, -7.0, 3.0])
+    reference_center = np.array([12.0, -5.0, 2.0], dtype=float)
+    face_indices = [0, 1]
+    reports = {
+        "FDM": {
+            "issues": [
+                {
+                    "category": "thin_wall",
+                    "faceIndices": face_indices,
+                }
+            ]
+        }
+    }
+
+    result = _generate_overlays_worker(
+        mesh.export(file_type="stl"),
+        reports,
+        reference_center,
+    )
+
+    glb = result.get("FDM__thin_wall")
+    assert glb is not None
+
+    overlay = _load_overlay_as_zup_mesh(glb)
+    selected = mesh.submesh([face_indices], append=True)
+    assert isinstance(selected, trimesh.Trimesh)
+
+    expected_bounds = selected.bounds - reference_center
+    assert np.allclose(overlay.bounds, expected_bounds, atol=1e-5)
+
+
+def test_viewer_glb_reference_center_follows_step_unit_rules():
+    """STEP source GLB centers are converted from meters to viewer millimeters."""
+    from src.core.geometry import _compute_viewer_glb_reference_center
+
+    mesh = trimesh.creation.box([0.010, 0.020, 0.030])
+    mesh.apply_translation([0.100, -0.050, 0.025])
+    glb = mesh.export(file_type="glb")
+
+    center = _compute_viewer_glb_reference_center(glb, "step")
+
+    assert center is not None
+    assert np.allclose(center, mesh.center_mass * 1000.0, atol=1e-6)
+
+
 class TestMultiBodyOverlay:
     """generate_multi_body_overlay_glb produces a correct per-body coloured GLB."""
 

@@ -4036,9 +4036,38 @@ def _compute_dfm_worker(
     return _analyze_single_body(stl_bytes, cad_bytes, cad_extension)
 
 
+def _compute_viewer_glb_reference_center(
+    cad_glb_bytes: bytes | None,
+    file_ext: str | None = None,
+) -> np.ndarray | None:
+    """Return the source-space center used when exporting the viewer GLB."""
+    if not cad_glb_bytes:
+        return None
+
+    ext = (file_ext or "").lower().lstrip(".")
+    try:
+        scene_data = trimesh.load(io.BytesIO(cad_glb_bytes), file_type="glb")
+        if ext in ("step", "stp", "igs", "iges"):
+            scene_data.apply_scale(1000.0)
+
+        if isinstance(scene_data, trimesh.Scene) and len(scene_data.geometry) > 1:
+            return np.asarray(scene_data.centroid, dtype=float)
+
+        mesh = scene_data
+        if isinstance(scene_data, trimesh.Scene):
+            mesh = scene_data.to_geometry()
+        if isinstance(mesh, trimesh.Trimesh) and len(mesh.vertices) > 0:
+            return np.asarray(mesh.center_mass, dtype=float)
+    except Exception as exc:
+        logger.debug("Failed to compute viewer GLB reference center: %s", exc)
+
+    return None
+
+
 def _generate_overlays_worker(
     stl_bytes: bytes | dict[int, bytes],
     reports: dict[str, Any],
+    reference_center: np.ndarray | None = None,
 ) -> dict[str, bytes]:
     """Phase 3 worker: generate overlay GLB bytes for each process+category.
 
@@ -4099,7 +4128,9 @@ def _generate_overlays_worker(
                 if len(mesh_list) > 1
                 else mesh_list[0]
             )
-            center = mesh.center_mass
+            center = (
+                reference_center if reference_center is not None else mesh.center_mass
+            )
 
             # Multi-body overlay - use PRE-SPLIT bodies (no re-splitting!)
             if len(mesh_list) > 1:
@@ -4115,7 +4146,9 @@ def _generate_overlays_worker(
             if not isinstance(mesh, trimesh.Trimesh) or len(mesh.vertices) == 0:
                 return result
 
-            center = mesh.center_mass
+            center = (
+                reference_center if reference_center is not None else mesh.center_mass
+            )
 
             # Multi-body overlay: split the mesh into connected components and
             # tint each body a distinct colour so the user can see the separation.

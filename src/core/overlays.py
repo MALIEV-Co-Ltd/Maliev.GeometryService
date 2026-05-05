@@ -27,6 +27,8 @@ async def generate_and_upload_overlays(
     http_client: httpx.AsyncClient,
     upload_id: str,
     stl_bytes: bytes | None = None,
+    cad_glb_bytes: bytes | None = None,
+    cad_extension: str | None = None,
 ) -> dict[str, str]:
     """Generate overlay GLBs and upload them to GCS.
 
@@ -40,6 +42,9 @@ async def generate_and_upload_overlays(
         upload_id: Upload identifier for tracking.
         stl_bytes: Pre-loaded STL bytes. When provided, bypasses GLB file loading
                    entirely — the mesh is created directly from these bytes.
+        cad_glb_bytes: Source CAD GLB bytes used to compute the displayed viewer
+                       GLB center.
+        cad_extension: Original CAD extension used for the viewer GLB unit rules.
 
     Returns:
         Dictionary mapping overlay keys (e.g. "FDM__thin_wall") to GCS paths.
@@ -49,7 +54,11 @@ async def generate_and_upload_overlays(
     loop = asyncio.get_event_loop()
 
     # Import dfm_executor from geometry module for the executor
-    from src.core.geometry import GeometryProcessor, _generate_overlays_worker
+    from src.core.geometry import (
+        GeometryProcessor,
+        _compute_viewer_glb_reference_center,
+        _generate_overlays_worker,
+    )
 
     # Use a temporary executor for this one-off operation
     processor = GeometryProcessor()
@@ -57,6 +66,10 @@ async def generate_and_upload_overlays(
 
     overlay_paths: dict[str, str] = {}
     try:
+        reference_center = _compute_viewer_glb_reference_center(
+            cad_glb_bytes,
+            cad_extension,
+        )
         if stl_bytes is not None:
             # Fast path: use already-available STL bytes directly,
             # skipping the GLB file load entirely.
@@ -75,6 +88,7 @@ async def generate_and_upload_overlays(
                         _generate_overlays_worker,
                         mesh_bytes_dict,
                         reports,
+                        reference_center,
                     )
                 else:
                     logger.warning(
