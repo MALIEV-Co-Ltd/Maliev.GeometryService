@@ -985,6 +985,7 @@ class UploadConsumer:
                     occurredAtUtc=now,
                     isPublic=False,
                     payload=PreviewImagesGeneratedPayload(
+                        fileId=job.file_id,
                         storagePath=job.storage_path,
                         previewImages=PreviewImagesMessage(
                             frontSmall=preview_paths.get("front_small"),

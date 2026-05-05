@@ -254,6 +254,7 @@ class PreviewImagesGeneratedPayload(BaseModel):
     """Nested payload data inside PreviewImagesGeneratedEvent.message."""
 
     model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
+    file_id: str | None = Field(alias="fileId", default=None)
     storage_path: str = Field(alias="storagePath")
     preview_images: PreviewImagesMessage = Field(alias="previewImages")
     generated_at: datetime = Field(alias="generatedAt")
