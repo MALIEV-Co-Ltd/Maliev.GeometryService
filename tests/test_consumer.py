@@ -8,6 +8,7 @@ from uuid import uuid4
 import pytest
 
 from src.consumers.upload_consumer import ArtifactProcessingJob, UploadConsumer
+from src.core.geometry import BoundingBox, GeometryMetrics
 from src.core.schemas import (
     FileUploadedEvent,
     FileUploadedMessage,
@@ -250,6 +251,72 @@ async def test_artifact_job_waits_for_viewer_glb_before_secondary_artifacts(
 
 
 @pytest.mark.asyncio
+async def test_publish_glb_timeout_uses_source_glb_fallback(
+    consumer: UploadConsumer,
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_glb = b"source-glb"
+    artifact_temp_dir = tmp_path / "artifact"
+    artifact_temp_dir.mkdir()
+    cad_glb_path = artifact_temp_dir / "cad.glb"
+    cad_glb_path.write_bytes(source_glb)
+    job = ArtifactProcessingJob(
+        file_id=str(uuid4()),
+        upload_id=str(uuid4()),
+        storage_path="projects/test/model.step",
+        file_ext=".step",
+        file_name="model.step",
+        file_size=1024,
+        correlation_id=uuid4(),
+        metrics=GeometryMetrics(
+            volumeCm3=1.0,
+            supportVolumeCm3=0.0,
+            surfaceAreaCm2=6.0,
+            boundingBox=BoundingBox(x=1.0, y=1.0, z=1.0),
+            isManifold=True,
+            triangleCount=12,
+            eulerNumber=2,
+        ),
+        body_count=1,
+        body_infos=None,
+        temp_dir=artifact_temp_dir,
+        cad_glb_path=cad_glb_path,
+        executor=None,
+        queued_at=0.0,
+    )
+    consumer.upload_artifact = AsyncMock(return_value=True)
+    consumer.publish_event = AsyncMock()
+
+    async def timeout_wait_for(awaitable, timeout):  # noqa: ANN001, ARG001
+        awaitable.cancel()
+        raise asyncio.TimeoutError
+
+    monkeypatch.setattr(
+        "src.consumers.upload_consumer.asyncio.wait_for",
+        timeout_wait_for,
+    )
+
+    result = await consumer._publish_glb(job)
+
+    assert result is True
+    consumer.upload_artifact.assert_awaited_once_with(
+        source_glb,
+        "projects/test/model.step_viewer.glb",
+        "model/gltf-binary",
+        job.upload_id,
+    )
+    completed_event = consumer.publish_event.await_args.args[0]
+    assert consumer.publish_event.await_args.args[1] == (
+        "maliev.geometryservice.v1.analysis.completed"
+    )
+    assert completed_event.message.payload.file_id == job.file_id
+    assert completed_event.message.payload.glb_storage_path == (
+        "projects/test/model.step_viewer.glb"
+    )
+
+
+@pytest.mark.asyncio
 async def test_process_message_success(consumer, mock_storage, mock_processor):  # noqa: ARG001
     # Setup
     correlation_id = uuid4()
@@ -353,7 +420,9 @@ async def test_process_message_success(consumer, mock_storage, mock_processor): 
 
 @pytest.mark.asyncio
 async def test_process_message_with_deferred_sla_report_does_not_crash(
-    consumer, mock_storage, mock_processor  # noqa: ARG001
+    consumer,
+    mock_storage,
+    mock_processor,  # noqa: ARG001
 ):
     """Regression: deferred SLA reports (twoPhaseDeferred=True) must not cause
     pydantic ValidationError in the consumer (missing resinTrappingRisk etc.)."""

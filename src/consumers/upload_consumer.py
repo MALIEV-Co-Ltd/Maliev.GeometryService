@@ -571,9 +571,7 @@ class UploadConsumer:
                 "event": "phase2_inputs",
                 "file_id": file_id,
                 "cad_glb_bytes": len(cad_glb_bytes) if cad_glb_bytes else 0,
-                "mesh_stl_bytes": len(original_stl_bytes)
-                if original_stl_bytes
-                else 0,
+                "mesh_stl_bytes": len(original_stl_bytes) if original_stl_bytes else 0,
                 "body_count": body_count,
             },
         )
@@ -856,41 +854,7 @@ class UploadConsumer:
             )
             if not uploaded:
                 return False
-            now = datetime.now(timezone.utc)
-            event = FileAnalyzedEvent(
-                messageId=uuid4(),
-                correlationId=job.correlation_id,
-                messageType=[
-                    "urn:message:Maliev.MessagingContracts.Contracts.Geometry:FileAnalyzedEvent"
-                ],
-                message=FileAnalyzedMessageBody(
-                    messageId=uuid4(),
-                    messageName="FileAnalyzedEvent",
-                    messageType=MessageTypeEnum.Event,
-                    messageVersion="1.0.0",
-                    publishedBy="GeometryService",
-                    consumedBy=["IntranetBff"],
-                    correlationId=job.correlation_id,
-                    causationId=None,
-                    occurredAtUtc=now,
-                    isPublic=False,
-                    payload=FileAnalyzedPayload(
-                        fileId=job.file_id,
-                        metrics=job.metrics,
-                        processedAt=now,
-                        glbStoragePath=glb_path,
-                        thumbnailStoragePath=None,
-                        storagePath=job.storage_path,
-                        dfmReport=None,
-                        bodyCount=job.body_count,
-                        bodies=job.body_infos,
-                    ),
-                ),
-            )
-            await self.publish_event(
-                event,
-                "maliev.geometryservice.v1.analysis.completed",
-            )
+            await self._publish_file_analyzed_event(job, glb_path)
             return True
         except asyncio.TimeoutError:
             logger.warning(
@@ -901,7 +865,7 @@ class UploadConsumer:
                     "timeout_s": _GLB_BUDGET_S,
                 },
             )
-            return False
+            return await self._publish_source_glb_fallback(job, "timeout")
         except Exception as exc:
             logger.warning(
                 "GLB artifact task failed",
@@ -924,6 +888,84 @@ class UploadConsumer:
                     ),
                 },
             )
+
+    async def _publish_source_glb_fallback(
+        self, job: ArtifactProcessingJob, reason: str
+    ) -> bool:
+        try:
+            source_glb = await asyncio.to_thread(job.cad_glb_path.read_bytes)
+        except Exception as exc:
+            logger.warning(
+                "GLB fallback source read failed",
+                extra={
+                    "event": "glb_fallback_read_error",
+                    "file_id": job.file_id,
+                    "reason": reason,
+                    "error": str(exc),
+                },
+            )
+            return False
+
+        glb_path = f"{job.storage_path}_viewer.glb"
+        uploaded = await self.upload_artifact(
+            source_glb,
+            glb_path,
+            "model/gltf-binary",
+            job.upload_id,
+        )
+        if not uploaded:
+            return False
+
+        await self._publish_file_analyzed_event(job, glb_path)
+        logger.warning(
+            "Published source GLB fallback after viewer export failed",
+            extra={
+                "event": "glb_fallback_published",
+                "file_id": job.file_id,
+                "reason": reason,
+                "bytes": len(source_glb),
+            },
+        )
+        return True
+
+    async def _publish_file_analyzed_event(
+        self, job: ArtifactProcessingJob, glb_path: str
+    ) -> None:
+        now = datetime.now(timezone.utc)
+        event = FileAnalyzedEvent(
+            messageId=uuid4(),
+            correlationId=job.correlation_id,
+            messageType=[
+                "urn:message:Maliev.MessagingContracts.Contracts.Geometry:FileAnalyzedEvent"
+            ],
+            message=FileAnalyzedMessageBody(
+                messageId=uuid4(),
+                messageName="FileAnalyzedEvent",
+                messageType=MessageTypeEnum.Event,
+                messageVersion="1.0.0",
+                publishedBy="GeometryService",
+                consumedBy=["IntranetBff"],
+                correlationId=job.correlation_id,
+                causationId=None,
+                occurredAtUtc=now,
+                isPublic=False,
+                payload=FileAnalyzedPayload(
+                    fileId=job.file_id,
+                    metrics=job.metrics,
+                    processedAt=now,
+                    glbStoragePath=glb_path,
+                    thumbnailStoragePath=None,
+                    storagePath=job.storage_path,
+                    dfmReport=None,
+                    bodyCount=job.body_count,
+                    bodies=job.body_infos,
+                ),
+            ),
+        )
+        await self.publish_event(
+            event,
+            "maliev.geometryservice.v1.analysis.completed",
+        )
 
     async def _publish_previews(self, job: ArtifactProcessingJob) -> bool:
         started_at = time.perf_counter()
