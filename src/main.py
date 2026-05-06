@@ -45,6 +45,14 @@ logger = logging.getLogger(__name__)
 consumer: UploadConsumer | None = None
 
 
+def _resolve_process_dfm_timeout_seconds(timeout: float | None) -> float:
+    return (
+        float(settings.GEOMETRY_PROCESS_DFM_TIMEOUT_SECONDS)
+        if timeout is None
+        else float(timeout)
+    )
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
     # Startup
@@ -362,7 +370,10 @@ async def quality_check(upload_id: str, file_data: dict) -> JSONResponse:
 
 @router.post("/uploads/{upload_id}/dfm/{process_code}", tags=["DFM Analysis"])
 async def analyze_for_process(
-    upload_id: str, process_code: str, request: dict | None = None, timeout: int = 30
+    upload_id: str,
+    process_code: str,
+    request: dict | None = None,
+    timeout: float | None = None,
 ) -> JSONResponse:
     """Phase 2: Process-specific DFM analysis (on-demand, lazy DFM).
 
@@ -376,7 +387,7 @@ async def analyze_for_process(
         upload_id: Unique identifier for this upload
         process_code: Manufacturing process code (e.g., "FDM", "SLA", "CNC_MILL", "CNC_TURN")
         request: Optional request body with {storage_path, download_url} for cache-miss recovery
-        timeout: Maximum analysis time in seconds (default: 30)
+        timeout: Optional analysis time override in seconds
 
     Returns:
         Process-specific DFM report with issues found for the selected manufacturing method
@@ -402,6 +413,7 @@ async def analyze_for_process(
 
     storage_path: str | None = None
     download_url: str | None = None
+    analysis_timeout_seconds = _resolve_process_dfm_timeout_seconds(timeout)
 
     # Parse request body for cache-miss recovery
     if request:
@@ -414,18 +426,19 @@ async def analyze_for_process(
             "severity": "error",
             "title": "DFM analysis timed out",
             "description": (
-                f"{process_code} analysis exceeded the {timeout} second service limit. "
+                f"{process_code} analysis exceeded the {analysis_timeout_seconds:g} "
+                "second service limit. "
                 "The model was processed, but this process-specific DFM report "
                 "could not be completed."
             ),
-            "value": float(timeout),
-            "threshold": float(timeout),
+            "value": analysis_timeout_seconds,
+            "threshold": analysis_timeout_seconds,
         }
 
         report: dict[str, Any] = {
             "reportType": process_code,
             "issues": [issue],
-            "analysisTimeSeconds": float(timeout),
+            "analysisTimeSeconds": analysis_timeout_seconds,
         }
 
         if process_code in ("FDM", "SLS", "MJF", "MJ", "BJ", "DMLS"):
@@ -698,7 +711,7 @@ async def analyze_for_process(
                         stl_bytes, process_code, cad_bytes, cad_extension
                     ),
                 ),
-                timeout=timeout,
+                timeout=analysis_timeout_seconds,
             )
 
             # Check if analysis failed
@@ -819,11 +832,11 @@ async def analyze_for_process(
     except asyncio.TimeoutError:
         timeout_report = build_timeout_report()
         logger.error(
-            f"Process analysis timed out after {timeout}s for {upload_id}/{process_code}",  # noqa: E501
+            f"Process analysis timed out after {analysis_timeout_seconds:g}s for {upload_id}/{process_code}",  # noqa: E501
             extra={
                 "upload_id": upload_id,
                 "process_code": process_code,
-                "timeout": timeout,
+                "timeout": analysis_timeout_seconds,
             },
         )
         try:
@@ -844,7 +857,9 @@ async def analyze_for_process(
                 "process_code": process_code,
                 "status": "timeout",
                 "error_type": "TimeoutError",
-                "message": f"Analysis timed out after {timeout} seconds",
+                "message": (
+                    f"Analysis timed out after {analysis_timeout_seconds:g} seconds"
+                ),
                 "dfm_report": timeout_report,
                 "overlay_paths": {},
                 "body_count": _file_analysis_cache.get(upload_id, {}).get("body_count"),

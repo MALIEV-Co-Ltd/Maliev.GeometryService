@@ -12,6 +12,7 @@ import pytest
 
 from src.main import (
     _file_analysis_cache,
+    _resolve_process_dfm_timeout_seconds,
     analyze_for_process,
     cleanup_upload,
     quality_check,
@@ -84,6 +85,17 @@ class TestQualityCheckAPI:
 
 class TestProcessAnalysisAPI:
     """Test process-specific analysis API function."""
+
+    def test_process_analysis_default_timeout_allows_production_step_files(self):
+        """Default process DFM timeout must cover larger STEP analysis runs."""
+        from src.core.config import settings
+
+        assert settings.GEOMETRY_PROCESS_DFM_TIMEOUT_SECONDS >= 120
+        assert (
+            _resolve_process_dfm_timeout_seconds(None)
+            == settings.GEOMETRY_PROCESS_DFM_TIMEOUT_SECONDS
+        )
+        assert _resolve_process_dfm_timeout_seconds(5) == 5.0
 
     @pytest.mark.anyio
     async def test_single_process_analysis(self, sample_stl_file):
