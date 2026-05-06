@@ -4,6 +4,7 @@ Tests the new API functions for lazy evaluation without requiring full FastAPI s
 """
 
 import base64
+import json
 import time
 from contextlib import suppress
 from pathlib import Path
@@ -170,6 +171,54 @@ class TestProcessAnalysisAPI:
             assert payload.cnc_report is not None
             assert payload.cnc_report.issues[0].category == "system"
             assert payload.cnc_report.issues[0].severity == "error"
+        finally:
+            clear_cache()
+            with suppress(KeyError):
+                del _file_analysis_cache[upload_id]
+
+    @pytest.mark.anyio
+    async def test_process_analysis_failure_publishes_terminal_dfm_event(
+        self, sample_stl_file, monkeypatch
+    ):
+        """Analyzer failures must publish a terminal DFM payload for ProjectNew."""
+        from src import main
+
+        clear_cache()
+        upload_id = str(uuid4())
+        _file_analysis_cache[upload_id] = {
+            "stl_bytes": sample_stl_file.read_bytes(),
+            "storage_path": f"projects/test/{upload_id}/part.stl",
+            "body_count": 1,
+        }
+        published_events = []
+
+        def failed_analysis(*_args, **_kwargs):
+            return {
+                "error_type": "AnalyzerFailed",
+                "message": "Could not analyze printable features.",
+            }
+
+        async def capture_event(event, _routing_key):
+            published_events.append(event)
+
+        monkeypatch.setattr(
+            "src.core.geometry._analyze_single_process", failed_analysis
+        )
+        monkeypatch.setattr(main, "publish_event", capture_event)
+
+        try:
+            response = await analyze_for_process(upload_id, "FDM", timeout=5)
+
+            assert response.status_code == 500
+            data = json.loads(response.body.decode())
+            assert data["status"] == "error"
+            assert data["dfm_report"]["issues"][0]["category"] == "system"
+            assert data["dfm_report"]["issues"][0]["severity"] == "error"
+            assert published_events, "Expected failure to publish a terminal DFM event"
+            payload = published_events[0].message.payload
+            assert payload.fdm_report is not None
+            assert payload.fdm_report.issues[0].category == "system"
+            assert payload.fdm_report.issues[0].severity == "error"
         finally:
             clear_cache()
             with suppress(KeyError):

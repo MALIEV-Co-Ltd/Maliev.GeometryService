@@ -420,27 +420,7 @@ async def analyze_for_process(
         storage_path = request.get("storage_path")
         download_url = request.get("download_url")
 
-    def build_timeout_report() -> dict[str, Any]:
-        issue = {
-            "category": "system",
-            "severity": "error",
-            "title": "DFM analysis timed out",
-            "description": (
-                f"{process_code} analysis exceeded the {analysis_timeout_seconds:g} "
-                "second service limit. "
-                "The model was processed, but this process-specific DFM report "
-                "could not be completed."
-            ),
-            "value": analysis_timeout_seconds,
-            "threshold": analysis_timeout_seconds,
-        }
-
-        report: dict[str, Any] = {
-            "reportType": process_code,
-            "issues": [issue],
-            "analysisTimeSeconds": analysis_timeout_seconds,
-        }
-
+    def add_process_report_defaults(report: dict[str, Any]) -> dict[str, Any]:
         if process_code in ("FDM", "SLS", "MJF", "MJ", "BJ", "DMLS"):
             report.update(
                 {
@@ -471,6 +451,50 @@ async def analyze_for_process(
             )
 
         return report
+
+    def build_timeout_report() -> dict[str, Any]:
+        issue = {
+            "category": "system",
+            "severity": "error",
+            "title": "DFM analysis timed out",
+            "description": (
+                f"{process_code} analysis exceeded the {analysis_timeout_seconds:g} "
+                "second service limit. "
+                "The model was processed, but this process-specific DFM report "
+                "could not be completed."
+            ),
+            "value": analysis_timeout_seconds,
+            "threshold": analysis_timeout_seconds,
+        }
+
+        return add_process_report_defaults(
+            {
+                "reportType": process_code,
+                "issues": [issue],
+                "analysisTimeSeconds": analysis_timeout_seconds,
+            }
+        )
+
+    def build_failure_report(error_type: str, message: str) -> dict[str, Any]:
+        issue = {
+            "category": "system",
+            "severity": "error",
+            "title": "DFM analysis failed",
+            "description": (
+                message or f"{process_code} analysis failed before producing a report."
+            ),
+            "value": 0,
+            "threshold": 0,
+        }
+
+        return add_process_report_defaults(
+            {
+                "reportType": process_code,
+                "issues": [issue],
+                "analysisTimeSeconds": 0.0,
+                "errorType": error_type,
+            }
+        )
 
     async def publish_dfm_ready_event(
         result: dict[str, Any], overlay_paths: dict[str, str] | None = None
@@ -716,6 +740,10 @@ async def analyze_for_process(
 
             # Check if analysis failed
             if "error_type" in result:
+                failure_report = build_failure_report(
+                    str(result.get("error_type") or "AnalyzerFailed"),
+                    str(result.get("message") or ""),
+                )
                 logger.error(
                     f"Process analysis failed for {upload_id}/{process_code}: {result.get('message')}",  # noqa: E501
                     extra={
@@ -724,12 +752,27 @@ async def analyze_for_process(
                         "error_type": result.get("error_type"),
                     },
                 )
+                try:
+                    await publish_dfm_ready_event(failure_report)
+                    logger.info(
+                        f"Published failure DfmAnalysisReadyEvent for {upload_id}/{process_code}",  # noqa: E501
+                        extra={"upload_id": upload_id, "process_code": process_code},
+                    )
+                except Exception as e:
+                    logger.warning(
+                        f"Failed to publish failure DfmAnalysisReadyEvent for {upload_id}/{process_code}: {e}",  # noqa: E501
+                        extra={"upload_id": upload_id, "process_code": process_code},
+                        exc_info=True,
+                    )
                 return JSONResponse(
                     content={
                         "upload_id": upload_id,
                         "process_code": process_code,
                         "status": "error",
                         **result,
+                        "dfm_report": failure_report,
+                        "overlay_paths": {},
+                        "body_count": file_data.get("body_count"),
                     },
                     status_code=500,
                 )
@@ -868,6 +911,7 @@ async def analyze_for_process(
         )
 
     except Exception as e:
+        failure_report = build_failure_report(type(e).__name__, str(e))
         logger.error(
             f"Process analysis failed for {upload_id}/{process_code}: {e}",
             extra={
@@ -877,6 +921,18 @@ async def analyze_for_process(
             },
             exc_info=True,
         )
+        try:
+            await publish_dfm_ready_event(failure_report)
+            logger.info(
+                f"Published failure DfmAnalysisReadyEvent for {upload_id}/{process_code}",  # noqa: E501
+                extra={"upload_id": upload_id, "process_code": process_code},
+            )
+        except Exception as publish_error:
+            logger.warning(
+                f"Failed to publish failure DfmAnalysisReadyEvent for {upload_id}/{process_code}: {publish_error}",  # noqa: E501
+                extra={"upload_id": upload_id, "process_code": process_code},
+                exc_info=True,
+            )
         return JSONResponse(
             content={
                 "upload_id": upload_id,
@@ -884,6 +940,9 @@ async def analyze_for_process(
                 "status": "error",
                 "error_type": type(e).__name__,
                 "message": str(e),
+                "dfm_report": failure_report,
+                "overlay_paths": {},
+                "body_count": _file_analysis_cache.get(upload_id, {}).get("body_count"),
             },
             status_code=500,
         )
