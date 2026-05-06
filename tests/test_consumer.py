@@ -317,6 +317,64 @@ async def test_publish_glb_timeout_uses_source_glb_fallback(
 
 
 @pytest.mark.asyncio
+async def test_publish_previews_includes_small_thumbnail_path(
+    consumer: UploadConsumer,
+    tmp_path,
+) -> None:
+    artifact_temp_dir = tmp_path / "artifact"
+    artifact_temp_dir.mkdir()
+    cad_glb_path = artifact_temp_dir / "cad.glb"
+    cad_glb_path.write_bytes(b"source-glb")
+    job = ArtifactProcessingJob(
+        file_id=str(uuid4()),
+        upload_id=str(uuid4()),
+        storage_path="projects/test/model.step",
+        file_ext=".step",
+        file_name="model.step",
+        file_size=1024,
+        correlation_id=uuid4(),
+        metrics=MagicMock(),
+        body_count=1,
+        body_infos=None,
+        temp_dir=artifact_temp_dir,
+        cad_glb_path=cad_glb_path,
+        executor=None,
+        queued_at=0.0,
+    )
+    consumer.upload_artifact = AsyncMock(return_value=True)
+    consumer.publish_event = AsyncMock()
+    real_loop = asyncio.get_event_loop()
+
+    def fake_run_in_executor(executor, fn, *args):  # noqa: ANN001, ARG001
+        assert fn.__name__ == "_render_preview_worker"
+        future = real_loop.create_future()
+        future.set_result(_FAKE_ARTIFACTS_RESULT["preview_images"])
+        return future
+
+    mock_loop = MagicMock(wraps=real_loop)
+    mock_loop.run_in_executor = fake_run_in_executor
+
+    with patch(
+        "src.consumers.upload_consumer.asyncio.get_running_loop",
+        return_value=mock_loop,
+    ):
+        result = await consumer._publish_previews(job)
+
+    assert result is True
+    uploaded_paths = [call.args[1] for call in consumer.upload_artifact.await_args_list]
+    assert "projects/test/model.step_thumbnail_small.webp" in uploaded_paths
+
+    preview_event = consumer.publish_event.await_args.args[0]
+    preview_images = preview_event.message.payload.preview_images
+    assert preview_images.thumbnail_small == (
+        "projects/test/model.step_thumbnail_small.webp"
+    )
+    assert preview_images.thumbnail_large == (
+        "projects/test/model.step_thumbnail_large.webp"
+    )
+
+
+@pytest.mark.asyncio
 async def test_process_message_success(consumer, mock_storage, mock_processor):  # noqa: ARG001
     # Setup
     correlation_id = uuid4()

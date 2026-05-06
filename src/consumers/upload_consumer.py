@@ -981,6 +981,7 @@ class UploadConsumer:
             )
 
             preview_paths: dict[str, str] = {}
+            thumbnail_small_path: str | None = None
             thumbnail_large_path: str | None = None
             for side, image_bytes in preview_images.items():
                 if side in ("thumbnail_small", "thumbnail_large"):
@@ -995,6 +996,18 @@ class UploadConsumer:
                     )
                     if ok:
                         preview_paths[side] = preview_path
+
+            thumbnail_small_bytes = preview_images.get("thumbnail_small")
+            if thumbnail_small_bytes:
+                thumbnail_small_path = f"{job.storage_path}_thumbnail_small.webp"
+                small_ok = await self.upload_artifact(
+                    thumbnail_small_bytes,
+                    thumbnail_small_path,
+                    "image/webp",
+                    job.upload_id,
+                )
+                if not small_ok:
+                    thumbnail_small_path = None
 
             thumbnail_large_bytes = preview_images.get("thumbnail_large")
             if thumbnail_large_bytes:
@@ -1036,7 +1049,7 @@ class UploadConsumer:
                             rightSmall=preview_paths.get("right_small"),
                             topSmall=preview_paths.get("top_small"),
                             bottomSmall=preview_paths.get("bottom_small"),
-                            thumbnailSmall=None,
+                            thumbnailSmall=thumbnail_small_path,
                             thumbnailLarge=thumbnail_large_path,
                         ),
                         generatedAt=now,
