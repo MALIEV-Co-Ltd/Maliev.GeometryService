@@ -33,6 +33,7 @@ logger = logging.getLogger(__name__)
 def compute_thin_wall_analysis(
     mesh: trimesh.Trimesh,
     threshold_mm: float,
+    min_region_span_mm: float | None = None,
 ) -> tuple[int, list[list[float]], list[int]]:
     """Detect thin-wall regions by finding opposite-facing face pairs.
 
@@ -41,7 +42,10 @@ def compute_thin_wall_analysis(
     other they form a thin wall. This avoids the edge-length proxy which fires
     heavily on fine CAD tessellations regardless of actual wall thickness.
 
-    Only connected clusters of ≥ 4 such faces are reported.
+    Opposite face pairs are linked into the same cluster, so a simple thin
+    plate with two triangles per side is not discarded as two tiny clusters.
+    If ``min_region_span_mm`` is provided, compact local-detail clusters are
+    rejected and left for small-feature analysis.
 
     Returns:
         (thin_wall_count, centroids, face_indices)
@@ -61,20 +65,55 @@ def compute_thin_wall_analysis(
         face_centroids = mesh.triangles_center  # (N, 3)
         vertices = mesh.vertices
 
+        def global_thin_plate_fallback() -> tuple[int, list[list[float]], list[int]]:
+            """Catch broad thin plates whose opposing triangle centroids are offset."""
+            if min_region_span_mm is None:
+                return 0, [], []
+
+            extents = np.asarray(mesh.extents, dtype=float)
+            if extents.size != 3 or not np.all(np.isfinite(extents)):
+                return 0, [], []
+
+            thin_axis = int(np.argmin(extents))
+            sorted_extents = np.sort(extents)
+            if (
+                float(extents[thin_axis]) <= 0.0
+                or float(extents[thin_axis]) >= threshold_mm
+                or float(sorted_extents[-2]) < min_region_span_mm
+            ):
+                return 0, [], []
+
+            axis_face_indices = [
+                int(idx)
+                for idx, normal in enumerate(face_normals)
+                if abs(float(normal[thin_axis])) > 0.7
+            ]
+            if len(axis_face_indices) < 2:
+                return 0, [], []
+
+            centroid = np.asarray(vertices).mean(axis=0)
+            return (
+                1,
+                [[float(centroid[0]), float(centroid[1]), float(centroid[2])]],
+                axis_face_indices[:10000],
+            )
+
         tree = KDTree(face_centroids)
         # query_pairs returns all pairs (i, j) with i<j whose centroids are
         # within threshold_mm of each other.
         pairs = tree.query_pairs(r=threshold_mm)
 
         thin_face_set: set[int] = set()
+        opposite_links: list[tuple[int, int]] = []
         for i, j in pairs:
             dot = float(np.dot(face_normals[i], face_normals[j]))
             if dot < -0.7:  # roughly anti-parallel → opposite sides of a wall
                 thin_face_set.add(i)
                 thin_face_set.add(j)
+                opposite_links.append((int(i), int(j)))
 
         if not thin_face_set:
-            return 0, [], []
+            return global_thin_plate_fallback()
 
         # Build face adjacency for connected-component clustering
         edge_to_faces: dict[tuple[int, int], list[int]] = {}
@@ -87,12 +126,17 @@ def compute_thin_wall_analysis(
                 )
                 edge_to_faces.setdefault(key, []).append(fidx)
 
-        face_adj: dict[int, list[int]] = {f: [] for f in thin_face_set}
+        face_adj: dict[int, set[int]] = {f: set() for f in thin_face_set}
         for neighbors in edge_to_faces.values():
             for a in neighbors:
                 for b in neighbors:
                     if a != b and b in face_adj:
-                        face_adj[a].append(b)
+                        face_adj[a].add(b)
+
+        for a, b in opposite_links:
+            if a in face_adj and b in face_adj:
+                face_adj[a].add(b)
+                face_adj[b].add(a)
 
         visited: set[int] = set()
         for start in thin_face_set:
@@ -115,6 +159,12 @@ def compute_thin_wall_analysis(
             cluster_verts = np.array(
                 [vertices[v] for f in cluster for v in mesh.faces[f]]
             )
+            if min_region_span_mm is not None:
+                extents = cluster_verts.max(axis=0) - cluster_verts.min(axis=0)
+                sorted_extents = np.sort(extents)
+                if float(sorted_extents[-2]) < min_region_span_mm:
+                    continue
+
             centroid = cluster_verts.mean(axis=0)
             thin_wall_centroids.append(
                 [float(centroid[0]), float(centroid[1]), float(centroid[2])]
@@ -124,6 +174,10 @@ def compute_thin_wall_analysis(
 
     except Exception as exc:
         logger.warning("thin wall analysis failed: %s", exc)
+
+    if thin_wall_count == 0:
+        with contextlib.suppress(Exception):
+            return global_thin_plate_fallback()
 
     return thin_wall_count, thin_wall_centroids[:500], face_indices[:10000]
 
@@ -204,6 +258,7 @@ def compute_unsupported_wall_analysis(
 def compute_overhang_analysis(
     mesh: trimesh.Trimesh,
     threshold_deg: float,
+    min_region_span_mm: float | None = None,
 ) -> tuple[int, float, list[list[float]], list[int]]:
     """Detect overhang regions that exceed the threshold angle.
 
@@ -305,6 +360,7 @@ def compute_overhang_analysis(
         total_clusters = 0
         clusters_filtered_by_build_plate = 0
         clusters_filtered_by_area = 0
+        clusters_filtered_by_span = 0
 
         for start in overhang_set:
             if start in visited:
@@ -329,13 +385,23 @@ def compute_overhang_analysis(
             trimmed_cluster = [
                 f
                 for f in cluster
-                if float(all_centroids[f][2]) >= global_min_z + build_plate_band
+                if float(all_centroids[f][2]) > global_min_z + build_plate_band + 1e-6
             ]
 
             if not trimmed_cluster:
                 # All faces in this cluster are in the build-plate band
                 clusters_filtered_by_build_plate += 1
                 continue
+
+            cluster_verts = np.array(
+                [mesh.vertices[v] for f in trimmed_cluster for v in mesh.faces[f]]
+            )
+            if min_region_span_mm is not None:
+                extents = cluster_verts.max(axis=0) - cluster_verts.min(axis=0)
+                horizontal_span = max(float(extents[0]), float(extents[1]))
+                if horizontal_span <= min_region_span_mm:
+                    clusters_filtered_by_span += 1
+                    continue
 
             # Ignore small stray patches that don't represent significant
             # overhang regions requiring support.  Filter by area (mm²) so
@@ -361,9 +427,10 @@ def compute_overhang_analysis(
             overhang_region_count += 1
 
         logger.info(
-            "overhang clustering: %d total cluster(s), %d filtered by build-plate band, %d filtered by area (< 4mm²), %d final region(s), %.2f cm²",  # noqa: E501
+            "overhang clustering: %d total cluster(s), %d filtered by build-plate band, %d filtered by bridgeable span, %d filtered by area (< 4mm²), %d final region(s), %.2f cm²",  # noqa: E501
             total_clusters,
             clusters_filtered_by_build_plate,
+            clusters_filtered_by_span,
             clusters_filtered_by_area,
             overhang_region_count,
             overhang_area_cm2,
@@ -542,7 +609,7 @@ def detect_bridges(
         # Bottom caps on parts placed on the floor have no mesh below them, but
         # they are not bridges because the printer bed supports them.
         downward_mask = (face_normals[:, 2] < -0.5) & (
-            face_centroids_arr[:, 2] >= build_plate_cutoff
+            face_centroids_arr[:, 2] > build_plate_cutoff + 1e-6
         )
 
         if not np.any(downward_mask):
@@ -615,6 +682,14 @@ def detect_bridges(
                 for nxt in face_adj.get(cur, []):
                     if nxt not in visited:
                         queue.append(nxt)
+
+            cluster_verts = np.array(
+                [mesh.vertices[v] for f in cluster for v in mesh.faces[f]]
+            )
+            extents = cluster_verts.max(axis=0) - cluster_verts.min(axis=0)
+            horizontal_span = max(float(extents[0]), float(extents[1]))
+            if horizontal_span <= max_span_mm:
+                continue
 
             cluster_centroids = np.array([face_centroids_arr[f] for f in cluster])
             centroid = cluster_centroids.mean(axis=0)

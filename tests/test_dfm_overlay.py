@@ -665,6 +665,118 @@ def test_printing_summary_thin_wall_does_not_require_support():
     assert summary["supportRequired"] is False
 
 
+def test_structural_thin_plate_reports_thin_wall():
+    """A real broad 0.4 mm wall must still be reported as a thin wall."""
+    from src.core.geometry import _analyze_single_process
+
+    wall = trimesh.creation.box(extents=[20.0, 0.4, 12.0])
+    wall.apply_translation([0.0, 0.0, 6.0])
+
+    result = _analyze_single_process(wall.export(file_type="stl"), "FDM")
+
+    assert result["thinWallCount"] >= 1
+    assert any(
+        issue.get("category") == "thin_wall" for issue in result.get("issues", [])
+    )
+
+
+def test_emboss_deboss_fixture_does_not_report_structural_support_warnings():
+    """Fine emboss/deboss details must not be reported as structural warnings."""
+    from pathlib import Path
+
+    from src.core.geometry import _analyze_single_process
+
+    fixture = Path(__file__).parent / "assets" / "emboss-deboss-1mm-binary.stl"
+    result = _analyze_single_process(fixture.read_bytes(), "FDM")
+    categories = [issue.get("category") for issue in result.get("issues", [])]
+    small_feature_issues = [
+        issue
+        for issue in result.get("issues", [])
+        if issue.get("category") == "small_feature"
+    ]
+
+    assert "thin_wall" not in categories
+    assert "overhang" not in categories
+    assert "bridge" not in categories
+    assert result["supportRequired"] is False
+    assert len(small_feature_issues) == 1
+    assert result["smallDetailCount"] == small_feature_issues[0]["value"]
+
+
+def test_printing_process_passes_occ_face_mapping_to_small_feature_detection(
+    monkeypatch,
+):
+    """STEP small-feature overlays should use topology face tags."""
+    from types import SimpleNamespace
+
+    from src.core import geometry
+    from src.core.dfm_thresholds import PRINTING_RULES
+
+    captured: dict[str, object] = {}
+
+    def fake_detect_small_features_occ(
+        _occ_features,
+        _min_size_mm,
+        mesh=None,
+        face_tag_to_tri=None,
+        _max_overlay_faces=500,
+    ):
+        _ = mesh
+        captured["face_tag_to_tri"] = face_tag_to_tri
+        return 1, [[0.0, 0.0, 0.0]], list((face_tag_to_tri or {}).get(42, []))
+
+    monkeypatch.setattr(
+        "src.core.mesh_analyzers.detect_small_features_occ",
+        fake_detect_small_features_occ,
+    )
+    monkeypatch.setattr(
+        "src.core.mesh_analyzers.compute_thin_wall_analysis",
+        lambda *_args, **_kwargs: (0, [], []),
+    )
+    monkeypatch.setattr(
+        "src.core.mesh_analyzers.compute_unsupported_wall_analysis",
+        lambda *_args, **_kwargs: (0, [], []),
+    )
+    monkeypatch.setattr(
+        "src.core.mesh_analyzers.compute_overhang_analysis",
+        lambda *_args, **_kwargs: (0, 0.0, [], []),
+    )
+    monkeypatch.setattr(
+        "src.core.mesh_analyzers.detect_bridges",
+        lambda *_args, **_kwargs: (0, [], []),
+    )
+    monkeypatch.setattr(
+        "src.core.mesh_analyzers.detect_embossed_engraved",
+        lambda *_args, **_kwargs: (0, [], []),
+    )
+    monkeypatch.setattr(
+        "src.core.mesh_analyzers.detect_thin_pins",
+        lambda *_args, **_kwargs: (0, [], []),
+    )
+
+    issues = geometry._analyze_printing_process(
+        mesh=trimesh.creation.box(extents=[10.0, 10.0, 10.0]),
+        rules=PRINTING_RULES["FDM"],
+        process_code="FDM",
+        occ_features=[
+            SimpleNamespace(
+                feature_type="planar_face",
+                parameters={},
+                face_tag=42,
+                centroid=[0.0, 0.0, 0.0],
+                area_mm2=0.25,
+                bbox_min_mm=0.5,
+            )
+        ],
+        all_holes=[],
+        support_mm3=0.0,
+        occ_face_tag_to_tri={42: [7, 8, 9]},
+    )
+
+    assert captured["face_tag_to_tri"] == {42: [7, 8, 9]}
+    assert issues[0]["faceIndices"] == [7, 8, 9]
+
+
 class TestDetectSmallFeaturesFallbackImproved:
     """The triangle-edge fallback must not flag smooth curved surfaces."""
 

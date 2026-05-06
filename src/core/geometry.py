@@ -2621,7 +2621,13 @@ def _analyze_single_process(
             rules = PRINTING_RULES[process_code]
             issues.extend(
                 _analyze_printing_process(
-                    mesh, rules, process_code, occ_features, all_holes, support_mm3
+                    mesh,
+                    rules,
+                    process_code,
+                    occ_features,
+                    occ_face_tag_to_tri,
+                    all_holes,
+                    support_mm3,
                 )
             )
 
@@ -2799,6 +2805,7 @@ def _analyze_printing_process(
     rules: Any,
     process_code: str,
     occ_features: list[Any],
+    occ_face_tag_to_tri: dict[int, list[int]] | None,
     all_holes: list[Any],
     support_mm3: float,  # noqa: ARG001
     bodies: list[Any] | None = None,
@@ -2810,6 +2817,7 @@ def _analyze_printing_process(
         rules: Process-specific DFM rules from PRINTING_RULES
         process_code: Process code (e.g., "FDM", "SLA")
         occ_features: Optional OCC B-Rep features for precision analysis
+        occ_face_tag_to_tri: Optional OCC face tag to STL triangle mapping.
         all_holes: Pre-computed hole detections at 0.1 mm threshold.
         support_mm3: Pre-computed support volume estimate
         bodies: Optional pre-split body list to avoid repeated mesh.split() calls.
@@ -2853,7 +2861,9 @@ def _analyze_printing_process(
     # Thin wall (supported)
     try:
         tw_count, tw_centroids, tw_face_idx = compute_thin_wall_analysis(
-            mesh, rules.supported_wall_mm
+            mesh,
+            rules.supported_wall_mm,
+            min_region_span_mm=rules.min_feature_mm,
         )
     except Exception as _e:
         logger.warning("Thin wall detection failed: %s", _e)
@@ -2918,6 +2928,7 @@ def _analyze_printing_process(
             ) = compute_overhang_analysis(
                 mesh,
                 rules.max_overhang_deg,
+                min_region_span_mm=rules.bridge_span_mm,
             )
         except Exception as _e:
             logger.warning("Overhang detection failed: %s", _e)
@@ -3005,7 +3016,10 @@ def _analyze_printing_process(
     try:
         if occ_features:
             sf_count, sf_centroids, sf_face_idx = detect_small_features_occ(
-                occ_features, rules.min_feature_mm, mesh
+                occ_features,
+                rules.min_feature_mm,
+                mesh,
+                face_tag_to_tri=occ_face_tag_to_tri,
             )
         else:
             sf_count, sf_centroids, sf_face_idx = detect_small_features(
@@ -3014,23 +3028,70 @@ def _analyze_printing_process(
     except Exception as _e:
         logger.warning("Small features detection failed: %s", _e)
         sf_count, sf_centroids, sf_face_idx = 0, [], []
-    if sf_count > 0:
-        issues.append(
-            {
-                "category": "small_feature",
-                "severity": "warning",
-                "title": f"Small Features ({sf_count})",
-                "description": (
-                    f"{sf_count} feature(s) smaller than the {process_code} minimum"
-                    f" of {rules.min_feature_mm}mm."
-                ),
-                "value": float(sf_count),
-                "threshold": float(rules.min_feature_mm),
-                "faceIndices": sf_face_idx,
-                "centroid": sf_centroids[0] if sf_centroids else [0.0, 0.0, 0.0],
-                "metadata": {},
-            }
+
+    # Embossed / engraved features
+    try:
+        emb_count, emb_centroids, emb_face_idx = detect_embossed_engraved(
+            mesh, rules.embossed_width_mm, rules.embossed_height_mm
         )
+    except Exception as _e:
+        logger.warning("Embossed/engraved detection failed: %s", _e)
+        emb_count, emb_centroids, emb_face_idx = 0, [], []
+
+    small_issue: dict[str, Any] | None = None
+    if sf_count > 0 and occ_features:
+        small_issue = {
+            "category": "small_feature",
+            "severity": "warning",
+            "title": f"Small Features ({sf_count})",
+            "description": (
+                f"{sf_count} feature(s) smaller than the {process_code} minimum"
+                f" of {rules.min_feature_mm}mm."
+            ),
+            "value": float(sf_count),
+            "threshold": float(rules.min_feature_mm),
+            "faceIndices": sf_face_idx,
+            "centroid": sf_centroids[0] if sf_centroids else [0.0, 0.0, 0.0],
+            "metadata": {"source": "occ"},
+        }
+    elif emb_count > 0:
+        small_issue = {
+            "category": "small_feature",
+            "severity": "warning",
+            "title": f"Small Embossed/Engraved Details ({emb_count})",
+            "description": (
+                f"{emb_count} raised/recessed detail(s) below minimum size"
+                f" (w≥{rules.embossed_width_mm}mm, h≥{rules.embossed_height_mm}mm)"
+                f" for {process_code}."
+            ),
+            "value": float(emb_count),
+            "threshold": float(rules.embossed_width_mm),
+            "faceIndices": emb_face_idx,
+            "centroid": emb_centroids[0] if emb_centroids else [0.0, 0.0, 0.0],
+            "metadata": {
+                "source": "embossed_engraved",
+                "minWidthMm": rules.embossed_width_mm,
+                "minHeightMm": rules.embossed_height_mm,
+            },
+        }
+    elif sf_count > 0:
+        small_issue = {
+            "category": "small_feature",
+            "severity": "warning",
+            "title": f"Small Features ({sf_count})",
+            "description": (
+                f"{sf_count} feature(s) smaller than the {process_code} minimum"
+                f" of {rules.min_feature_mm}mm."
+            ),
+            "value": float(sf_count),
+            "threshold": float(rules.min_feature_mm),
+            "faceIndices": sf_face_idx,
+            "centroid": sf_centroids[0] if sf_centroids else [0.0, 0.0, 0.0],
+            "metadata": {"source": "mesh"},
+        }
+
+    if small_issue is not None:
+        issues.append(small_issue)
 
     # Thin pins / columns — pass all_holes so detect_thin_pins skips its own
     # detect_holes_mesh call (T2e: holes already computed at 0.1 mm threshold).
@@ -3118,36 +3179,6 @@ def _analyze_printing_process(
                     "metadata": {},
                 }
             )
-
-    # Embossed / engraved features
-    try:
-        emb_count, emb_centroids, emb_face_idx = detect_embossed_engraved(
-            mesh, rules.embossed_width_mm, rules.embossed_height_mm
-        )
-    except Exception as _e:
-        logger.warning("Embossed/engraved detection failed: %s", _e)
-        emb_count, emb_centroids, emb_face_idx = 0, [], []
-    if emb_count > 0:
-        issues.append(
-            {
-                "category": "small_feature",
-                "severity": "warning",
-                "title": f"Small Embossed/Engraved Details ({emb_count})",
-                "description": (
-                    f"{emb_count} raised/recessed detail(s) below minimum size"
-                    f" (w≥{rules.embossed_width_mm}mm, h≥{rules.embossed_height_mm}mm)"
-                    f" for {process_code}."
-                ),
-                "value": float(emb_count),
-                "threshold": float(rules.embossed_width_mm),
-                "faceIndices": emb_face_idx,
-                "centroid": emb_centroids[0] if emb_centroids else [0.0, 0.0, 0.0],
-                "metadata": {
-                    "minWidthMm": rules.embossed_width_mm,
-                    "minHeightMm": rules.embossed_height_mm,
-                },
-            }
-        )
 
     return issues
 

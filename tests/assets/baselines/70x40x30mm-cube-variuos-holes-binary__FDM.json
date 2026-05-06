@@ -1,64 +1,38 @@
 {
-  "analysis_time_seconds": 0.0486,
+  "analysis_time_seconds": 0.121,
   "estimatedSupportVolumeCm3": null,
   "issues": [
     {
       "category": "thin_wall",
       "centroid": [
-        0.0674,
+        -0.249,
         -0.0,
         0.0
       ],
-      "description": "2 wall region(s) below the FDM minimum of 0.8mm.",
+      "description": "1 wall region(s) below the FDM minimum of 0.8mm.",
       "faceIndices": [
         1056,
-        1057,
-        1109,
-        1110,
-        1111,
         1055,
-        1054,
-        1108,
-        294,
+        1111,
+        1110,
+        1109,
+        349,
         295,
+        294,
+        1057,
         296,
+        1054,
         297,
         347,
         348,
-        349,
+        1108,
         346
       ],
       "metadata": {},
       "severity": "warning",
       "threshold": 0.8,
-      "title": "Thin Walls (2 regions)",
-      "value": 2.0
-    },
-    {
-      "category": "small_feature",
-      "centroid": [
-        -10.3152,
-        -0.0,
-        -15.0
-      ],
-      "description": "2 feature(s) smaller than the FDM minimum of 2.0mm.",
-      "faceIndices": [
-        191,
-        192,
-        193,
-        194,
-        195,
-        1484,
-        1485,
-        1486,
-        1487,
-        1488
-      ],
-      "metadata": {},
-      "severity": "warning",
-      "threshold": 2.0,
-      "title": "Small Features (2)",
-      "value": 2.0
+      "title": "Thin Walls (1 regions)",
+      "value": 1.0
     },
     {
       "category": "small_feature",
@@ -89,7 +63,8 @@
       ],
       "metadata": {
         "minHeightMm": 2.0,
-        "minWidthMm": 0.6
+        "minWidthMm": 0.6,
+        "source": "embossed_engraved"
       },
       "severity": "warning",
       "threshold": 0.6,
@@ -101,14 +76,14 @@
   "overhangFaceCount": 0,
   "overhangRegions": [],
   "reportType": "FDM",
-  "smallDetailCount": 5.0,
+  "smallDetailCount": 3.0,
   "supportRequired": false,
-  "thinWallCount": 2.0,
+  "thinWallCount": 1.0,
   "thinWallRegions": [
     [
-      -1.0047518372857667e-14,
-      0.0,
-      0.06738782674075616
+      -0.24899653717874762,
+      -9.8597143689646e-15,
+      0.0
     ]
   ]
 }

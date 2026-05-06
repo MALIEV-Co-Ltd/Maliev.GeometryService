@@ -119,6 +119,25 @@ class TestBridgeDetection:
         assert len(centroids) == 1
         assert len(face_indices) > 0
 
+    def test_elevated_unsupported_plate_reports_support_overhang(self):
+        """A wide elevated underside should still require FDM support."""
+        base = trimesh.creation.box(extents=[8.0, 8.0, 2.0])
+        base.apply_translation([0.0, 0.0, 1.0])
+        plate = trimesh.creation.box(extents=[40.0, 12.0, 2.0])
+        plate.apply_translation([0.0, 0.0, 16.0])
+        mesh = trimesh.util.concatenate([base, plate])
+
+        result = _analyze_single_process(mesh.export(file_type="stl"), "FDM")
+        overhang_issues = [
+            issue
+            for issue in result.get("issues", [])
+            if issue.get("category") == "overhang"
+        ]
+
+        assert result["supportRequired"] is True
+        assert result["overhangFaceCount"] >= 1
+        assert len(overhang_issues) == 1
+
 
 class TestOverhangAngle:
     """Test overhang angle detection."""
