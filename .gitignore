@@ -35,6 +35,9 @@ __pypackages__/
 *.swp
 *.swo
 *.user
+*.csproj.user
+*.rsuser
+*.DotSettings.user
 *.suo
 
 # Environment & Secrets
