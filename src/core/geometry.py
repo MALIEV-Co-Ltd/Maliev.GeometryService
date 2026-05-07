@@ -4362,23 +4362,9 @@ def _render_preview_from_glb_worker(glb_bytes: bytes) -> dict[str, bytes | None]
             if len(scene_data.geometry) == 0:
                 logger.warning("Empty scene - no geometries found")
                 return empty_result
-            # For multi-body files, use the largest mesh for preview generation
-            # This preserves original zoom level and colors for single-body files
-            geometries = list(scene_data.geometry.values())
-            if len(geometries) == 1:
-                mesh = geometries[0]
-            else:
-                # Use the largest mesh by vertex count for preview
-                # This gives a good representation without changing bounds/zoom
-                mesh = max(
-                    geometries,
-                    key=lambda g: len(g.vertices)
-                    if isinstance(g, trimesh.Trimesh)
-                    else 0,
-                )
-                logger.info(
-                    f"Using largest mesh for preview ({len(geometries)} total bodies)"
-                )
+            # Preview thumbnails must show the same complete assembly as the
+            # viewer GLB. Flatten the scene while applying node transforms.
+            mesh = scene_data.to_geometry()
         else:
             mesh = scene_data
 

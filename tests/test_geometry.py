@@ -84,6 +84,46 @@ def test_export_glb_from_paths_uses_cached_scene_without_reparse(
     assert result[:4] == b"glTF"
 
 
+def test_preview_thumbnail_worker_uses_full_multibody_scene(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Preview thumbnails for assemblies must render the full GLB scene."""
+    from src.core import geometry
+
+    cube1 = trimesh.creation.box(extents=[5.0, 5.0, 5.0])
+    cube2 = trimesh.creation.box(extents=[5.0, 5.0, 5.0])
+    cube2.apply_translation([20.0, 0.0, 0.0])
+    scene = trimesh.Scene()
+    scene.add_geometry(cube1, geom_name="cube_1", node_name="cube_1")
+    scene.add_geometry(cube2, geom_name="cube_2", node_name="cube_2")
+    glb_bytes = cast(bytes, scene.export(file_type="glb"))
+
+    captured_extents: list[np.ndarray] = []
+
+    def capture_preview_mesh(mesh: trimesh.Trimesh) -> dict[str, bytes | None]:
+        captured_extents.append(np.asarray(mesh.extents, dtype=float))
+        return {
+            "front_small": None,
+            "back_small": None,
+            "left_small": None,
+            "right_small": None,
+            "top_small": None,
+            "bottom_small": None,
+            "thumbnail_small": b"thumb",
+            "thumbnail_large": None,
+        }
+
+    monkeypatch.setattr(
+        geometry, "_generate_preview_images_parallel", capture_preview_mesh
+    )
+
+    result = geometry._render_preview_from_glb_worker(glb_bytes)
+
+    assert result["thumbnail_small"] == b"thumb"
+    assert captured_extents
+    assert captured_extents[0][0] == pytest.approx(25.0)
+
+
 # Test geometries for preview images
 TEST_GEOMETRIES = [
     "50x50x50mm-solid-cube-binary.stl",
