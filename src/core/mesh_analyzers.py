@@ -1226,9 +1226,10 @@ def detect_embossed_engraved(
     """Detect raised or recessed surface details below dimensional thresholds.
 
     Strategy:
-    - Identify upward-facing faces.
-    - Compute a local reference surface (percentile-based, robust to outliers).
-    - Flag faces significantly above/below reference (potential emboss/deboss).
+    - Identify top-facing faces only.
+    - Compute the dominant top surface by area-weighted Z level.
+    - Flag nearby raised/recessed top faces whose height is below the
+      process detail-height threshold.
     - Apply dihedral-angle guard to skip smooth-surface tessellation.
     - Cluster adjacent flagged faces via BFS.
     - Validate cluster size (bounding-box diagonal ≤ 10× emboss height).
@@ -1251,8 +1252,10 @@ def detect_embossed_engraved(
         face_normals = mesh.face_normals
         vertices = mesh.vertices
 
-        # Identify upward-facing faces (normal Z > 0.7 ≈ faces within ~45° of vertical)
-        up_mask = np.abs(face_normals[:, 2]) > 0.7
+        # Only inspect top-facing faces. Bottom faces are not visible/details on
+        # the printed top surface and previously caused structural undersides to
+        # be reported as small embossed/engraved regions.
+        up_mask = face_normals[:, 2] > 0.7
 
         if not np.any(up_mask) or np.sum(up_mask) < 20:
             return 0, [], []  # Too few upward-facing faces to fit a reference
@@ -1260,18 +1263,35 @@ def detect_embossed_engraved(
         up_centroids = face_centroids_arr[up_mask]
         up_indices = np.where(up_mask)[0]
 
-        # Compute a robust local reference surface using percentiles.
-        # Percentile-based reference is resilient to large height variations
-        # (e.g. a turbine disc with a rim — the global mean would be skewed).
-        # Use median (50th percentile) as reference, IQR (75th-25th) for spread.
-        ref_z = float(np.percentile(up_centroids[:, 2], 50))
-        iqr_z = float(
-            np.percentile(up_centroids[:, 2], 75)
-            - np.percentile(up_centroids[:, 2], 25)
-        )
+        # Compute an area-weighted dominant top plane instead of a raw median.
+        # Complex bracket/ring parts can have many horizontal structural levels;
+        # the broadest level is the only useful reference for small decorative
+        # details on STL meshes.
+        z_tolerance = max(min_height_mm * 0.05, 0.05)
+        z_bins: dict[int, tuple[float, float]] = {}
+        for fidx, z in zip(up_indices, up_centroids[:, 2], strict=False):
+            area = (
+                float(mesh.area_faces[int(fidx)])
+                if fidx < len(mesh.area_faces)
+                else 0.0
+            )
+            key = int(round(float(z) / z_tolerance))
+            total_z, total_area = z_bins.get(key, (0.0, 0.0))
+            z_bins[key] = (total_z + float(z) * area, total_area + area)
 
-        if iqr_z < min_height_mm * 0.5:
-            return 0, [], []  # Insufficient height variation for emboss features
+        if not z_bins:
+            return 0, [], []
+
+        _, (weighted_z, reference_area) = max(
+            z_bins.items(), key=lambda item: item[1][1]
+        )
+        if reference_area <= 0:
+            return 0, [], []
+        ref_z = weighted_z / reference_area
+
+        z_delta = np.abs(up_centroids[:, 2] - ref_z)
+        if float(np.max(z_delta)) < min_height_mm * 0.15:
+            return 0, [], []  # Insufficient height variation for detail features
 
         # Pre-compute per-face dihedral angles to neighbors (copied from detect_small_features).  # noqa: E501
         # A face on a smooth curved surface has low dihedral angles → tessellation artifact.  # noqa: E501
@@ -1289,13 +1309,11 @@ def detect_embossed_engraved(
             max_dihedral = None
             _SMOOTH_THRESHOLD = 0.09  # noqa: N806
 
-        # Flag faces significantly below the reference surface (engraved details only).
-        # For detecting pips on dice: only look for recessed features, ignore raised rims.  # noqa: E501
-        # Use 1.0× min_height as threshold.
-        THRESH = min_height_mm * 1.0  # noqa: N806
-        emboss_mask = (
-            ref_z - up_centroids[:, 2]
-        ) > THRESH  # Only below reference (engraved)
+        # A small embossed/engraved detail has a visible height/depth change, but
+        # that change is below the process minimum. Taller stepped surfaces are
+        # structural geometry, not a "small detail may be lost" warning.
+        min_detail_height = min_height_mm * 0.15
+        emboss_mask = (z_delta >= min_detail_height) & (z_delta < min_height_mm)
         emboss_up_indices = up_indices[emboss_mask]
 
         if len(emboss_up_indices) == 0:

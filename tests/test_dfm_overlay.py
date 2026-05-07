@@ -813,3 +813,33 @@ class TestDetectSmallFeaturesFallbackImproved:
         count, centroids, _ = detect_small_features(combined, min_size_mm=1.0)
         # The 0.4mm box faces should be detected.
         assert count >= 1, "Expected small 0.4mm box to be detected as a small feature"
+
+
+class TestDetectEmbossedEngravedFallback:
+    """The STL detail fallback must not classify structural tabs as details."""
+
+    def test_large_structural_tabs_are_not_small_details(self):
+        """Tall lugs on a bracket are manufacturable structure, not decoration."""
+        from src.core.mesh_analyzers import detect_embossed_engraved
+
+        base = trimesh.creation.box([80.0, 20.0, 2.0])
+        base.apply_translation([0.0, 0.0, 1.0])
+
+        parts = [base]
+        for x_pos in [-30.0, -20.0, 20.0, 30.0]:
+            for y_pos in [-8.0, 8.0]:
+                tab = trimesh.creation.box([2.5, 2.5, 4.0])
+                tab.apply_translation([x_pos, y_pos, 4.0])
+                parts.append(tab)
+
+        bracket = trimesh.util.concatenate(parts)
+
+        count, centroids, faces = detect_embossed_engraved(
+            bracket,
+            min_width_mm=0.6,
+            min_height_mm=2.0,
+        )
+
+        assert count == 0
+        assert centroids == []
+        assert faces == []
