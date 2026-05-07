@@ -161,16 +161,14 @@ _cache: _BoundedDfmCache = _BoundedDfmCache()
 def get_cache_key(stl_bytes: bytes, process_code: str) -> str:
     """Generate cache key from file hash and process code.
 
-    Args:
-        stl_bytes: STL file bytes
-        process_code: Manufacturing process code
-
-    Returns:
-        Cache key string
+    Uses SHA-256 over the full byte stream so two files that share their
+    first megabyte (common with CAD assemblies that begin with identical
+    boilerplate) cannot collide.  SHA-256 of multi-megabyte inputs is well
+    under 100 ms on modern hardware — the previous MD5-of-first-1MB cap was
+    a correctness hazard, not a real perf win.
     """
-    # Hash the file bytes (first 1MB for speed)
-    file_hash = hashlib.md5(stl_bytes[: 1024 * 1024]).hexdigest()
-    return f"{file_hash[:16]}:{process_code}"
+    file_hash = hashlib.sha256(stl_bytes).hexdigest()
+    return f"{file_hash[:32]}:{process_code}"
 
 
 def get_cached_result(stl_bytes: bytes, process_code: str) -> dict[str, Any] | None:

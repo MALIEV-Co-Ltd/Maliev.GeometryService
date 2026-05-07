@@ -78,10 +78,11 @@ def analyze_step_brep(
     try:
         import cadquery as cq
         from OCP.BRep import BRep_Tool
-        from OCP.BRepAdaptor import BRepAdaptor_Surface
+        from OCP.BRepAdaptor import BRepAdaptor_Curve, BRepAdaptor_Surface
         from OCP.BRepGProp import BRepGProp
         from OCP.BRepMesh import BRepMesh_IncrementalMesh
         from OCP.GeomAbs import (
+            GeomAbs_Circle,
             GeomAbs_Cone,
             GeomAbs_Cylinder,
             GeomAbs_Plane,
@@ -90,6 +91,7 @@ def analyze_step_brep(
         from OCP.gp import gp_Dir, gp_Pnt  # noqa: F401
         from OCP.GProp import GProp_GProps
         from OCP.TopAbs import (  # noqa: F401
+            TopAbs_EDGE,
             TopAbs_FACE,
             TopAbs_FORWARD,
             TopAbs_REVERSED,
@@ -216,19 +218,70 @@ def analyze_step_brep(
                 radius_mm = float(cylinder.Radius())
                 axis_dir = cylinder.Axis().Direction()
                 ax = [float(axis_dir.X()), float(axis_dir.Y()), float(axis_dir.Z())]
+                axis_pos = cylinder.Axis().Location()
+                axis_origin = [
+                    float(axis_pos.X()),
+                    float(axis_pos.Y()),
+                    float(axis_pos.Z()),
+                ]
 
                 # Hole: inward-facing cylinder (concave = reversed normal)
                 feat_type = "hole" if is_reversed else "fillet"
 
+                # True axial depth: traverse the face's bounding circular edges,
+                # project their centres onto the cylinder axis, and take the
+                # span.  Falls back to area/(2πr) approximation if no circular
+                # edges are found (e.g. partial cylinder bounded by other curves).
+                depth_mm: float | None = None
+                try:
+                    edge_exp = TopExp_Explorer(face, TopAbs_EDGE)
+                    projections: list[float] = []
+                    while edge_exp.More():
+                        edge = TopoDS.Edge_s(edge_exp.Current())
+                        edge_exp.Next()
+                        try:
+                            curve = BRepAdaptor_Curve(edge)
+                            if curve.GetType() != GeomAbs_Circle:
+                                continue
+                            circ = curve.Circle()
+                            cloc = circ.Location()
+                            offset_x = float(cloc.X()) - axis_origin[0]
+                            offset_y = float(cloc.Y()) - axis_origin[1]
+                            offset_z = float(cloc.Z()) - axis_origin[2]
+                            proj = (
+                                offset_x * ax[0]
+                                + offset_y * ax[1]
+                                + offset_z * ax[2]
+                            )
+                            projections.append(proj)
+                        except Exception:
+                            continue
+                    if len(projections) >= 2:
+                        depth_mm = abs(max(projections) - min(projections))
+                except Exception as _depth_err:
+                    logger.debug(
+                        "edge-based depth failed for face_tag=%d: %s",
+                        face_tag,
+                        _depth_err,
+                    )
+
+                if depth_mm is None and radius_mm > 0:
+                    depth_mm = area_mm2 / (2.0 * math.pi * radius_mm)
+
+                params: dict[str, Any] = {
+                    "radius_mm": radius_mm,
+                    "diameter_mm": radius_mm * 2.0,
+                    "axis": ax,
+                    "axis_origin": axis_origin,
+                    "concave": is_reversed,
+                }
+                if depth_mm is not None:
+                    params["depth_mm"] = float(depth_mm)
+
                 features.append(
                     OccFeature(
                         feature_type=feat_type,
-                        parameters={
-                            "radius_mm": radius_mm,
-                            "diameter_mm": radius_mm * 2.0,
-                            "axis": ax,
-                            "concave": is_reversed,
-                        },
+                        parameters=params,
                         face_tag=face_tag,
                         centroid=centroid,
                         normal=ax,
@@ -341,27 +394,46 @@ def _post_process_features(
     features: list[OccFeature],
     face_tag_to_tri: dict[int, list[int]],
 ) -> list[OccFeature]:
-    """Enrich raw surface features with depth, pocket geometry, etc."""
-    # Group cylinders by axis direction and centroid proximity to determine depth
-    cylinders = [
-        f
-        for f in features
-        if f.feature_type in ("hole", "fillet") and not f.parameters.get("is_torus")
-    ]
+    """Enrich raw surface features with thickness pairings, etc.
 
-    # For each hole (reversed cylinder), estimate depth from bounding z-range
-    # This is approximate — proper depth needs edge analysis
-    for feat in cylinders:
-        if feat.feature_type != "hole":
-            continue
-        tri_list = face_tag_to_tri.get(feat.face_tag, [])
-        if tri_list:
-            # depth ≈ area / (π × radius)
-            r = feat.parameters.get("radius_mm", 1.0)
-            area = feat.area_mm2
-            if r > 0:
-                depth_est = area / (2.0 * 3.14159 * r)
-                feat.parameters["depth_mm"] = float(depth_est)
+    Hole depth is now computed inline in the face loop using circular edges
+    projected onto the cylinder axis (exact for full cylinders, falls back to
+    area/(2πr) only when no circular edges are present).
+
+    This pass adds:
+      * planar wall-thickness — for each pair of planar faces with anti-parallel
+        outward normals (dot < -0.95), project their centroid difference onto
+        the normal to get the perpendicular gap; record the smallest such gap
+        per face in ``parameters['wall_thickness_mm']``.
+    """
+    _ = face_tag_to_tri  # kept for signature stability; unused here
+
+    planar = [f for f in features if f.feature_type == "planar_face"]
+    for feat in planar:
+        feat.parameters.setdefault("wall_thickness_mm", None)
+
+    # Compare every pair of planar faces; record the thinnest match.
+    n = len(planar)
+    for i in range(n):
+        a = planar[i]
+        an = a.parameters.get("normal", a.normal)
+        ac = a.centroid
+        for j in range(i + 1, n):
+            b = planar[j]
+            bn = b.parameters.get("normal", b.normal)
+            dot = an[0] * bn[0] + an[1] * bn[1] + an[2] * bn[2]
+            if dot >= -0.95:
+                continue
+            dx = b.centroid[0] - ac[0]
+            dy = b.centroid[1] - ac[1]
+            dz = b.centroid[2] - ac[2]
+            gap = abs(dx * an[0] + dy * an[1] + dz * an[2])
+            if gap <= 1e-3:
+                continue  # coincident planes, not a wall pair
+            for feat in (a, b):
+                cur = feat.parameters.get("wall_thickness_mm")
+                if cur is None or gap < cur:
+                    feat.parameters["wall_thickness_mm"] = float(gap)
 
     return features
 

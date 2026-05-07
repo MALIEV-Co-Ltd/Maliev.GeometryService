@@ -446,20 +446,35 @@ class TestTessellationSettings:
     """Tests that tessellation settings are correctly applied and reduce mesh complexity."""  # noqa: E501
 
     def test_cascadio_tessellation_settings(self):
-        """Verify cascadio STEP tessellation uses coarser tolerances for performance."""
-        # The actual cascadio call is in _cascadio_subprocess_load, which runs in
-        # an isolated process via _load_cad_with_cascadio_isolated.
+        """Verify cascadio default tolerances stay in the documented range.
+
+        Stage 3 made these adaptive (per-file size) via _adaptive_cascadio_tolerance,
+        but the *default* arguments to _cascadio_subprocess_load remain the
+        legacy 0.05 / 0.1 values for back-compat with direct callers.
+        """
         import inspect
 
         from src.core import geometry
 
-        source = inspect.getsource(geometry._cascadio_subprocess_load)
+        sig = inspect.signature(geometry._cascadio_subprocess_load)
         assert (
-            "tol_linear=0.05" in source
-        ), "cascadio tol_linear should be 0.05 (balanced quality)"
+            sig.parameters["tol_linear"].default == 0.05
+        ), "cascadio tol_linear default should be 0.05 (balanced quality)"
         assert (
-            "tol_angular=0.1" in source
-        ), "cascadio tol_angular should be 0.1 (~5.7° deflection)"
+            sig.parameters["tol_angular"].default == 0.1
+        ), "cascadio tol_angular default should be 0.1 (~5.7° deflection)"
+
+        # Adaptive helper picks one of the documented buckets.
+        for size_mb, expected in [
+            (0.5, 0.02),
+            (5.0, 0.05),
+            (25.0, 0.1),
+            (100.0, 0.2),
+        ]:
+            got = geometry._adaptive_cascadio_tolerance(int(size_mb * 1024 * 1024))
+            assert got == expected, (
+                f"adaptive tol for {size_mb} MB: got {got}, expected {expected}"
+            )
 
     def test_gmsh_tessellation_settings(self):
         """Verify gmsh fallback uses coarser mesh settings for performance."""

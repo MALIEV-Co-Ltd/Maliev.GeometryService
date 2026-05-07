@@ -1,32 +1,36 @@
 {
-  "analysis_time_seconds": 0.121,
+  "analysis_time_seconds": 0.1172,
   "estimatedSupportVolumeCm3": null,
   "issues": [
     {
       "category": "thin_wall",
       "centroid": [
-        -0.249,
+        -0.351,
         -0.0,
         0.0
       ],
       "description": "1 wall region(s) below the FDM minimum of 0.8mm.",
       "faceIndices": [
-        1056,
+        1054,
         1055,
         1111,
         1110,
         1109,
         349,
         295,
-        294,
-        1057,
         296,
-        1054,
         297,
         347,
         348,
         1108,
-        346
+        350,
+        346,
+        345,
+        298,
+        1056,
+        294,
+        293,
+        1057
       ],
       "metadata": {},
       "severity": "warning",
@@ -37,52 +41,43 @@
     {
       "category": "small_feature",
       "centroid": [
-        5.1682,
-        -5.8883,
+        -10.3152,
+        -0.0,
         -15.0
       ],
-      "description": "3 raised/recessed detail(s) below minimum size (w\u22650.6mm, h\u22652.0mm) for FDM.",
+      "description": "2 feature(s) smaller than the FDM minimum of 2.0mm.",
       "faceIndices": [
-        8,
-        9,
-        10,
-        11,
-        12,
-        80,
-        81,
-        82,
-        83,
-        84,
-        85,
-        203,
-        204,
-        205,
-        206,
-        207,
-        208
+        191,
+        192,
+        193,
+        194,
+        195,
+        1484,
+        1485,
+        1486,
+        1487,
+        1488
       ],
       "metadata": {
-        "minHeightMm": 2.0,
-        "minWidthMm": 0.6,
-        "source": "embossed_engraved"
+        "source": "mesh"
       },
       "severity": "warning",
-      "threshold": 0.6,
-      "title": "Small Embossed/Engraved Details (3)",
-      "value": 3.0
+      "threshold": 2.0,
+      "title": "Small Features (2)",
+      "value": 2.0
     }
   ],
   "overhangAreaCm2": 0.0,
   "overhangFaceCount": 0,
   "overhangRegions": [],
   "reportType": "FDM",
-  "smallDetailCount": 3.0,
+  "smallDetailCount": 2.0,
   "supportRequired": false,
   "thinWallCount": 1.0,
   "thinWallRegions": [
     [
-      -0.24899653717874762,
-      -9.8597143689646e-15,
+      -0.3509953270355803,
+      -7.941795369485286e-15,
       0.0
     ]
   ]

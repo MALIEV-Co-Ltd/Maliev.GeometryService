@@ -26,6 +26,22 @@ class Settings(BaseSettings):
     GEOMETRY_ARTIFACT_CONCURRENCY: int = 2
     GEOMETRY_RABBITMQ_PREFETCH: int | None = None
 
+    # Phase-2 concurrency cap. 2 vCPU / 4 GB targets set this to 1 so a
+    # second concurrent DFM request waits instead of doubling the working
+    # set. Higher values are allowed when more CPU/RAM is available.
+    GEOMETRY_DFM_SEMAPHORE: int = 2
+
+    # Algorithm feature flags. Cache keys include a digest of these so
+    # toggling a flag flushes affected results without manual eviction.
+    USE_BREP_THICKNESS: bool = True
+    USE_SDF_SMALL_FEATURES: bool = False
+
+    # GCS-based caches keyed by SHA-256 + tolerance bucket.  Empty string
+    # disables the cache (useful in tests).  TTLs are enforced by GCS
+    # object-lifecycle rules on the buckets, not by this service.
+    GEOMETRY_TESSELLATION_CACHE_BUCKET: str = ""
+    GEOMETRY_DFM_RESULT_CACHE_BUCKET: str = ""
+
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
 

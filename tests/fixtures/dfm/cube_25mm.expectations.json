@@ -1,0 +1,15 @@
+{
+  "description": "Clean 25 mm baseline cube. Zero issues expected for printing and milling. CNC turning correctly flags the cube as not turnable (no axis of revolution).",
+  "process_expectations": {
+    "FDM":      { "must_not_have": ["thin_wall", "overhang", "unsupported_wall", "small_features"] },
+    "SLA":      { "must_not_have": ["thin_wall", "overhang", "unsupported_wall", "small_features"] },
+    "SLS":      { "must_not_have": ["thin_wall", "overhang", "unsupported_wall", "small_features"] },
+    "MJF":      { "must_not_have": ["thin_wall", "overhang", "unsupported_wall", "small_features"] },
+    "CNC_MILL": { "must_not_have": ["thin_wall", "internal_radius", "deep_cavity", "tool_access", "sharp_corners", "chatter_risk"] },
+    "CNC_TURN": {
+      "must_have": {
+        "not_turnable": { "count_min": 1, "count_max": 1, "severity_min": "error" }
+      }
+    }
+  }
+}

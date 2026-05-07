@@ -1,0 +1,15 @@
+{
+  "description": "Plain 30 × 20 × 10 mm block with 0° draft on all side walls. Casting and injection moulding require positive draft (typically ≥ 1°). The casting/moulding analyzer is wired in via brep_dfm_rules.py and tested directly in test_brep_dfm_rules.py — the printing/CNC analyzers shouldn't fire on this clean block.",
+  "process_expectations": {
+    "FDM":      { "must_not_have": ["thin_wall", "overhang", "small_feature"] },
+    "SLA":      { "must_not_have": ["thin_wall", "overhang"] },
+    "SLS":      { "must_not_have": ["thin_wall"] },
+    "MJF":      { "must_not_have": ["thin_wall"] },
+    "CNC_MILL": { "must_not_have": ["thin_wall"] },
+    "CNC_TURN": {
+      "must_have": {
+        "not_turnable": { "count_min": 1, "count_max": 1, "severity_min": "error" }
+      }
+    }
+  }
+}

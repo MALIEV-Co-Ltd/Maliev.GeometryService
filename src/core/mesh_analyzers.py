@@ -99,18 +99,30 @@ def compute_thin_wall_analysis(
             )
 
         tree = KDTree(face_centroids)
-        # query_pairs returns all pairs (i, j) with i<j whose centroids are
-        # within threshold_mm of each other.
-        pairs = tree.query_pairs(r=threshold_mm)
+        # Centroid distance overstates true wall thickness for tilted walls: two
+        # parallel faces separated by `threshold_mm` perpendicular to the wall
+        # but tilted θ have centroids `threshold_mm / cos(θ)` apart.  Search at
+        # a widened radius (1.6× catches walls up to ~52° tilt) and verify the
+        # perpendicular gap explicitly per pair.
+        search_radius = threshold_mm * 1.6
+        pairs = tree.query_pairs(r=search_radius)
 
         thin_face_set: set[int] = set()
         opposite_links: list[tuple[int, int]] = []
         for i, j in pairs:
             dot = float(np.dot(face_normals[i], face_normals[j]))
-            if dot < -0.7:  # roughly anti-parallel → opposite sides of a wall
-                thin_face_set.add(i)
-                thin_face_set.add(j)
-                opposite_links.append((int(i), int(j)))
+            if dot >= -0.7:
+                continue  # not anti-parallel enough to be opposing wall faces
+            # Perpendicular gap = projection of centroid difference onto the
+            # outward normal of face i.  This is the actual wall thickness,
+            # not the Euclidean distance between centroids.
+            diff = face_centroids[j] - face_centroids[i]
+            gap = abs(float(np.dot(diff, face_normals[i])))
+            if gap >= threshold_mm:
+                continue  # true thickness exceeds threshold despite near centroids
+            thin_face_set.add(i)
+            thin_face_set.add(j)
+            opposite_links.append((int(i), int(j)))
 
         if not thin_face_set:
             return global_thin_plate_fallback()
@@ -930,6 +942,100 @@ def detect_small_features(
         logger.warning("small feature detection failed: %s", exc)
 
     return count, centroids[:100], face_indices[:500]
+
+
+def detect_small_features_sdf(
+    mesh: trimesh.Trimesh,
+    min_size_mm: float,
+    max_grid: int = 256,
+) -> tuple[int, list[list[float]], list[int]]:
+    """Find features whose maximum inscribed sphere radius is below threshold.
+
+    Voxelises the mesh, computes a Euclidean distance transform on the
+    interior, and flags connected interior regions whose local SDF stays
+    below ``min_size_mm / 2``.  This is the geometrically-correct definition
+    of "small feature" — independent of mesh tessellation density (the
+    edge-length proxy in :func:`detect_small_features` fires on fine
+    tessellation regardless of true feature size).
+
+    Gates: only runs on watertight, winding-consistent meshes.  Voxel pitch
+    is chosen so the grid stays under ``max_grid`` voxels per axis (256³ ≈
+    67 MB at float32).  Returns ``(0, [], [])`` if the mesh fails the gates,
+    or if scipy is unavailable.
+    """
+    import trimesh as _tm
+
+    if not isinstance(mesh, _tm.Trimesh):
+        return 0, [], []
+    if min_size_mm <= 0 or len(mesh.faces) < 4:
+        return 0, [], []
+    if not (mesh.is_watertight and mesh.is_winding_consistent):
+        return 0, [], []
+
+    try:
+        from scipy.ndimage import distance_transform_edt
+        from scipy.ndimage import label as ndlabel
+        from scipy.spatial import cKDTree
+    except ImportError:
+        return 0, [], []
+
+    extents = mesh.extents
+    if extents is None or np.any(extents <= 0):
+        return 0, [], []
+    bbox_diag = float(np.linalg.norm(extents))
+    pitch = max(min_size_mm / 3.0, bbox_diag / float(max_grid))
+
+    try:
+        vox = mesh.voxelized(pitch=pitch)
+    except Exception as exc:
+        logger.warning("SDF voxelisation failed: %s", exc)
+        return 0, [], []
+
+    matrix = np.asarray(vox.matrix)
+    if matrix.size == 0 or matrix.ndim != 3:
+        return 0, [], []
+    if matrix.size > max_grid**3 * 2:
+        # safety bail — should not hit thanks to pitch clamp but defensive
+        return 0, [], []
+
+    interior = matrix.astype(np.uint8)
+    sdf = distance_transform_edt(interior).astype(np.float32) * pitch
+    threshold = min_size_mm / 2.0
+    candidate = (interior > 0) & (sdf > 0) & (sdf < threshold)
+    if not candidate.any():
+        return 0, [], []
+
+    labels, n_labels = ndlabel(candidate)
+    if n_labels == 0:
+        return 0, [], []
+
+    region_centroids: list[list[float]] = []
+    bounds_min = np.asarray(vox.bounds[0], dtype=float)
+    for lbl in range(1, n_labels + 1):
+        coords = np.argwhere(labels == lbl)
+        if coords.size == 0:
+            continue
+        # Drop tiny regions: a single voxel below threshold is noise.
+        if coords.shape[0] < 2:
+            continue
+        c_vox = coords.mean(axis=0)
+        c_world = bounds_min + (c_vox + 0.5) * pitch
+        region_centroids.append(
+            [float(c_world[0]), float(c_world[1]), float(c_world[2])]
+        )
+
+    if not region_centroids:
+        return 0, [], []
+
+    # Map each region centroid to its nearest face for overlay generation.
+    try:
+        tree = cKDTree(mesh.triangles_center)
+        _, idx = tree.query(np.array(region_centroids), k=1)
+        face_indices: list[int] = [int(i) for i in np.atleast_1d(idx).tolist()]
+    except Exception:
+        face_indices = []
+
+    return len(region_centroids), region_centroids[:100], face_indices[:500]
 
 
 def detect_small_features_occ(

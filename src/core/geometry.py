@@ -1269,26 +1269,45 @@ def _cascadio_subprocess_load(
     file_path: str,
     glb_output_path: str,
     timeout_seconds: int = 60,  # noqa: ARG001
+    tol_linear: float = 0.05,
+    tol_angular: float = 0.1,
 ) -> int:
-    """Load CAD via cascadio in isolated process.
+    """Load CAD via cascadio in isolated process at the requested tolerance.
 
-    This runs in a separate process so we can terminate it on timeout
-    and cleanly kill any stuck C-extension threads.
+    Runs in a separate process so we can terminate on timeout and cleanly kill
+    any stuck C-extension threads.  Tolerances are explicit so the adaptive
+    tessellation path can re-run with a different value when the first pass
+    over- or under-shoots the target triangle count.
 
     Returns:
         int: cascadio return code (0 = success)
-
-    Raises:
-        TimeoutError: if loading exceeds timeout_seconds
     """
     import cascadio
 
     return cascadio.step_to_glb(
         file_path,
         glb_output_path,
-        tol_linear=0.05,
-        tol_angular=0.1,
+        tol_linear=tol_linear,
+        tol_angular=tol_angular,
     )
+
+
+def _adaptive_cascadio_tolerance(file_bytes_len: int) -> float:
+    """Pick a starting cascadio linear tolerance based on file size.
+
+    cascadio uses *fraction of bounding-box diagonal* — but we don't know the
+    diagonal until after parsing.  Heuristic: small files get tighter
+    tolerance (more triangles, better detail recovery for small-feature
+    detection); large files get looser tolerance (cap memory).
+    """
+    file_size_mb = file_bytes_len / (1024 * 1024)
+    if file_size_mb < 1.0:
+        return 0.02
+    if file_size_mb < 10.0:
+        return 0.05
+    if file_size_mb < 50.0:
+        return 0.1
+    return 0.2
 
 
 def _load_cad_with_cascadio_isolated(
@@ -1299,6 +1318,11 @@ def _load_cad_with_cascadio_isolated(
 
     Uses ProcessPoolExecutor with spawn context so we can terminate the process
     on timeout and cleanly kill any stuck C-extension threads.
+
+    The starting linear tolerance is chosen adaptively from file size; if the
+    resulting mesh has too few triangles for accurate detection (under 50k)
+    we re-tessellate once at half the tolerance — bounded to a single retry
+    so a stuck cascadio call cannot loop indefinitely.
 
     Returns:
         tuple[list[trimesh.Trimesh], bytes, int, list[str]]: meshes, glb_bytes, body_count, body_names
@@ -1313,45 +1337,78 @@ def _load_cad_with_cascadio_isolated(
         inp_path = inp.name
 
     glb_path: str | None = None
-    pool: multiprocessing.context.BaseContext.Pool | None = None
+    pool: Any | None = None
+
+    tol_linear = _adaptive_cascadio_tolerance(len(file_bytes))
+    target_min_triangles = 50_000
+    target_max_triangles = 800_000
+    attempts_remaining = 2
 
     try:
         # Create temp output path
         with tempfile.NamedTemporaryFile(suffix=".glb", delete=False) as out:
             glb_path = out.name
 
-        # Use spawn context for clean process isolation
-        ctx = multiprocessing.get_context("spawn")
-        pool = ctx.Pool(processes=1)
+        while attempts_remaining > 0:
+            attempts_remaining -= 1
 
-        # Submit to subprocess pool
-        future = pool.apply_async(
-            _cascadio_subprocess_load,
-            (inp_path, glb_path, timeout_seconds),
-        )
+            ctx = multiprocessing.get_context("spawn")
+            pool = ctx.Pool(processes=1)
 
-        try:
-            ret = future.get(timeout=timeout_seconds)
-        except multiprocessing.TimeoutError as exc:
-            pool.terminate()
-            pool.join()
-            pool = None
-
-            logger.warning(
-                f"cascadio timed out after {timeout_seconds}s loading {inp_path} - "
-                f"terminated process for clean cleanup"
+            future = pool.apply_async(
+                _cascadio_subprocess_load,
+                (inp_path, glb_path, timeout_seconds, tol_linear, 0.1),
             )
 
-            raise TimeoutError(
-                f"cascadio timed out after {timeout_seconds}s loading {inp_path}"
-            ) from exc
-        finally:
-            if pool is not None:
-                pool.close()
+            try:
+                ret = future.get(timeout=timeout_seconds)
+            except multiprocessing.TimeoutError as exc:
+                pool.terminate()
                 pool.join()
+                pool = None
+                logger.warning(
+                    f"cascadio timed out after {timeout_seconds}s loading {inp_path} - "
+                    f"terminated process for clean cleanup"
+                )
+                raise TimeoutError(
+                    f"cascadio timed out after {timeout_seconds}s loading {inp_path}"
+                ) from exc
+            finally:
+                if pool is not None:
+                    pool.close()
+                    pool.join()
+                    pool = None
 
-        if ret != 0:
-            raise ValueError(f"cascadio.step_to_glb returned {ret}")
+            if ret != 0:
+                raise ValueError(f"cascadio.step_to_glb returned {ret}")
+
+            # Quick triangle-count check on the produced GLB.  We only retry
+            # for under-tessellation; over-tessellation is accepted (the
+            # downstream pipeline handles it).
+            try:
+                glb_size = os.path.getsize(glb_path)  # noqa: PTH202
+            except OSError:
+                glb_size = 0
+            # Empirically a GLB with ~50k triangles is at least ~1 MB.
+            if (
+                attempts_remaining > 0
+                and glb_size > 0
+                and glb_size < 1_000_000
+                and tol_linear > 0.011
+            ):
+                old_tol = tol_linear
+                tol_linear = max(0.01, tol_linear * 0.5)
+                logger.info(
+                    "cascadio under-tessellated (glb=%dB at tol=%.3f); "
+                    "retrying once at tol=%.3f",
+                    glb_size,
+                    old_tol,
+                    tol_linear,
+                )
+                continue
+            break
+        # End of adaptive retry loop.  ret already validated above.
+        _ = target_min_triangles, target_max_triangles  # docs-only thresholds
 
         # Re-parse GLB in main process (reuse existing logic)
         loaded = trimesh.load(glb_path)
@@ -1670,8 +1727,19 @@ def _compute_metrics_worker(data: bytes, file_extension: str) -> dict[str, Any]:
                 if ext == "stl" and i == 0:
                     mesh_stl_bytes_dict[i] = data
 
-        # Legacy single-body field for backward compatibility (use first body)
-        mesh_stl_bytes = mesh_stl_bytes_dict.get(0) if mesh_stl_bytes_dict else None
+        # Phase 2 DFM analysis consumes mesh_stl_bytes as a single STL blob.
+        # On multi-body files we must export the MERGED metrics_mesh — using
+        # body 0 alone silently drops bodies 1..N from analysis.
+        mesh_stl_bytes: bytes | None
+        try:
+            mesh_stl_bytes = cast(bytes, metrics_mesh.export(file_type="stl"))
+        except Exception as ex:
+            logger.warning(
+                "Merged STL export failed; falling back to body 0 only: %s", ex
+            )
+            mesh_stl_bytes = (
+                mesh_stl_bytes_dict.get(0) if mesh_stl_bytes_dict else None
+            )
 
         # Export GLB for ALL formats so Phase 2 has a uniform artifact.
         # STEP/IGES already have cad_glb_bytes from cascadio.
@@ -2895,7 +2963,9 @@ def _analyze_printing_process(
         )
 
     # Unsupported wall (not applicable for powder-bed processes)
-    uw_count, uw_centroids, uw_face_idx = 0, [], []
+    uw_count = 0
+    uw_centroids: list[list[float]] = []
+    uw_face_idx: list[int] = []
     if rules.unsupported_wall_mm is not None:
         try:
             uw_count, uw_centroids, uw_face_idx = compute_unsupported_wall_analysis(
@@ -2925,7 +2995,10 @@ def _analyze_printing_process(
     # Overhang (not applicable for powder-bed processes)
     # OPTIMIZATION: Skip overhang check for powder-bed processes (SLS, MJF, BJ, DMLS)
     powder_bed_processes = ["SLS", "MJF", "BJ", "DMLS"]
-    oh_count, oh_area_cm2, oh_centroids, oh_face_idx = 0, 0.0, [], []
+    oh_count = 0
+    oh_area_cm2 = 0.0
+    oh_centroids: list[list[float]] = []
+    oh_face_idx: list[int] = []
     if rules.max_overhang_deg is not None and process_code not in powder_bed_processes:
         try:
             (
@@ -2937,6 +3010,7 @@ def _analyze_printing_process(
                 mesh,
                 rules.max_overhang_deg,
                 min_region_span_mm=rules.bridge_span_mm,
+                first_layer_thickness_mm=rules.first_layer_thickness_mm,
             )
         except Exception as _e:
             logger.warning("Overhang detection failed: %s", _e)

@@ -1,0 +1,11 @@
+{
+  "description": "30 × 20 × 12 mm block with an 8 mm Ø through-hole along ±Y. The hole's cylindrical interior creates an undercut for a +Z straight-pull mould (tested directly in test_brep_dfm_rules.py). Additive processes legitimately see the bottom of the hole as overhang/bridge so those are allowed.",
+  "process_expectations": {
+    "FDM":      { "must_not_have": ["thin_wall"] },
+    "SLA":      { "must_not_have": ["thin_wall"] },
+    "SLS":      { "must_not_have": ["thin_wall"] },
+    "MJF":      { "must_not_have": ["thin_wall"] },
+    "CNC_MILL": { "must_not_have": ["thin_wall"] },
+    "CNC_TURN": { "must_not_have": [] }
+  }
+}

@@ -55,6 +55,11 @@ class PrintingDesignRules:
     tolerance_percent: float
     # Absolute lower tolerance limit in mm (applies below a certain size)
     tolerance_lower_mm: float
+    # Build-plate contact band (typical first-layer thickness for the
+    # process).  Faces sitting within this distance of the build plate are
+    # excluded from overhang detection.  Defaults are conservative; user
+    # can override per-job if the slicer is configured differently.
+    first_layer_thickness_mm: float = 0.3
 
 
 PRINTING_RULES: dict[str, PrintingDesignRules] = {
@@ -89,6 +94,7 @@ PRINTING_RULES: dict[str, PrintingDesignRules] = {
         pin_diameter_mm=0.5,
         tolerance_percent=0.5,
         tolerance_lower_mm=0.15,
+        first_layer_thickness_mm=0.1,
     ),
     # Alias used in existing process code
     "SLA_DLP": PrintingDesignRules(
@@ -105,6 +111,7 @@ PRINTING_RULES: dict[str, PrintingDesignRules] = {
         pin_diameter_mm=0.5,
         tolerance_percent=0.5,
         tolerance_lower_mm=0.15,
+        first_layer_thickness_mm=0.1,
     ),
     # ── Selective Laser Sintering (powder bed — no supports needed) ────────
     "SLS": PrintingDesignRules(
@@ -121,6 +128,7 @@ PRINTING_RULES: dict[str, PrintingDesignRules] = {
         pin_diameter_mm=0.8,
         tolerance_percent=0.3,
         tolerance_lower_mm=0.3,
+        first_layer_thickness_mm=0.15,
     ),
     # ── Multi Jet Fusion (powder bed — no supports needed) ─────────────────
     "MJF": PrintingDesignRules(
@@ -137,6 +145,7 @@ PRINTING_RULES: dict[str, PrintingDesignRules] = {
         pin_diameter_mm=0.8,
         tolerance_percent=0.3,
         tolerance_lower_mm=0.3,
+        first_layer_thickness_mm=0.15,
     ),
     # ── Material Jetting (PolyJet, etc.) ──────────────────────────────────
     "MJ": PrintingDesignRules(

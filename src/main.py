@@ -44,6 +44,21 @@ logger = logging.getLogger(__name__)
 # Global consumer instance for cleanup
 consumer: UploadConsumer | None = None
 
+# Phase-2 concurrency guard.  Sized from settings.GEOMETRY_DFM_SEMAPHORE so
+# operators can dial down to 1 on 2 vCPU / 4 GB hosts (forces serial DFM
+# requests, capping the worst-case working set at one body's footprint).
+# Lazily created on first use because asyncio.Semaphore binds to the running
+# loop, which doesn't exist at module import time under uvicorn.
+_dfm_semaphore: asyncio.Semaphore | None = None
+
+
+def _get_dfm_semaphore() -> asyncio.Semaphore:
+    global _dfm_semaphore
+    if _dfm_semaphore is None:
+        size = max(1, int(settings.GEOMETRY_DFM_SEMAPHORE))
+        _dfm_semaphore = asyncio.Semaphore(size)
+    return _dfm_semaphore
+
 
 def _resolve_process_dfm_timeout_seconds(timeout: float | None) -> float:
     return (
@@ -723,20 +738,20 @@ async def analyze_for_process(
             )
             result = cached
         else:
-            # Run process-specific analysis with timeout
+            # Run process-specific analysis with timeout, gated by the
+            # Phase-2 semaphore so we don't double the working set when two
+            # requests land at once on a memory-constrained host.
             loop = asyncio.get_event_loop()
-
-            # Use run_in_executor to run in thread pool (prevents blocking)
-            # with timeout to prevent indefinite hangs
-            result = await asyncio.wait_for(
-                loop.run_in_executor(
-                    None,
-                    lambda: _analyze_single_process(
-                        stl_bytes, process_code, cad_bytes, cad_extension
+            async with _get_dfm_semaphore():
+                result = await asyncio.wait_for(
+                    loop.run_in_executor(
+                        None,
+                        lambda: _analyze_single_process(
+                            stl_bytes, process_code, cad_bytes, cad_extension
+                        ),
                     ),
-                ),
-                timeout=analysis_timeout_seconds,
-            )
+                    timeout=analysis_timeout_seconds,
+                )
 
             # Check if analysis failed
             if "error_type" in result:

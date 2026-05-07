@@ -1,0 +1,15 @@
+{
+  "description": "40 mm cube with an 8 mm × 8 mm pocket 32 mm deep (depth/width = 4.0). On a coarse cascadio mesh the cavity-depth detector currently misses this — fixture is kept as a regression target for the adaptive-tessellation work in Stage 3 / B-rep cavity detection in Stage 5. For now the test asserts the file analyses cleanly with no spurious printing-side warnings.",
+  "process_expectations": {
+    "FDM":      { "must_not_have": ["thin_wall", "small_feature"] },
+    "SLA":      { "must_not_have": ["thin_wall", "small_feature"] },
+    "SLS":      { "must_not_have": ["thin_wall"] },
+    "MJF":      { "must_not_have": ["thin_wall"] },
+    "CNC_MILL": { "must_not_have": ["thin_wall"] },
+    "CNC_TURN": {
+      "must_have": {
+        "not_turnable": { "count_min": 1, "count_max": 1, "severity_min": "error" }
+      }
+    }
+  }
+}
