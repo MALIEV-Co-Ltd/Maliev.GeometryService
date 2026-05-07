@@ -259,14 +259,24 @@ def compute_overhang_analysis(
     mesh: trimesh.Trimesh,
     threshold_deg: float,
     min_region_span_mm: float | None = None,
+    build_dir: tuple[float, float, float] | list[float] | None = None,
+    first_layer_thickness_mm: float | None = None,
 ) -> tuple[int, float, list[list[float]], list[int]]:
-    """Detect overhang regions that exceed the threshold angle.
+    """Detect overhang regions exceeding ``threshold_deg`` from build direction.
 
-    Uses a 2° tolerance to avoid false-positives on faces designed to sit
-    exactly at the machine's self-supporting angle (e.g. wrench optimised for
-    45°).  Faces are clustered into connected regions via BFS; the build-plate
-    contact region (lowest Z faces) is excluded.  Returns the number of
-    distinct overhang *regions*, not individual faces.
+    Args:
+        mesh: input trimesh body.
+        threshold_deg: maximum self-supporting angle from the build direction.
+        min_region_span_mm: optional bridgeable-span filter; clusters whose
+            extent perpendicular to the build direction is below this are
+            ignored (they're likely bridgeable, not unsupported overhangs).
+        build_dir: build/print direction in mesh space (defaults to +Z).
+            Must be a unit-ish 3-vector.  Auto-orientation logic chooses
+            this externally.
+        first_layer_thickness_mm: faces within this much of the build-plate
+            contact plane are stripped (they're the build-plate face itself,
+            not unsupported overhangs).  Defaults to ``max(1.0, 1% of part
+            height-along-build-dir)`` for backward compatibility.
 
     Returns:
         (overhang_region_count, overhang_area_cm2, centroids, face_indices)
@@ -293,10 +303,23 @@ def compute_overhang_analysis(
         face_areas = mesh.area_faces
         face_centroids = mesh.triangles_center
 
-        # 0.5° tolerance keeps FP risk low while catching genuine near-threshold overhangs  # noqa: E501
-        # (the old 2.0° margin silently dropped real overhangs between 45° and 47°).
+        # Normalise the build direction.  Default = +Z (FDM/SLS convention).
+        if build_dir is None:
+            bd = np.array([0.0, 0.0, 1.0], dtype=float)
+        else:
+            bd = np.asarray(build_dir, dtype=float).reshape(3)
+            bd_norm = float(np.linalg.norm(bd))
+            if bd_norm < 1e-9:
+                bd = np.array([0.0, 0.0, 1.0], dtype=float)
+            else:
+                bd = bd / bd_norm
+
+        # An overhang surface has a normal component along -build_dir greater
+        # than sin(threshold). The 0.5° margin matches legacy behaviour and
+        # avoids flapping on faces sitting exactly at the threshold edge
+        # (e.g. parts engineered for the slicer's self-supporting angle).
         effective_thresh = threshold_deg + 0.5
-        overhang_z_thresh = -math.sin(math.radians(effective_thresh))
+        overhang_thresh = math.sin(math.radians(effective_thresh))
 
         # Find all overhang faces
         overhang_set: set[int] = set()
@@ -304,15 +327,22 @@ def compute_overhang_analysis(
             norm = float(np.linalg.norm(normal))
             if norm < 1e-10:
                 continue
-            if (normal / norm)[2] < overhang_z_thresh:
+            n_unit = normal / norm
+            # Project unit normal onto the inverted build direction.  Positive
+            # values mean the face points "downward" relative to the build
+            # direction; values exceeding sin(threshold) are overhangs.
+            proj = float(-(n_unit[0] * bd[0] + n_unit[1] * bd[1] + n_unit[2] * bd[2]))
+            if proj > overhang_thresh:
                 overhang_set.add(i)
 
         logger.info(
-            "overhang candidates: %d faces (threshold %.1f° + 0.5° = %.1f°, z_thresh=%.3f)",  # noqa: E501
+            "overhang candidates: %d faces "
+            "(threshold %.1f°, build_dir=(%.2f,%.2f,%.2f))",
             len(overhang_set),
             threshold_deg,
-            effective_thresh,
-            overhang_z_thresh,
+            bd[0],
+            bd[1],
+            bd[2],
         )
 
         if not overhang_set:
@@ -321,21 +351,64 @@ def compute_overhang_analysis(
             )
             return 0, 0.0, [], []
 
-        # Determine the build-plate contact band: faces within 1% of part height
-        # (or 1 mm, whichever is larger) above the global Z minimum are excluded
-        # because they represent the bottom face resting on the build plate.
-        # Previously 3%/2mm — too aggressive for tall parts with low-positioned overhangs  # noqa: E501
-        # (e.g. a flange-mounted duct whose bottom face sits just above the build plate).  # noqa: E501
         all_centroids = face_centroids
-        global_min_z = float(mesh.vertices[:, 2].min())
-        part_height = float(mesh.vertices[:, 2].max()) - global_min_z
-        build_plate_band = max(1.0, part_height * 0.01)
+        proj_vertices = mesh.vertices @ bd
+        global_min = float(proj_vertices.min())
+        part_height = float(proj_vertices.max() - global_min)
+
+        # Solid/void probe: a true overhang has printable void immediately
+        # below it. If a candidate face points downward only because tessellation
+        # wound a lower hole/floor face incorrectly, the point just below the
+        # surface lies inside solid material and must not be highlighted.
+        if overhang_set and mesh.is_watertight:
+            try:
+                probe_distance = min(max(part_height * 0.001, 0.05), 0.5)
+                sorted_faces = sorted(overhang_set)
+                probe_points = (
+                    all_centroids[sorted_faces]
+                    - np.outer(np.ones(len(sorted_faces)), bd * probe_distance)
+                )
+                supported = mesh.contains(probe_points)
+                overhang_set = {
+                    face
+                    for face, is_supported in zip(sorted_faces, supported, strict=False)
+                    if not bool(is_supported)
+                }
+                logger.info(
+                    "overhang solid-probe filter: %d face(s) remain after "
+                    "dropping supported lower surfaces",
+                    len(overhang_set),
+                )
+            except Exception as exc:
+                logger.debug("overhang solid-probe filter skipped: %s", exc)
+
+        if not overhang_set:
+            logger.info("No overhang faces remain after solid support probing")
+            return 0, 0.0, [], []
+
+        # Build-plate contact band: faces whose centroid projection along the
+        # build direction is within `band` of the global minimum (the build
+        # plate) are excluded.  Default = 1% of part height with a 1 mm floor
+        # — empirically a good trade-off across additive processes.  When
+        # first_layer_thickness_mm is supplied AND larger than the heuristic,
+        # it widens the band so first-layer faces aren't flagged.
+        legacy_band = max(1.0, part_height * 0.01)
+        if first_layer_thickness_mm is not None and first_layer_thickness_mm > 0:
+            build_plate_band = max(legacy_band, float(first_layer_thickness_mm))
+        else:
+            build_plate_band = legacy_band
         logger.info(
-            "build-plate band: %.2f mm (part height %.2f mm, global_min_z %.2f mm)",
+            "build-plate band: %.2f mm (part height along build_dir %.2f mm, "
+            "min %.2f mm, source=%s)",
             build_plate_band,
             part_height,
-            global_min_z,
+            global_min,
+            "first_layer_thickness_mm"
+            if first_layer_thickness_mm
+            else "1%/1mm fallback",
         )
+
+        proj_centroids = all_centroids @ bd
 
         # Build face adjacency among overhang faces only
         edge_to_faces: dict[tuple[int, int], list[int]] = {}
@@ -378,14 +451,15 @@ def compute_overhang_analysis(
                     if n not in visited:
                         queue.append(n)
 
-            # Strip faces whose centroid sits in the build-plate contact band
-            # (faces resting on the build plate are not "overhangs" requiring support).
-            # Only strip individual faces, not the whole cluster — a tall overhang that
-            # connects to a build-plate-contact face must not be silenced entirely.
+            # Strip faces whose centroid (projected onto the build direction)
+            # sits in the build-plate contact band — faces resting on the
+            # plate aren't unsupported overhangs.  Trim per-face rather than
+            # discarding the whole cluster: a tall overhang that connects to
+            # a build-plate-contact face must not be silenced entirely.
             trimmed_cluster = [
                 f
                 for f in cluster
-                if float(all_centroids[f][2]) > global_min_z + build_plate_band + 1e-6
+                if float(proj_centroids[f]) > global_min + build_plate_band + 1e-6
             ]
 
             if not trimmed_cluster:
@@ -397,8 +471,17 @@ def compute_overhang_analysis(
                 [mesh.vertices[v] for f in trimmed_cluster for v in mesh.faces[f]]
             )
             if min_region_span_mm is not None:
-                extents = cluster_verts.max(axis=0) - cluster_verts.min(axis=0)
-                horizontal_span = max(float(extents[0]), float(extents[1]))
+                # Span perpendicular to build_dir = magnitude of (vertex -
+                # vertex projected onto bd).  Take the diagonal of the bbox
+                # of the perpendicular components for a build-direction
+                # agnostic horizontal span.
+                proj_along = cluster_verts @ bd  # (N,)
+                perp_components = (
+                    cluster_verts - np.outer(proj_along, bd)
+                )  # (N, 3)
+                p_min = perp_components.min(axis=0)
+                p_max = perp_components.max(axis=0)
+                horizontal_span = float(np.linalg.norm(p_max - p_min))
                 if horizontal_span <= min_region_span_mm:
                     clusters_filtered_by_span += 1
                     continue

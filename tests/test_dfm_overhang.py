@@ -10,7 +10,7 @@ import pytest
 import trimesh
 
 from src.core.geometry import _analyze_single_process
-from src.core.mesh_analyzers import detect_bridges
+from src.core.mesh_analyzers import compute_overhang_analysis, detect_bridges
 
 ASSETS_DIR = pytest.importorskip("pathlib").Path(__file__).parent / "assets"
 
@@ -62,6 +62,76 @@ class TestOverhangDetection:
                 i for i in result["issues"] if i.get("category") == "overhang"
             ]
             print(f"\nFDM overhang issues: {len(overhang_issues)}")
+
+    def test_horizontal_through_hole_marks_upper_inner_surface_not_bottom_face(self):
+        """A side hole's ceiling is the overhang; the build-plate face is not."""
+        cadquery = pytest.importorskip("cadquery")
+
+        mesh = self._make_horizontal_through_hole_mesh(cadquery)
+
+        count, _, _, face_indices = compute_overhang_analysis(mesh, 45.0)
+
+        assert count == 1
+        assert face_indices
+
+        selected_centroids = mesh.triangles_center[face_indices]
+        selected_normals = mesh.face_normals[face_indices]
+        build_plate_z = float(mesh.vertices[:, 2].min())
+
+        assert float(selected_centroids[:, 2].min()) > build_plate_z + 1.0
+        assert float(selected_centroids[:, 2].min()) > 0.0
+        assert float(selected_normals[:, 2].max()) < -0.7
+
+    def test_horizontal_through_hole_ignores_supported_floor_with_bad_winding(self):
+        """A lower hole face with bad normals is still supported, not overhang."""
+        cadquery = pytest.importorskip("cadquery")
+
+        mesh = self._make_horizontal_through_hole_mesh(cadquery)
+        lower_hole_faces = [
+            index
+            for index, centroid in enumerate(mesh.triangles_center)
+            if centroid[2] < -0.5
+            and abs(centroid[0]) < 4.1
+            and abs(centroid[1]) < 10.1
+            and mesh.face_normals[index][2] > 0.5
+        ]
+        assert lower_hole_faces
+
+        flipped_faces = mesh.faces.copy()
+        flipped_faces[lower_hole_faces] = flipped_faces[lower_hole_faces][:, [0, 2, 1]]
+        mesh = trimesh.Trimesh(
+            vertices=mesh.vertices.copy(),
+            faces=flipped_faces,
+            process=False,
+        )
+
+        count, _, _, face_indices = compute_overhang_analysis(mesh, 45.0)
+
+        assert count == 1
+        assert face_indices
+        selected_centroids = mesh.triangles_center[face_indices]
+        assert float(selected_centroids[:, 2].min()) > 0.0
+
+    @staticmethod
+    def _make_horizontal_through_hole_mesh(cadquery):
+        shape = (
+            cadquery.Workplane("XY")
+            .box(30.0, 20.0, 12.0)
+            .faces(">Y")
+            .workplane()
+            .circle(4.0)
+            .cutThruAll()
+            .val()
+        )
+        vertices, triangles = shape.tessellate(0.2)
+        mesh = trimesh.Trimesh(
+            vertices=[[v.x, v.y, v.z] for v in vertices],
+            faces=triangles,
+            process=True,
+        )
+        mesh.merge_vertices()
+        trimesh.repair.fix_winding(mesh)
+        return mesh
 
 
 class TestBridgeDetection:
