@@ -1465,6 +1465,21 @@ def _export_multibody_scene_glb(
         return None
 
 
+def _scale_meshes_to_mm_if_meter_scale(meshes: list[trimesh.Trimesh]) -> bool:
+    """Normalize mesh metrics only when the mesh is clearly meter-scale."""
+    all_dims: list[float] = []
+    for mesh in meshes:
+        if hasattr(mesh, "extents") and mesh.extents is not None:
+            all_dims.extend(float(dim) for dim in mesh.extents.tolist())
+
+    if all_dims and max(all_dims) < 1.0:
+        for mesh in meshes:
+            mesh.apply_scale(1000.0)
+        return True
+
+    return False
+
+
 def _compute_metrics_worker(data: bytes, file_extension: str) -> dict[str, Any]:
     """
     Phase 1 worker: loads mesh, computes metrics, exports mesh to STL bytes.
@@ -1558,17 +1573,13 @@ def _compute_metrics_worker(data: bytes, file_extension: str) -> dict[str, Any]:
                 mesh_list = _split_significant_mesh_bodies(mesh)
                 cad_body_count = len(mesh_list)
                 body_names = [f"Body_{i + 1:02d}" for i in range(cad_body_count)]
-            # glTF/GLB spec mandates meters, but most CAD software exports GLBs in mm.
-            # If all dimensions are < 1 unit the file is almost certainly in meters;
-            # apply ×1000 so downstream metrics are in mm.  Otherwise assume mm already.
+            # GLB/glTF has no reliable unit metadata in practice. CAD-exported
+            # GLBs commonly store millimeter values directly, so only scale
+            # files that are clearly meter-scale.
             if ext in ("glb", "gltf"):
-                all_dims = []
-                for m in mesh_list:
-                    if hasattr(m, "extents") and m.extents is not None:
-                        all_dims.extend(m.extents.tolist())
-                if all_dims and max(all_dims) < 1.0:
-                    for mesh in mesh_list:
-                        mesh.apply_scale(1000.0)
+                scaled = _scale_meshes_to_mm_if_meter_scale(mesh_list)
+                if scaled and metrics_mesh_raw is not None:
+                    metrics_mesh_raw.apply_scale(1000.0)
                 cad_glb_bytes = (
                     data  # uploaded GLB bytes stay in meters (correct for BabylonJS)
                 )
@@ -1774,12 +1785,11 @@ def compute_metrics_trimesh_only(
     if mesh is None or not isinstance(mesh, trimesh.Trimesh):
         raise ValueError("FILE_CORRUPT")
 
-    # STEP/IGES files loaded via trimesh often return meter-scale values
-    # (matching the glTF convention).  If all dimensions are < 1 unit, the
-    # mesh is almost certainly in meters — scale to mm so metrics are correct.
+    # STEP/IGES and GLB/glTF can arrive meter-scale, but CAD-exported GLBs
+    # commonly store millimeter values directly. Scale only clearly meter-scale
+    # meshes so large millimeter GLBs are not inflated by another ×1000.
     if ext in ("step", "stp", "igs", "iges", "glb", "gltf"):  # noqa: SIM102
-        if mesh.extents is not None and max(mesh.extents.tolist()) < 1.0:
-            mesh.apply_scale(1000.0)
+        if _scale_meshes_to_mm_if_meter_scale([mesh]):
             logger.info(
                 f"FALLBACK: Detected meter-scale {ext}, applied ×1000 for mm",
                 extra={"event": "trimesh_fallback_scale", "extension": ext},
@@ -1953,25 +1963,23 @@ def _analyze_bytes_worker(data: bytes, file_extension: str) -> dict[str, Any]:
                     extra={"event": "gmsh_error", "extension": ext, "error": str(e)},
                 )
                 raise ValueError(f"CAD_LOAD_ERROR: {ext} ({str(e)})") from e
+        else:
+            mesh_data = trimesh.load(file_stream, file_type=ext, force="mesh")
+            if isinstance(mesh_data, trimesh.Scene):
+                if not mesh_data.geometry:
+                    raise ValueError("EMPTY_FILE_ERROR")
+                dumped_mesh = mesh_data.dump(concatenate=True)
+                if (
+                    not isinstance(dumped_mesh, trimesh.Trimesh)
+                    or len(dumped_mesh.vertices) == 0
+                ):
+                    raise ValueError("EMPTY_FILE_ERROR")
+                mesh = dumped_mesh
             else:
-                mesh_data = trimesh.load(file_stream, file_type=ext, force="mesh")
-                if isinstance(mesh_data, trimesh.Scene):
-                    if not mesh_data.geometry:
-                        raise ValueError("EMPTY_FILE_ERROR")
-                    dumped_mesh = mesh_data.dump(concatenate=True)
-                    if (
-                        not isinstance(dumped_mesh, trimesh.Trimesh)
-                        or len(dumped_mesh.vertices) == 0
-                    ):
-                        raise ValueError("EMPTY_FILE_ERROR")
-                    mesh = dumped_mesh
-                else:
-                    mesh = cast(trimesh.Trimesh, mesh_data)
-            # glTF/GLB spec mandates meters — convert to mm so all downstream
-            # metric computation (volume, surface area, bounding box) is in mm.
-            # The original cad_glb_bytes stays in meters for BabylonJS rendering.
-            if ext in ("glb", "gltf"):
-                mesh.apply_scale(1000.0)
+                mesh = cast(trimesh.Trimesh, mesh_data)
+
+            if ext in ("glb", "gltf") and isinstance(mesh, trimesh.Trimesh):
+                _scale_meshes_to_mm_if_meter_scale([mesh])
 
         if mesh is None or not isinstance(mesh, trimesh.Trimesh):
             raise ValueError("FILE_CORRUPT")
@@ -4840,6 +4848,9 @@ class GeometryProcessor:
 
             if mesh is None or not isinstance(mesh, trimesh.Trimesh):
                 raise ValueError("FILE_CORRUPT")
+
+            if ext in ("glb", "gltf"):
+                _scale_meshes_to_mm_if_meter_scale([mesh])
 
             is_manifold = bool(mesh.is_watertight)
 
