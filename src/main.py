@@ -425,6 +425,12 @@ async def analyze_for_process(
         DfmAnalysisReadyPayload,
         MessageTypeEnum,
     )
+    from src.infrastructure.upload_cache import (
+        compute_flag_bucket,
+        get_cached_dfm_result,
+        put_dfm_result_fire_and_forget,
+        sha256_of,
+    )
 
     storage_path: str | None = None
     download_url: str | None = None
@@ -723,17 +729,48 @@ async def analyze_for_process(
         cad_bytes = file_data.get("cad_bytes")
         cad_extension = file_data.get("cad_extension")
 
-        # OPTIMIZATION: Check cache for existing results
+        # OPTIMIZATION: Two-tier cache.  L1 = in-process bounded dict (fastest);
+        # L2 = UploadService-backed result cache (survives restarts and is
+        # shared across service replicas).  Look-up order: L1 → L2 → compute.
         cached = get_cached_result(stl_bytes, process_code)
         cache_status = "hit" if cached is not None else "cold"
+        sha256_key = sha256_of(stl_bytes)
+        flag_bucket = compute_flag_bucket()
+
+        if cached is None:
+            try:
+                cached = await get_cached_dfm_result(
+                    sha256_key,
+                    process_code,
+                    flag_bucket,
+                    consumer._http_client,
+                    consumer._token_provider,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "GCS DFM cache lookup failed for %s/%s: %s",
+                    upload_id,
+                    process_code,
+                    exc,
+                    extra={"upload_id": upload_id, "process_code": process_code},
+                )
+                cached = None
+            if cached is not None:
+                cache_status = "hit_l2"
+                # Backfill L1 so subsequent same-process requests skip the L2
+                # round trip until the file rolls out of the bounded dict.
+                cache_result(stl_bytes, process_code, cached)
 
         if cached is not None:
             logger.info(
-                f"Cache hit for {upload_id}/{process_code} - skipping re-analysis",
+                "Cache hit (%s) for %s/%s - skipping re-analysis",
+                cache_status,
+                upload_id,
+                process_code,
                 extra={
                     "upload_id": upload_id,
                     "process_code": process_code,
-                    "cache_status": "hit",
+                    "cache_status": cache_status,
                 },
             )
             result = cached
@@ -802,8 +839,18 @@ async def analyze_for_process(
                 },
             )
 
-            # Cache the result for future use
+            # Cache the result for future use — L1 in-process and L2 GCS.
+            # The L2 write is fire-and-forget so the HTTP response is not
+            # blocked by network I/O to UploadService.
             cache_result(stl_bytes, process_code, result)
+            put_dfm_result_fire_and_forget(
+                sha256_key,
+                process_code,
+                flag_bucket,
+                result,
+                consumer._http_client,
+                consumer._token_provider,
+            )
             logger.info(
                 f"Cached result for {upload_id}/{process_code}",
                 extra={

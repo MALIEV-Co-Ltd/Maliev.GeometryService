@@ -19,7 +19,8 @@ FAKE_TOKEN = "eyJhbGciOiJIUzI1NiJ9.test.signature"
 UPLOAD_URL = "http://localhost:6900"
 ARTIFACT_PATH = "projects/abc/model.stl_thumb.png"
 ARTIFACT_DATA = b"fake-png-bytes"
-PARENT_UPLOAD_ID = "upload-uuid-1234"
+PARENT_UPLOAD_ID = "11111111-1111-1111-1111-111111111111"
+UNASSOCIATED_UPLOAD_ID = "00000000-0000-0000-0000-000000000000"
 
 
 @pytest.fixture
@@ -158,7 +159,7 @@ async def test_upload_artifact_does_not_raise_on_connection_error(
 async def test_upload_artifact_empty_parent_upload_id(
     consumer: UploadConsumer,
 ) -> None:
-    """upload_artifact works when parent_upload_id defaults to empty string."""
+    """upload_artifact sends a valid zero Guid when no parent upload exists."""
     with respx.mock:
         route = respx.post(f"{UPLOAD_URL}/upload/v1/uploads/artifacts").mock(
             return_value=httpx.Response(
@@ -169,4 +170,4 @@ async def test_upload_artifact_empty_parent_upload_id(
         import json
 
         body = json.loads(route.calls[0].request.content)
-        assert body["parentUploadId"] == ""
+        assert body["parentUploadId"] == UNASSOCIATED_UPLOAD_ID

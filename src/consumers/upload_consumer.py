@@ -61,6 +61,12 @@ from src.core.schemas import (
 from src.infrastructure.auth import ServiceAccountTokenProvider
 from src.infrastructure.event_publisher import initialize_event_publisher, publish_event
 from src.infrastructure.storage import IStorageService
+from src.infrastructure.upload_cache import (
+    get_cached_tessellation,
+    put_tessellation_fire_and_forget,
+    sha256_of,
+    tol_bucket_for,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -68,6 +74,7 @@ logger = logging.getLogger(__name__)
 # gc.collect() before accepting more work.  Not a hard limit — just a nudge
 # to reclaim unreferenced pages before they compound.
 _RSS_GC_THRESHOLD_MB = 3_000  # 3 GB — conservative; process limit is typically 4-8 GB
+_UNASSOCIATED_UPLOAD_ID = "00000000-0000-0000-0000-000000000000"
 
 
 def _check_rss_and_maybe_gc(label: str) -> float:
@@ -345,29 +352,70 @@ class UploadConsumer:
                         )
                         loop = asyncio.get_running_loop()
                         executor = self.geometry_processor.executor
+
+                        # GCS L2 cache via UploadService: keyed on (sha256, tol_bucket).
+                        # A hit lets us skip cascadio + meshing entirely and re-use the
+                        # previously computed metrics dict.  Failures inside the cache
+                        # module never raise — falls through to fresh compute.
+                        sha256_key = sha256_of(data)
+                        tol_bucket = tol_bucket_for(len(data))
+                        try:
+                            cached_metrics = await get_cached_tessellation(
+                                sha256_key,
+                                tol_bucket,
+                                self._http_client,
+                                self._token_provider,
+                            )
+                        except Exception as _cache_exc:
+                            # Cache failures must never break the upload flow.
+                            logger.warning(
+                                f"Tessellation cache lookup failed for {file_id}: {_cache_exc}",  # noqa: E501
+                                extra={"file_id": str(file_id)},
+                            )
+                            cached_metrics = None
+
                         logger.info(
-                            "Starting Phase 1 metrics computation",
+                            "Starting Phase 1 metrics computation"
+                            if cached_metrics is None
+                            else "Phase 1 tessellation cache hit",
                             extra={
-                                "event": "phase1_start",
+                                "event": "phase1_start"
+                                if cached_metrics is None
+                                else "phase1_cache_hit",
                                 "file_id": str(file_id),
                                 "extension": file_ext,
+                                "sha256_prefix": sha256_key[:12],
+                                "tol_bucket": tol_bucket,
                             },
                         )
                         try:
-                            metrics_result = await asyncio.wait_for(
-                                loop.run_in_executor(
-                                    executor, _compute_metrics_worker, data, file_ext
-                                ),
-                                timeout=PHASE1_TIMEOUT_SECONDS,
+                            if cached_metrics is not None:
+                                metrics_result = cached_metrics
+                            else:
+                                metrics_result = await asyncio.wait_for(
+                                    loop.run_in_executor(
+                                        executor,
+                                        _compute_metrics_worker,
+                                        data,
+                                        file_ext,
+                                    ),
+                                    timeout=PHASE1_TIMEOUT_SECONDS,
+                                )
+                            rss_mb = _check_rss_and_maybe_gc(
+                                "post-phase1-cache-hit"
+                                if cached_metrics is not None
+                                else "post-phase1"
                             )
-                            rss_mb = _check_rss_and_maybe_gc("post-phase1")
                             logger.info(
-                                "Phase 1 metrics computation complete",
+                                "Phase 1 metrics ready",
                                 extra={
                                     "event": "phase1_complete",
                                     "file_id": str(file_id),
                                     "volume_cm3": metrics_result["volume_cm3"],
                                     "rss_mb": round(rss_mb, 1),
+                                    "cache_status": "hit"
+                                    if cached_metrics is not None
+                                    else "cold",
                                 },
                             )
                         except asyncio.TimeoutError:
@@ -417,6 +465,24 @@ class UploadConsumer:
                                     "file_id": str(file_id),
                                 },
                             )
+
+                        # Write to GCS L2 cache on a cold compute (skip on hit
+                        # and on the trimesh-only fallback path — that produces
+                        # a less complete metrics dict we don't want to cache).
+                        if cached_metrics is None and metrics_result is not None:
+                            try:
+                                put_tessellation_fire_and_forget(
+                                    sha256_key,
+                                    tol_bucket,
+                                    metrics_result,
+                                    self._http_client,
+                                    self._token_provider,
+                                )
+                            except Exception as _cache_put_exc:
+                                logger.warning(
+                                    f"Tessellation cache write failed for {file_id}: {_cache_put_exc}",  # noqa: E501
+                                    extra={"file_id": str(file_id)},
+                                )
 
                         metrics = GeometryMetrics(
                             volumeCm3=metrics_result["volume_cm3"],
@@ -1152,7 +1218,11 @@ class UploadConsumer:
         raise RuntimeError("Unexpected: download_with_retry exhausted all attempts")
 
     async def upload_artifact(
-        self, data: bytes, path: str, content_type: str, parent_upload_id: str = ""
+        self,
+        data: bytes,
+        path: str,
+        content_type: str,
+        parent_upload_id: str = _UNASSOCIATED_UPLOAD_ID,
     ) -> bool:
         """Uploads an artifact (GLB/PNG) to GCS via UploadService HTTP endpoint.
 

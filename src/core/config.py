@@ -36,11 +36,18 @@ class Settings(BaseSettings):
     USE_BREP_THICKNESS: bool = True
     USE_SDF_SMALL_FEATURES: bool = False
 
-    # GCS-based caches keyed by SHA-256 + tolerance bucket.  Empty string
-    # disables the cache (useful in tests).  TTLs are enforced by GCS
-    # object-lifecycle rules on the buckets, not by this service.
-    GEOMETRY_TESSELLATION_CACHE_BUCKET: str = ""
-    GEOMETRY_DFM_RESULT_CACHE_BUCKET: str = ""
+    # GCS-backed caches keyed by SHA-256.  Routed through UploadService
+    # (which owns the GCS connection) — see src/infrastructure/upload_cache.py.
+    # Cache objects live under the "cache/" path prefix, which UploadService
+    # routes to a dedicated bucket with TTL lifecycle rules (30 d for
+    # tessellation, 7 d for DFM results).  Both flags default off until the
+    # UploadService bucket routing change is deployed.
+    GEOMETRY_TESSELLATION_CACHE_ENABLED: bool = False
+    GEOMETRY_DFM_RESULT_CACHE_ENABLED: bool = False
+    # HTTP timeouts for the two cache hops (signed-URL lookup, then signed-URL
+    # download).  Reads are short — the whole point is to skip a slow compute.
+    GEOMETRY_CACHE_LOOKUP_TIMEOUT_SECONDS: float = 5.0
+    GEOMETRY_CACHE_DOWNLOAD_TIMEOUT_SECONDS: float = 30.0
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
