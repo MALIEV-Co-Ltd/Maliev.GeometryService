@@ -22,9 +22,11 @@ This project uses **Poetry** for dependency management and **Pytest** for testin
   - `OTEL_EXPORTER_OTLP_ENDPOINT`: OpenTelemetry collector endpoint
   - `UPLOAD_SERVICE_URL`: UploadService endpoint for artifact uploads (e.g., `http://uploadservice:8080`) — **Required for uploading preview images**. Injected automatically by Aspire.
   - `JWT_PRIVATE_KEY`: Base64-encoded RSA private key PEM for RS256 signing — **preferred**. Injected automatically by Aspire.
+  - `JWT_PUBLIC_KEY`: Base64-encoded RSA public key PEM for validating bearer tokens on HTTP analysis/debug endpoints. Required outside Development/Testing.
   - `JWT_SECURITY_KEY`: HMAC-SHA256 fallback key — used when `JWT_PRIVATE_KEY` is not set. Injected automatically by Aspire.
   - `JWT_ISSUER`: JWT issuer claim (default: `https://api.maliev.com`). Injected automatically by Aspire.
   - `JWT_AUDIENCE`: JWT audience claim (default: `https://api.maliev.com`). Injected automatically by Aspire.
+  - `GEOMETRY_REQUIRE_AUTH`: Defaults to `true`; do not disable outside local troubleshooting.
 
 ### Testing
 ```bash
@@ -119,6 +121,7 @@ poetry run mypy src                     # Type check (strict mode)
 - **Service prefix**: Routes prefixed with service domain (e.g., `/auth`, `/customer`, `/job`)
 - **Scalar docs**: Configured at `/{service}/scalar`
 - **Secrets**: Never hardcoded. Use GCP Secret Manager or environment variables
+- **HTTP authentication**: Keep `/geometry/liveness`, `/geometry/readiness`, `/geometry/aspire-liveness`, `/geometry/scalar`, and `/geometry/openapi/v1.json` public for probes/docs. All analysis, cleanup, and debug endpoints require a bearer token validated with `JWT_PUBLIC_KEY` outside Development/Testing.
 - **Async/await**: All the way down. Pass `CancellationToken`
 - **EF Core Design package**: Only in Infrastructure project, never in Api
 - **PostgreSQL xmin**: Shadow property only — `entity.Property<uint>("xmin").HasColumnType("xid").IsRowVersion()`. Never add entity property

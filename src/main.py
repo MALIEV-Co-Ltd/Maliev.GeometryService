@@ -1,20 +1,24 @@
 import asyncio
+import base64
 import faulthandler
 import logging
 import os
 import sys
 import time
 from collections import OrderedDict
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Awaitable, Callable
 from contextlib import asynccontextmanager, suppress
 from typing import Any
+
+import jwt
 
 # Add src to path for imports
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))  # noqa: PTH118, PTH120
 
-from fastapi import APIRouter, FastAPI, responses
+from fastapi import APIRouter, FastAPI, Request, responses
 from fastapi.responses import JSONResponse
 from scalar_fastapi import get_scalar_api_reference
+from starlette.responses import Response
 
 from src.consumers.upload_consumer import UploadConsumer
 from src.core.config import settings
@@ -136,6 +140,97 @@ app = FastAPI(
 
 # Re-run instrumentation with the app instance
 setup_observability(app)
+
+_PUBLIC_PATHS = {
+    "/liveness",
+    "/readiness",
+    "/aspire-liveness",
+    "/geometry/liveness",
+    "/geometry/readiness",
+    "/geometry/aspire-liveness",
+    "/geometry/scalar",
+    "/geometry/openapi/v1.json",
+}
+
+
+def _is_development_or_testing() -> bool:
+    environment = (
+        settings.ASPNETCORE_ENVIRONMENT
+        or settings.ENVIRONMENT
+        or os.getenv("ASPNETCORE_ENVIRONMENT", "")
+        or os.getenv("DOTNET_ENVIRONMENT", "")
+        or os.getenv("ENVIRONMENT", "")
+    )
+    return environment.lower() in {"development", "testing", "test"}
+
+
+def _decode_configured_pem(configured_key: str) -> str:
+    if "BEGIN" in configured_key:
+        return configured_key
+
+    try:
+        return base64.b64decode(configured_key).decode("utf-8")
+    except (ValueError, UnicodeDecodeError):
+        return configured_key
+
+
+def _jwt_validation_key() -> tuple[str, str]:
+    if settings.JWT_PUBLIC_KEY:
+        return _decode_configured_pem(settings.JWT_PUBLIC_KEY), "RS256"
+
+    if _is_development_or_testing() and settings.JWT_SECURITY_KEY:
+        return settings.JWT_SECURITY_KEY, "HS256"
+
+    raise RuntimeError(
+        "JWT_PUBLIC_KEY is required for GeometryService HTTP authentication "
+        "outside Development or Testing."
+    )
+
+
+def _unauthorized_response(detail: str) -> JSONResponse:
+    return JSONResponse(
+        content={"detail": detail},
+        status_code=401,
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+
+
+@app.middleware("http")
+async def require_geometry_auth(
+    request: Request,
+    call_next: Callable[[Request], Awaitable[Response]],
+) -> Response:
+    """Require platform bearer tokens for non-health GeometryService routes."""
+    if not settings.GEOMETRY_REQUIRE_AUTH or request.url.path in _PUBLIC_PATHS:
+        return await call_next(request)
+
+    authorization = request.headers.get("authorization")
+    if not authorization or not authorization.startswith("Bearer "):
+        return _unauthorized_response("Authentication required")
+
+    token = authorization.removeprefix("Bearer ").strip()
+    if not token:
+        return _unauthorized_response("Authentication required")
+
+    try:
+        validation_key, algorithm = _jwt_validation_key()
+        jwt.decode(
+            token,
+            validation_key,
+            algorithms=[algorithm],
+            audience=settings.JWT_AUDIENCE,
+            issuer=settings.JWT_ISSUER,
+        )
+    except RuntimeError as exc:
+        logger.error("GeometryService JWT validation is not configured: %s", exc)
+        return JSONResponse(
+            content={"detail": "Authentication is not configured"},
+            status_code=503,
+        )
+    except jwt.InvalidTokenError:
+        return _unauthorized_response("Invalid bearer token")
+
+    return await call_next(request)
 
 router = APIRouter(prefix="/geometry")
 

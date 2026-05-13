@@ -28,6 +28,7 @@ This service adheres to the platform development mandates adapted for Python:
 - ✅ **Strict Typing**: All code must use Python type hints and pass `mypy` checks.
 - ✅ **Linting**: Adherence to PEP 8 via `ruff`.
 - ✅ **No Secrets in Code**: Configuration via environment variables only.
+- ✅ **Authenticated HTTP API**: Analysis/debug endpoints require a platform bearer token.
 - ✅ **Async First**: All I/O operations must be asynchronous.
 
 ### Mandatory Practices
@@ -101,6 +102,11 @@ poetry install
 ```bash
 # Set RabbitMQ connection string
 $env:AMQP_URL="YOUR_RABBITMQ_URL"
+
+# Required for HTTP endpoint authentication outside tests/dev fallback
+$env:JWT_PUBLIC_KEY="<base64-rsa-public-pem>"
+$env:JWT_ISSUER="https://api.maliev.com"
+$env:JWT_AUDIENCE="https://api.maliev.com"
 ```
 
 4. **Run the Service**
@@ -109,6 +115,7 @@ poetry run python -m src.main
 ```
 
 The service will be available at `http://localhost:8000/geometry`.
+Health and Scalar/OpenAPI endpoints are public for probes and documentation. Geometry analysis, cleanup, and debug endpoints require `Authorization: Bearer <platform-jwt>`. Development/Testing may use `JWT_SECURITY_KEY`; production must provide `JWT_PUBLIC_KEY`.
 
 ---
 
@@ -131,6 +138,14 @@ Standardized health probes:
 - **Liveness**: `GET /geometry/liveness`
 - **Readiness**: `GET /geometry/readiness`
 - **Metrics**: `GET /geometry/metrics`
+
+HTTP analysis endpoints:
+
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| `POST` | `/geometry/uploads/{upload_id}/quality-check` | Bearer JWT | Phase 1 STL/CAD quality check |
+| `POST` | `/geometry/uploads/{upload_id}/dfm/{process_code}` | Bearer JWT | Phase 2 process-specific DFM analysis |
+| `DELETE` | `/geometry/uploads/{upload_id}` | Bearer JWT | Clears cached upload analysis data |
 
 ---
 

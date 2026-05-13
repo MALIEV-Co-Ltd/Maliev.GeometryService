@@ -51,8 +51,10 @@ def _reload_provider(
     private_key_b64: str = "",
     issuer: str = ISSUER,
     audience: str = AUDIENCE,
+    environment: str = "Testing",
 ) -> ServiceAccountTokenProvider:
     """Reload settings and auth module with the given env vars, return fresh provider."""  # noqa: E501
+    monkeypatch.setenv("ASPNETCORE_ENVIRONMENT", environment)
     monkeypatch.setenv("JWT_SECURITY_KEY", security_key)
     monkeypatch.setenv("JWT_PRIVATE_KEY", private_key_b64)
     monkeypatch.setenv("JWT_ISSUER", issuer)
@@ -219,4 +221,19 @@ def test_raises_when_no_key_configured(monkeypatch: pytest.MonkeyPatch) -> None:
     with pytest.raises(
         RuntimeError, match="Neither JWT_PRIVATE_KEY nor JWT_SECURITY_KEY"
     ):
+        provider.get_token()
+
+
+def test_hs256_rejected_outside_development_or_testing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """HS256 service-account signing is a local fallback only."""
+    provider = _reload_provider(
+        monkeypatch,
+        security_key=SECURITY_KEY,
+        private_key_b64="",
+        environment="Production",
+    )
+
+    with pytest.raises(RuntimeError, match="JWT_PRIVATE_KEY is required"):
         provider.get_token()

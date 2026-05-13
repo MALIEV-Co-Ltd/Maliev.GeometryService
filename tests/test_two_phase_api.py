@@ -9,12 +9,19 @@ Tests the new REST API endpoints for lazy evaluation:
 import base64
 import contextlib
 import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import jwt
 import pytest
 from httpx import ASGITransport, AsyncClient
 
+from src.core.config import settings
 from src.main import app
+
+SECURITY_KEY = "a-very-long-test-secret-key-at-least-32-chars!"
+ISSUER = "https://api.test.maliev.com"
+AUDIENCE = "https://api.test.maliev.com"
 
 
 @pytest.fixture
@@ -44,8 +51,31 @@ def sample_step_file(test_assets_dir):
 @pytest.fixture
 async def client():
     """Create async test client."""
+    settings.ASPNETCORE_ENVIRONMENT = "Testing"
+    settings.JWT_SECURITY_KEY = SECURITY_KEY
+    settings.JWT_ISSUER = ISSUER
+    settings.JWT_AUDIENCE = AUDIENCE
+
+    now = datetime.now(timezone.utc)
+    token = jwt.encode(
+        {
+            "sub": "test-user",
+            "permissions": "geometry.analysis.run",
+            "iss": ISSUER,
+            "aud": AUDIENCE,
+            "iat": now,
+            "nbf": now,
+            "exp": now + timedelta(minutes=5),
+        },
+        SECURITY_KEY,
+        algorithm="HS256",
+    )
     transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+    async with AsyncClient(
+        transport=transport,
+        base_url="http://test",
+        headers={"Authorization": f"Bearer {token}"},
+    ) as ac:
         yield ac
 
 

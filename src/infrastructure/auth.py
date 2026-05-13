@@ -17,8 +17,8 @@ class ServiceAccountTokenProvider:
     Signing strategy (matches Maliev.Aspire.ServiceDefaults):
     - If ``JWT_PRIVATE_KEY`` is set (Base64-encoded RSA PEM), signs with RS256.
       All services accept RS256 tokens validated against the shared public key.
-    - Otherwise falls back to HS256 using ``JWT_SECURITY_KEY``.
-      Requires UploadService to have both Jwt:PublicKey and Jwt:SecurityKey.
+    - Otherwise falls back to HS256 using ``JWT_SECURITY_KEY`` only in
+      Development or Testing.
 
     Tokens are cached and refreshed automatically 60 s before expiry.
     """
@@ -62,9 +62,14 @@ class ServiceAccountTokenProvider:
         if settings.JWT_PRIVATE_KEY:
             return self._sign_rs256(payload)
 
-        # Fall back to HMAC (HS256)
-        if settings.JWT_SECURITY_KEY:
+        if settings.JWT_SECURITY_KEY and self._symmetric_signing_allowed():
             return self._sign_hs256(payload)
+
+        if settings.JWT_SECURITY_KEY:
+            raise RuntimeError(
+                "JWT_PRIVATE_KEY is required for GeometryService service-account "
+                "tokens outside Development or Testing."
+            )
 
         raise RuntimeError(
             "Neither JWT_PRIVATE_KEY nor JWT_SECURITY_KEY is configured. "
@@ -85,3 +90,10 @@ class ServiceAccountTokenProvider:
         token = jwt.encode(payload, settings.JWT_SECURITY_KEY, algorithm="HS256")
         logger.debug("Generated HS256 service-account JWT for GeometryService")
         return token
+
+    def _symmetric_signing_allowed(self) -> bool:
+        """Return whether HS256 signing is allowed for this environment."""
+        environment = (
+            settings.ASPNETCORE_ENVIRONMENT or settings.ENVIRONMENT
+        ).lower()
+        return environment in {"development", "testing", "test"}
