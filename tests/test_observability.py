@@ -26,15 +26,9 @@ def test_root_logger_level_set_to_info_when_otlp_configured(monkeypatch):
     monkeypatch.setattr(obs_module.settings, "SERVICE_NAME", "test-service")
 
     with (
-        mock.patch(
-            "opentelemetry.exporter.otlp.proto.grpc.trace_exporter.OTLPSpanExporter"
-        ),
-        mock.patch(
-            "opentelemetry.exporter.otlp.proto.grpc.metric_exporter.OTLPMetricExporter"
-        ),
-        mock.patch(
-            "opentelemetry.exporter.otlp.proto.grpc._log_exporter.OTLPLogExporter"
-        ),
+        mock.patch.object(obs_module, "OTLPSpanExporter"),
+        mock.patch.object(obs_module, "OTLPMetricExporter"),
+        mock.patch.object(obs_module, "OTLPLogExporter"),
     ):
         obs_module.setup_observability()
 

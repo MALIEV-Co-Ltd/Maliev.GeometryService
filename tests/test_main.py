@@ -36,7 +36,12 @@ async def test_lifespan():
         import asyncio
 
         mock_task = asyncio.Future()
-        mock_create_task.return_value = mock_task
+
+        def fake_create_task(coro):
+            coro.close()
+            return mock_task
+
+        mock_create_task.side_effect = fake_create_task
 
         async with lifespan(app_mock):
             # Startup happened
