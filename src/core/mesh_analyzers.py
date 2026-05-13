@@ -13,9 +13,10 @@ from __future__ import annotations
 import contextlib
 import logging
 import math
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
+import numpy.typing as npt
 
 from .dfm_models import HoleFeature
 
@@ -309,7 +310,7 @@ def compute_overhang_analysis(
         # can have downward-facing faces reported as upward, silencing all overhangs.
         if not mesh.is_winding_consistent:
             mesh = mesh.copy()
-            trimesh.repair.fix_winding(mesh)
+            trimesh.repair.fix_winding(mesh)  # type: ignore[no-untyped-call]
 
         face_normals = mesh.face_normals
         face_areas = mesh.area_faces
@@ -717,7 +718,7 @@ def detect_bridges(
         ray_directions = np.tile([0.0, 0.0, -1.0], (len(ray_origins), 1))
 
         try:
-            locations, ray_idx, _ = mesh.ray.intersects_location(
+            locations, ray_idx, _ = mesh.ray.intersects_location(  # type: ignore[no-untyped-call]
                 ray_origins, ray_directions, multiple_hits=False
             )
         except Exception:
@@ -736,8 +737,8 @@ def detect_bridges(
         bridge_face_set: set[int] = set()
         for i, didx in enumerate(downward_indices):
             # If no hit below OR hit is farther than max_span_mm → bridge
-            dist = hit_distances.get(i)
-            is_bridge = dist is None or dist > max_span_mm
+            hit_distance = hit_distances.get(i)
+            is_bridge = hit_distance is None or hit_distance > max_span_mm
             if is_bridge:
                 bridge_face_set.add(int(didx))
 
@@ -1039,7 +1040,7 @@ def detect_small_features_sdf(
 
 
 def detect_small_features_occ(
-    occ_features: list,  # list[OccFeature]
+    occ_features: list[Any],  # list[OccFeature]
     min_size_mm: float,
     mesh: trimesh.Trimesh | None = None,
     face_tag_to_tri: dict[int, list[int]] | None = None,
@@ -1079,7 +1080,7 @@ def detect_small_features_occ(
         import math as _math
 
         # Pre-compute triangle centroids once for spatial fallback.
-        tri_centroids: np.ndarray | None = None
+        tri_centroids: npt.NDArray[Any] | None = None
         if mesh is not None and hasattr(mesh, "triangles_center"):
             with contextlib.suppress(Exception):
                 tri_centroids = np.asarray(mesh.triangles_center)
@@ -1164,8 +1165,8 @@ def detect_small_features_occ(
 def detect_escape_hole_risk(
     mesh: trimesh.Trimesh,
     min_hole_diameter_mm: float,
-    bodies: list | None = None,
-    precomputed_holes: list | None = None,
+    bodies: list[Any] | None = None,
+    precomputed_holes: list[HoleFeature] | None = None,
 ) -> tuple[bool, list[list[float]], list[int]]:
     """Flag enclosed hollow volumes that lack an adequately-sized escape hole.
 
@@ -1288,7 +1289,7 @@ def detect_hollow_regions(
 def detect_thin_pins(
     mesh: trimesh.Trimesh,
     min_diameter_mm: float,
-    precomputed_holes: list | None = None,
+    precomputed_holes: list[HoleFeature] | None = None,
 ) -> tuple[int, list[list[float]], list[int]]:
     """Detect protruding pin-like features below minimum diameter.
 
@@ -1441,11 +1442,11 @@ def detect_embossed_engraved(
         for fidx in flagged_set:
             face = mesh.faces[fidx]
             for k in range(3):
-                key = (
+                edge_key = (
                     min(int(face[k]), int(face[(k + 1) % 3])),
                     max(int(face[k]), int(face[(k + 1) % 3])),
                 )
-                edge_to_faces.setdefault(key, []).append(fidx)
+                edge_to_faces.setdefault(edge_key, []).append(fidx)
 
         face_adj: dict[int, list[int]] = {f: [] for f in flagged_set}
         for neighbors in edge_to_faces.values():
@@ -1507,7 +1508,7 @@ def detect_embossed_engraved(
         )  # Minimum area threshold
 
         # Pre-compute centroids and areas for all valid clusters
-        cluster_info: list[tuple[np.ndarray, float, list[int]]] = []
+        cluster_info: list[tuple[npt.NDArray[Any], float, list[int]]] = []
         for cluster in valid_clusters:
             cluster_verts = np.array(
                 [vertices[v] for f in cluster for v in mesh.faces[f]]
@@ -1609,7 +1610,7 @@ def detect_embossed_engraved(
 def detect_connecting_clearance(
     mesh: trimesh.Trimesh,
     min_clearance_mm: float,
-    bodies: list | None = None,
+    bodies: list[Any] | None = None,
 ) -> tuple[int, list[list[float]], list[int]]:
     """Detect insufficient clearance between separate mesh bodies.
 

@@ -118,10 +118,11 @@ def analyze_step_brep(
             tmp_path = tmp.name
 
         # Load into CadQuery
+        shape: Any
         if cad_extension in ("step", "stp"):
             shape = cq.importers.importStep(tmp_path)
         else:
-            shape = cq.importers.importShape(tmp_path)
+            shape = cq.importers.importShape(tmp_path)  # type: ignore[call-arg,arg-type]
 
         import os
 

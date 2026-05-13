@@ -36,15 +36,16 @@ import base64
 import hashlib
 import json
 import logging
-from typing import Any, Protocol
+from typing import Any, Protocol, cast
 from uuid import uuid4
 
 import httpx
 
 from src.core import config as _config_mod
+from src.core.config import Settings
 
 
-def _settings():
+def _settings() -> Settings:
     """Re-read the live ``settings`` instance on every access.
 
     Tests that call ``importlib.reload(src.core.config)`` (e.g.
@@ -136,7 +137,7 @@ def _serialize_metrics_dict(metrics: dict[str, Any]) -> bytes:
 
 
 def _deserialize_metrics_dict(blob: bytes) -> dict[str, Any]:
-    decoded = json.loads(blob.decode("utf-8"))
+    decoded = cast(dict[str, Any], json.loads(blob.decode("utf-8")))
     for field in _BYTES_FIELDS:
         value = decoded.get(field)
         if isinstance(value, dict) and "__b64__" in value:
@@ -365,7 +366,7 @@ async def get_cached_dfm_result(
     if blob is None:
         return None
     try:
-        return json.loads(blob.decode("utf-8"))
+        return cast(dict[str, Any], json.loads(blob.decode("utf-8")))
     except Exception as exc:
         logger.warning("cache decode failed path=%s err=%s", path, exc)
         return None

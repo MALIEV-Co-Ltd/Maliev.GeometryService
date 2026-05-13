@@ -14,11 +14,14 @@ import time
 import traceback
 import uuid
 from collections.abc import Callable
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import Future, ProcessPoolExecutor
 from dataclasses import asdict, dataclass
-from typing import Any
+from typing import Any, ParamSpec, TypeVar
 
 logger = logging.getLogger(__name__)
+
+_P = ParamSpec("_P")
+_T = TypeVar("_T")
 
 
 @dataclass
@@ -43,7 +46,7 @@ class WorkerErrorResult:
     memory_info: dict[str, Any]
     timing_info: dict[str, Any]
     context: dict[str, Any]
-    resource_info: dict[str, Any] = None  # NEW FIELD
+    resource_info: dict[str, Any] | None = None  # NEW FIELD
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to regular dict for JSON serialization."""
@@ -243,7 +246,7 @@ def wrap_worker(
     worker_type: str = "geometry",
     memory_warning_mb: float = 1000.0,
     memory_critical_mb: float = 2000.0,
-) -> Callable:
+) -> Callable[[Callable[_P, _T]], Callable[_P, _T | dict[str, Any]]]:
     """Decorator that wraps a worker function with diagnostic logging.
 
     The wrapped function will:
@@ -267,8 +270,8 @@ def wrap_worker(
             return reports
     """
 
-    def decorator(func: Callable) -> Callable:
-        def wrapped(*args, **kwargs) -> Any:
+    def decorator(func: Callable[_P, _T]) -> Callable[_P, _T | dict[str, Any]]:
+        def wrapped(*args: _P.args, **kwargs: _P.kwargs) -> _T | dict[str, Any]:
             # Setup diagnostics
             worker_id = setup_worker_diagnostics(
                 worker_type=worker_type,
@@ -389,13 +392,13 @@ class DiagnosticExecutor(ProcessPoolExecutor):
     def __init__(
         self,
         max_workers: int | None = None,
-        mp_context=None,
+        mp_context: Any | None = None,
         enable_diagnostics: bool = True,
         memory_warning_mb: float = 1000.0,
         memory_critical_mb: float = 2000.0,
         max_tasks_per_child: int | None = None,
-        **kwargs,
-    ):
+        **kwargs: Any,
+    ) -> None:
         """Initialize the diagnostic executor.
 
         Args:
@@ -435,7 +438,13 @@ class DiagnosticExecutor(ProcessPoolExecutor):
             f"diagnostics={'enabled' if enable_diagnostics else 'disabled'}"
         )
 
-    def submit(self, fn, *args, **kwargs):
+    def submit(
+        self,
+        fn: Callable[_P, _T],
+        /,
+        *args: _P.args,
+        **kwargs: _P.kwargs,
+    ) -> Future[_T]:
         """Submit a function to the executor with diagnostic wrapping.
 
         If diagnostics are enabled, wraps the function to capture errors.

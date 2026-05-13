@@ -14,8 +14,11 @@ Coordinate conventions match _export_glb_worker in geometry.py:
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
+from typing import Any, cast
 
 import numpy as np
+import numpy.typing as npt
 
 logger = logging.getLogger(__name__)
 
@@ -78,7 +81,7 @@ def generate_overlay_glb(
     mesh: object,  # trimesh.Trimesh
     face_indices: list[int],
     category: str,
-    reference_center: np.ndarray | None = None,
+    reference_center: npt.NDArray[Any] | None = None,
     severity_per_face: dict[int, float] | None = None,
 ) -> bytes | None:
     """Extract faces from *mesh* by index, apply vertex colours, export GLB.
@@ -141,8 +144,7 @@ def generate_overlay_glb(
         # Z-up → Y-up (same pre-rotation as _export_glb_worker)
         submesh.apply_transform(_Z_TO_YUP)
 
-        glb_bytes: bytes = submesh.export(file_type="glb")
-        return glb_bytes
+        return cast(bytes, submesh.export(file_type="glb"))
 
     except Exception as exc:
         logger.warning(
@@ -152,8 +154,8 @@ def generate_overlay_glb(
 
 
 def generate_multi_body_overlay_glb(
-    bodies: list,  # list[trimesh.Trimesh]
-    reference_center: np.ndarray | None = None,
+    bodies: Sequence[object],  # list[trimesh.Trimesh]
+    reference_center: npt.NDArray[Any] | None = None,
 ) -> bytes | None:
     """Build a single GLB where each body is tinted a distinct colour.
 
@@ -186,7 +188,7 @@ def generate_multi_body_overlay_glb(
         if not bodies:
             return None
 
-        colored: list = []
+        colored: list[object] = []
         for i, body in enumerate(bodies):
             if not isinstance(body, trimesh.Trimesh) or len(body.vertices) == 0:
                 continue
@@ -211,8 +213,7 @@ def generate_multi_body_overlay_glb(
         combined.apply_translation(-center)
         combined.apply_transform(_Z_TO_YUP)
 
-        glb_bytes: bytes = combined.export(file_type="glb")
-        return glb_bytes
+        return cast(bytes, combined.export(file_type="glb"))
 
     except Exception as exc:
         logger.warning("multi-body overlay GLB generation failed: %s", exc)
@@ -222,7 +223,7 @@ def generate_multi_body_overlay_glb(
 def generate_support_tower_overlay_glb(
     mesh: object,  # trimesh.Trimesh
     face_indices: list[int],
-    reference_center: np.ndarray | None = None,
+    reference_center: npt.NDArray[Any] | None = None,
     grid_spacing_mm: float = 2.0,
     wall_half: float = 0.2,
     surface_offset_mm: float = 0.08,
@@ -274,19 +275,23 @@ def generate_support_tower_overlay_glb(
         support_vertices: list[list[float]] = []
         support_faces: list[list[int]] = []
 
-        def triangle_area(points: np.ndarray) -> float:
+        def triangle_area(points: npt.NDArray[Any]) -> float:
             return float(
                 np.linalg.norm(np.cross(points[1] - points[0], points[2] - points[0]))
                 * 0.5
             )
 
-        def add_vertex(point: np.ndarray) -> int:
+        def add_vertex(point: npt.NDArray[Any]) -> int:
             support_vertices.append(
                 [float(point[0]), float(point[1]), float(point[2])]
             )
             return len(support_vertices) - 1
 
-        def add_triangle(p0: np.ndarray, p1: np.ndarray, p2: np.ndarray) -> None:
+        def add_triangle(
+            p0: npt.NDArray[Any],
+            p1: npt.NDArray[Any],
+            p2: npt.NDArray[Any],
+        ) -> None:
             points = np.array([p0, p1, p2], dtype=float)
             if triangle_area(points) < 1e-8:
                 return
@@ -295,10 +300,10 @@ def generate_support_tower_overlay_glb(
             )
 
         def add_quad(
-            p0: np.ndarray,
-            p1: np.ndarray,
-            p2: np.ndarray,
-            p3: np.ndarray,
+            p0: npt.NDArray[Any],
+            p1: npt.NDArray[Any],
+            p2: npt.NDArray[Any],
+            p3: npt.NDArray[Any],
         ) -> None:
             add_triangle(p0, p1, p2)
             add_triangle(p0, p2, p3)
@@ -362,7 +367,7 @@ def generate_support_tower_overlay_glb(
         support_mesh.apply_translation(-center)
         support_mesh.apply_transform(_Z_TO_YUP)
 
-        return support_mesh.export(file_type="glb")
+        return cast(bytes, support_mesh.export(file_type="glb"))
 
     except Exception as exc:
         logger.warning("support tower overlay GLB generation failed: %s", exc)

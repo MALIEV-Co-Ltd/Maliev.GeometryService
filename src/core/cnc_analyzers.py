@@ -67,7 +67,7 @@ def detect_internal_radii(
         face_centroids = mesh.triangles_center
         vertices = mesh.vertices
 
-        concave_edges: list[tuple[tuple[int, int], np.ndarray]] = []
+        concave_edges: list[tuple[tuple[int, int], npt.NDArray[Any]]] = []
 
         for (v0, v1), faces in edge_to_faces.items():
             if len(faces) != 2:
@@ -217,7 +217,7 @@ def detect_cavities(
             ray_dir = np.array([[0.0, 0.0, 1.0]])
 
             try:
-                locs, _, _ = mesh.ray.intersects_location(
+                locs, _, _ = mesh.ray.intersects_location(  # type: ignore[no-untyped-call]
                     ray_origin, ray_dir, multiple_hits=True
                 )
                 if len(locs) == 0:
@@ -397,7 +397,7 @@ def detect_chatter_risk(
         ray_origins = face_centroids_arr[candidate_indices]  # (N, 3)
         ray_dirs = np.tile([0.0, 0.0, -1.0], (len(candidate_indices), 1))
         try:
-            locs, ray_hit_idx, _ = mesh.ray.intersects_location(
+            locs, ray_hit_idx, _ = mesh.ray.intersects_location(  # type: ignore[no-untyped-call]
                 ray_origins, ray_dirs, multiple_hits=True
             )
             # Group hits by ray index, find max Z below each origin
@@ -653,7 +653,7 @@ def _compute_axis_point_from_circular_sections(
         plane_normal = np.zeros(3)
         plane_normal[axis_index] = 1.0
 
-        samples: list[tuple[np.ndarray, float, float]] = []
+        samples: list[tuple[npt.NDArray[Any], float, float]] = []
         for axis_value in heights:
             plane_origin = np.zeros(3)
             plane_origin[axis_index] = float(axis_value)
@@ -744,7 +744,8 @@ def detect_axial_symmetry(
     mesh: trimesh.Trimesh,  # type: ignore[name-defined]  # noqa: F821
     n_slices: int = 20,
     symmetry_threshold: float = 0.15,
-    slice_profile: tuple[list, list, list, list] | None = None,
+    slice_profile: tuple[list[float], list[float], list[float], list[float]]
+    | None = None,
 ) -> AxisSymmetryReport:
     """Determine if the part is a surface of revolution (suitable for turning).
 
@@ -865,7 +866,8 @@ def detect_axial_symmetry(
 def detect_grooves(
     mesh: trimesh.Trimesh,  # type: ignore[name-defined]  # noqa: F821
     n_slices: int = 100,
-    slice_profile: tuple[list, list, list, list] | None = None,
+    slice_profile: tuple[list[float], list[float], list[float], list[float]]
+    | None = None,
     axis: str = "Z",
 ) -> list[GrooveFeature]:
     """Detect circumferential grooves on a turned part.
@@ -992,7 +994,7 @@ def compute_sharp_corner_analysis(
         # dot(n1, n2) = cos(α). Flag edges where α < threshold_deg.
         cos_thresh = math.cos(math.radians(threshold_deg))
 
-        corner_mids: list[np.ndarray] = []
+        corner_mids: list[npt.NDArray[Any]] = []
         corner_faces: list[tuple[int, int]] = []
 
         for (v0, v1), faces in edge_to_faces.items():

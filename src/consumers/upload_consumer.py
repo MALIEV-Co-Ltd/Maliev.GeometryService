@@ -99,7 +99,7 @@ def _check_rss_and_maybe_gc(label: str) -> float:
         gc.collect()
         rss_mb = psutil.Process().memory_info().rss / 1024 / 1024
         logger.info("RSS after gc.collect() [%s]: %.0f MB", label, rss_mb)
-    return rss_mb
+    return float(rss_mb)
 
 
 # T5d: single source of truth for Phase 2 task budgets.
@@ -145,7 +145,7 @@ def _shutdown_executor_gracefully(
         timeout_seconds: Maximum time to wait for shutdown to complete
     """
 
-    def _do_shutdown():
+    def _do_shutdown() -> None:
         try:
             # First, try to shutdown with wait=True but with timeout
             if hasattr(processor, "executor"):
@@ -183,7 +183,7 @@ def _shutdown_executor_gracefully(
 class UploadConsumer:
     def __init__(
         self, storage_service: IStorageService, geometry_processor: GeometryProcessor
-    ):
+    ) -> None:
         self._settings = settings
         self.storage_service = storage_service
         self.geometry_processor = geometry_processor
@@ -513,11 +513,11 @@ class UploadConsumer:
                                 BodyInfo(
                                     index=i,
                                     name=name,
-                                    volume_cm3=body_volumes[i]
+                                    volumeCm3=body_volumes[i]
                                     if i < len(body_volumes)
                                     else None,
-                                    bbox_min=None,
-                                    bbox_max=None,
+                                    bboxMin=None,
+                                    bboxMax=None,
                                 )
                                 for i, name in enumerate(names)
                             ]

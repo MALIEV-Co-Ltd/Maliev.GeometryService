@@ -11,6 +11,7 @@ import hashlib
 import json
 import time
 from collections import OrderedDict
+from collections.abc import KeysView
 from typing import Any
 
 from src.core.geometry import _analyze_single_process
@@ -147,7 +148,7 @@ class _BoundedDfmCache:
     def __len__(self) -> int:
         return len(self._data)
 
-    def keys(self):
+    def keys(self) -> KeysView[str]:
         return self._data.keys()
 
     @property
@@ -344,13 +345,13 @@ def filter_faces_by_region(
 class PerformanceMetrics:
     """Track performance metrics for optimization validation."""
 
-    def __init__(self):
-        self.quality_checks = []
-        self.process_analyses = []
+    def __init__(self) -> None:
+        self.quality_checks: list[dict[str, Any]] = []
+        self.process_analyses: list[dict[str, Any]] = []
         self.cache_hits = 0
         self.cache_misses = 0
 
-    def record_quality_check(self, duration: float, face_count: int):
+    def record_quality_check(self, duration: float, face_count: int) -> None:
         """Record quality check performance."""
         self.quality_checks.append(
             {"duration": duration, "face_count": face_count, "timestamp": time.time()}
@@ -358,7 +359,7 @@ class PerformanceMetrics:
 
     def record_process_analysis(
         self, duration: float, process_code: str, cache_status: str
-    ):
+    ) -> None:
         """Record process analysis performance."""
         self.process_analyses.append(
             {

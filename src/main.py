@@ -318,7 +318,7 @@ class _BoundedFileCache:
         max_bytes: int = _MAX_CACHE_BYTES,
         ttl_seconds: float = _CACHE_TTL_SECONDS,
     ) -> None:
-        self._data: OrderedDict[str, dict] = OrderedDict()
+        self._data: OrderedDict[str, dict[str, Any]] = OrderedDict()
         self._sizes: dict[str, int] = {}
         self._timestamps: dict[str, float] = {}
         self._total_bytes = 0
@@ -330,11 +330,11 @@ class _BoundedFileCache:
         self._evict_expired()
         return key in self._data
 
-    def __getitem__(self, key: str) -> dict:
+    def __getitem__(self, key: str) -> dict[str, Any]:
         self._evict_expired()
         return self._data[key]
 
-    def __setitem__(self, key: str, value: dict) -> None:
+    def __setitem__(self, key: str, value: dict[str, Any]) -> None:
         # Compute size: stl_bytes + cad_bytes (optional)
         stl = value.get("stl_bytes") or b""
         cad = value.get("cad_bytes") or b""
@@ -358,7 +358,9 @@ class _BoundedFileCache:
         self._timestamps[key] = time.monotonic()
         self._total_bytes += entry_bytes
 
-    def get(self, key: str, default: dict | None = None) -> dict | None:
+    def get(
+        self, key: str, default: dict[str, Any] | None = None
+    ) -> dict[str, Any] | None:
         self._evict_expired()
         return self._data.get(key, default)
 
@@ -396,7 +398,7 @@ _file_analysis_cache: _BoundedFileCache = _BoundedFileCache()
 
 
 @router.post("/uploads/{upload_id}/quality-check", tags=["DFM Analysis"])
-async def quality_check(upload_id: str, file_data: dict) -> JSONResponse:
+async def quality_check(upload_id: str, file_data: dict[str, Any]) -> JSONResponse:
     """Phase 1: Quick quality check on uploaded file.
 
     Performs fast quality checks (<5 seconds) to determine if file is valid:
@@ -482,7 +484,7 @@ async def quality_check(upload_id: str, file_data: dict) -> JSONResponse:
 async def analyze_for_process(
     upload_id: str,
     process_code: str,
-    request: dict | None = None,
+    request: dict[str, Any] | None = None,
     timeout: float | None = None,
 ) -> JSONResponse:
     """Phase 2: Process-specific DFM analysis (on-demand, lazy DFM).
@@ -616,7 +618,7 @@ async def analyze_for_process(
         result: dict[str, Any], overlay_paths: dict[str, str] | None = None
     ) -> None:
         _now = datetime.now(timezone.utc)
-        file_data = _file_analysis_cache.get(upload_id, {})
+        file_data = _file_analysis_cache.get(upload_id, {}) or {}
 
         fdm_report = None
         sla_report = None
@@ -636,7 +638,7 @@ async def analyze_for_process(
 
         dfm_event = DfmAnalysisReadyEvent(
             messageId=uuid4(),
-            correlationId=upload_id,
+            correlationId=file_id,
             messageType=[
                 "urn:message:Maliev.MessagingContracts.Contracts.Geometry:DfmAnalysisReadyEvent"
             ],
@@ -647,7 +649,7 @@ async def analyze_for_process(
                 messageVersion="1.0.0",
                 publishedBy="GeometryService",
                 consumedBy=["IntranetBff"],
-                correlationId=upload_id,
+                correlationId=file_id,
                 causationId=None,
                 occurredAtUtc=_now,
                 isPublic=False,
@@ -725,7 +727,7 @@ async def analyze_for_process(
                             },
                             status_code=422,
                         )
-                    _cache_entry: dict = {
+                    _cache_entry: dict[str, Any] = {
                         "stl_bytes": _stl,
                         "stl_bytes_dict": _metrics.get("mesh_stl_bytes_dict"),
                         "cad_bytes": data,
@@ -831,15 +833,16 @@ async def analyze_for_process(
         cache_status = "hit" if cached is not None else "cold"
         sha256_key = sha256_of(stl_bytes)
         flag_bucket = compute_flag_bucket()
+        active_consumer = consumer
 
-        if cached is None:
+        if cached is None and active_consumer is not None:
             try:
                 cached = await get_cached_dfm_result(
                     sha256_key,
                     process_code,
                     flag_bucket,
-                    consumer._http_client,
-                    consumer._token_provider,
+                    active_consumer._http_client,
+                    active_consumer._token_provider,
                 )
             except Exception as exc:
                 logger.warning(
@@ -938,14 +941,15 @@ async def analyze_for_process(
             # The L2 write is fire-and-forget so the HTTP response is not
             # blocked by network I/O to UploadService.
             cache_result(stl_bytes, process_code, result)
-            put_dfm_result_fire_and_forget(
-                sha256_key,
-                process_code,
-                flag_bucket,
-                result,
-                consumer._http_client,
-                consumer._token_provider,
-            )
+            if active_consumer is not None:
+                put_dfm_result_fire_and_forget(
+                    sha256_key,
+                    process_code,
+                    flag_bucket,
+                    result,
+                    active_consumer._http_client,
+                    active_consumer._token_provider,
+                )
             logger.info(
                 f"Cached result for {upload_id}/{process_code}",
                 extra={
@@ -966,7 +970,7 @@ async def analyze_for_process(
             )
 
             # Build reports dict for overlay generation
-            reports: dict[str, dict] = {process_code: result}
+            reports: dict[str, dict[str, Any]] = {process_code: result}
 
             # Pass the already-cached STL bytes so overlay generation never
             # needs to load a GLB file from disk/GCS.
@@ -975,21 +979,24 @@ async def analyze_for_process(
 
             # Generate and upload overlays (120 s hard cap so slow overlay
             # generation never blocks the HTTP response indefinitely).
-            overlay_paths = await asyncio.wait_for(
-                generate_and_upload_overlays(
-                    glb_path=glb_path,
-                    reports=reports,
-                    storage_path=storage_path or "",
-                    upload_service_url=settings.UPLOAD_SERVICE_URL,
-                    token_provider=consumer._token_provider,
-                    http_client=consumer._http_client,
-                    upload_id=upload_id,
-                    stl_bytes=cached_stl_bytes,
-                    cad_glb_bytes=cached_cad_glb_bytes,
-                    cad_extension=cad_extension,
-                ),
-                timeout=120,
-            )
+            if active_consumer is None:
+                logger.warning("Skipping overlay upload because consumer is not ready")
+            else:
+                overlay_paths = await asyncio.wait_for(
+                    generate_and_upload_overlays(
+                        glb_path=glb_path,
+                        reports=reports,
+                        storage_path=storage_path or "",
+                        upload_service_url=settings.UPLOAD_SERVICE_URL,
+                        token_provider=active_consumer._token_provider,
+                        http_client=active_consumer._http_client,
+                        upload_id=upload_id,
+                        stl_bytes=cached_stl_bytes,
+                        cad_glb_bytes=cached_cad_glb_bytes,
+                        cad_extension=cad_extension,
+                    ),
+                    timeout=120,
+                )
         except asyncio.TimeoutError:
             logger.warning(
                 f"Overlay generation timed out after 120 s for {upload_id}/{process_code}; "  # noqa: E501
@@ -1062,7 +1069,9 @@ async def analyze_for_process(
                 ),
                 "dfm_report": timeout_report,
                 "overlay_paths": {},
-                "body_count": _file_analysis_cache.get(upload_id, {}).get("body_count"),
+                "body_count": (_file_analysis_cache.get(upload_id, {}) or {}).get(
+                    "body_count"
+                ),
             },
             status_code=504,
         )
@@ -1099,7 +1108,9 @@ async def analyze_for_process(
                 "message": str(e),
                 "dfm_report": failure_report,
                 "overlay_paths": {},
-                "body_count": _file_analysis_cache.get(upload_id, {}).get("body_count"),
+                "body_count": (_file_analysis_cache.get(upload_id, {}) or {}).get(
+                    "body_count"
+                ),
             },
             status_code=500,
         )
