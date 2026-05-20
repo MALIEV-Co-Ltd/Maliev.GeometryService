@@ -60,7 +60,7 @@ from src.core.schemas import (
 )
 from src.infrastructure.auth import ServiceAccountTokenProvider
 from src.infrastructure.event_publisher import initialize_event_publisher, publish_event
-from src.infrastructure.storage import IStorageService
+from src.infrastructure.storage import IStorageService, normalize_download_url
 from src.infrastructure.upload_cache import (
     get_cached_tessellation,
     put_tessellation_fire_and_forget,
@@ -1167,7 +1167,7 @@ class UploadConsumer:
         """  # noqa: E501
         try:
             # T4a: reuse the shared client instead of creating a fresh one.
-            response = await self._http_client.head(url)
+            response = await self._http_client.head(normalize_download_url(url))
             content_length = response.headers.get("Content-Length")
             if content_length:
                 size_mb = int(content_length) / (1024 * 1024)

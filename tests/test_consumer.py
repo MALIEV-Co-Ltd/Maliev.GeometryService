@@ -5,7 +5,9 @@ from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
+import httpx
 import pytest
+import respx
 
 from src.consumers.upload_consumer import ArtifactProcessingJob, UploadConsumer
 from src.core.geometry import BoundingBox, GeometryMetrics
@@ -61,6 +63,28 @@ def mock_processor():
 @pytest.fixture
 def consumer(mock_storage, mock_processor):
     return UploadConsumer(mock_storage, mock_processor)
+
+
+@pytest.mark.asyncio
+async def test_validate_file_size_before_download_normalizes_mock_storage_url(
+    consumer, monkeypatch
+):
+    monkeypatch.setattr(
+        "src.infrastructure.storage.settings.UPLOAD_SERVICE_URL",
+        "http://aspire.dev.internal:45389",
+    )
+    original_url = "http://localhost:55333/upload/v1/mock-storage/token-123"
+    normalized_url = "http://aspire.dev.internal:45389/upload/v1/mock-storage/token-123"
+
+    with respx.mock:
+        route = respx.head(normalized_url).mock(
+            return_value=httpx.Response(200, headers={"Content-Length": "1024"})
+        )
+
+        assert await consumer.validate_file_size_before_download(original_url)
+        assert route.called
+
+    await consumer.stop()
 
 
 class _TrackedMessageProcess:
