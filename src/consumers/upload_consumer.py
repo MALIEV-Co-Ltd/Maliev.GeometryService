@@ -298,8 +298,6 @@ class UploadConsumer:
                         "stl",
                         "obj",
                         "3mf",
-                        "blend",
-                        "fbx",
                         "gltf",
                         "glb",
                     ]
