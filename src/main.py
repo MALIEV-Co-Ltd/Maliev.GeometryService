@@ -1,6 +1,7 @@
 import asyncio
 import base64
 import faulthandler
+import hashlib
 import logging
 import os
 import sys
@@ -8,6 +9,7 @@ import time
 from collections import OrderedDict
 from collections.abc import AsyncGenerator, Awaitable, Callable
 from contextlib import asynccontextmanager, suppress
+from pathlib import Path
 from typing import Any
 
 import jwt
@@ -152,6 +154,17 @@ _PUBLIC_PATHS = {
     "/geometry/openapi/v1.json",
 }
 
+_CLIENT_RUNTIME_PREFIX = "/geometry/client-runtime/"
+_CLIENT_RUNTIME_VERSION = "0.1.0"
+_CLIENT_RUNTIME_ALGORITHM_VERSION = "mesh-advisory-v1"
+_CLIENT_RUNTIME_WORKER_BASENAME = "client-geometry-runtime.worker.js"
+_CLIENT_RUNTIME_DIR = Path(__file__).resolve().parent / "client_runtime"
+_CLIENT_RUNTIME_WORKER_PATH = _CLIENT_RUNTIME_DIR / _CLIENT_RUNTIME_WORKER_BASENAME
+
+
+def _is_public_path(path: str) -> bool:
+    return path in _PUBLIC_PATHS or path.startswith(_CLIENT_RUNTIME_PREFIX)
+
 
 def _is_development_or_testing() -> bool:
     environment = (
@@ -201,7 +214,7 @@ async def require_geometry_auth(
     call_next: Callable[[Request], Awaitable[Response]],
 ) -> Response:
     """Require platform bearer tokens for non-health GeometryService routes."""
-    if not settings.GEOMETRY_REQUIRE_AUTH or request.url.path in _PUBLIC_PATHS:
+    if not settings.GEOMETRY_REQUIRE_AUTH or _is_public_path(request.url.path):
         return await call_next(request)
 
     authorization = request.headers.get("authorization")
@@ -286,6 +299,57 @@ async def telemetry_test() -> JSONResponse:
             "service": "maliev-geometryservice",
         }
     )
+
+
+def _client_runtime_worker_asset_name() -> str:
+    worker_bytes = _CLIENT_RUNTIME_WORKER_PATH.read_bytes()
+    digest = hashlib.sha256(worker_bytes).hexdigest()[:16]
+    return f"client-geometry-runtime.{digest}.worker.js"
+
+
+@router.get("/client-runtime/manifest.json", tags=["Client Runtime"])
+async def client_runtime_manifest() -> JSONResponse:
+    """Return the browser advisory geometry runtime manifest."""
+    worker_asset_name = _client_runtime_worker_asset_name()
+    response = JSONResponse(
+        content={
+            "runtimeVersion": _CLIENT_RUNTIME_VERSION,
+            "algorithmVersion": _CLIENT_RUNTIME_ALGORITHM_VERSION,
+            "authority": "advisory",
+            "isAuthoritative": False,
+            "minFrontendApiVersion": 1,
+            "assets": {
+                "worker": f"/geometry/client-runtime/assets/{worker_asset_name}",
+            },
+            "capabilities": {
+                "meshBuffers": True,
+                "binaryStl": True,
+                "asciiStl": True,
+                "cadBrep": False,
+                "serverArtifacts": False,
+            },
+        }
+    )
+    response.headers["Cache-Control"] = "no-cache"
+    return response
+
+
+@router.get("/client-runtime/assets/{asset_name}", tags=["Client Runtime"])
+async def client_runtime_asset(asset_name: str) -> Response:
+    """Serve content-hashed browser advisory geometry runtime assets."""
+    expected_name = _client_runtime_worker_asset_name()
+    if asset_name != expected_name:
+        return JSONResponse(
+            content={"detail": "Runtime asset not found"},
+            status_code=404,
+        )
+
+    response = Response(
+        content=_CLIENT_RUNTIME_WORKER_PATH.read_bytes(),
+        media_type="text/javascript; charset=utf-8",
+    )
+    response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+    return response
 
 
 # ---------------------------------------------------------------------------

@@ -76,3 +76,46 @@ def test_telemetry_test_with_auth():
 def test_root_health():
     response = client.get("/liveness")
     assert response.status_code == 200
+
+
+def test_client_runtime_manifest_is_public_and_not_cached():
+    response = client.get("/geometry/client-runtime/manifest.json")
+
+    assert response.status_code == 200
+    assert response.headers["cache-control"] == "no-cache"
+
+    body = response.json()
+    assert body["runtimeVersion"] == "0.1.0"
+    assert body["algorithmVersion"] == "mesh-advisory-v1"
+    assert body["authority"] == "advisory"
+    assert body["assets"]["worker"].startswith(
+        "/geometry/client-runtime/assets/client-geometry-runtime."
+    )
+    assert body["assets"]["worker"].endswith(".worker.js")
+    assert body["capabilities"] == {
+        "meshBuffers": True,
+        "binaryStl": True,
+        "asciiStl": True,
+        "cadBrep": False,
+        "serverArtifacts": False,
+    }
+
+
+def test_client_runtime_worker_asset_is_hash_named_and_immutable():
+    manifest = client.get("/geometry/client-runtime/manifest.json").json()
+    asset_url = manifest["assets"]["worker"]
+
+    response = client.get(asset_url)
+
+    assert response.status_code == 200
+    assert response.headers["cache-control"] == "public, max-age=31536000, immutable"
+    assert response.headers["content-type"].startswith("text/javascript")
+    assert "MALIEV_BROWSER_GEOMETRY_RUNTIME_VERSION" in response.text
+
+
+def test_client_runtime_missing_asset_returns_404():
+    response = client.get(
+        "/geometry/client-runtime/assets/client-geometry-runtime.deadbeef.worker.js"
+    )
+
+    assert response.status_code == 404
