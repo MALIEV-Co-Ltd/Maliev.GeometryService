@@ -129,6 +129,7 @@ def test_client_runtime_manifest_is_public_and_not_cached():
         "binaryStl": True,
         "asciiStl": True,
         "obj": True,
+        "glb": True,
     }
     assert body["capabilities"]["localOperations"] == [
         "mesh_metrics",

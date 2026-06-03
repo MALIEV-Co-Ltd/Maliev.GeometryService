@@ -413,6 +413,7 @@ async def client_runtime_manifest() -> JSONResponse:
                     "binaryStl": True,
                     "asciiStl": True,
                     "obj": True,
+                    "glb": True,
                 },
                 "localOperations": [
                     "mesh_metrics",

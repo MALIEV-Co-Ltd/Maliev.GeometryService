@@ -78,13 +78,16 @@ function meshFromFile(fileBytes, fileName) {
     ? fileBytes
     : new Uint8Array(fileBytes);
   const lowerName = String(fileName || "").toLowerCase();
+  if (lowerName.endsWith(".glb") || looksLikeGlb(bytes)) {
+    return parseGlb(bytes);
+  }
   if (lowerName.endsWith(".obj") || looksLikeObj(bytes)) {
     return parseObj(bytes);
   }
   if (lowerName.endsWith(".stl") || looksLikeStl(bytes)) {
     return parseStl(bytes);
   }
-  throw new Error("Browser advisory runtime v1 supports STL/OBJ bytes or viewer mesh buffers.");
+  throw new Error("Browser advisory runtime v1 supports STL/OBJ/GLB bytes or viewer mesh buffers.");
 }
 
 function looksLikeStl(bytes) {
@@ -198,6 +201,134 @@ function appendObjVertex(sourceVertices, positions, indices, sourceIndex) {
   if (!vertex) return;
   positions.push(vertex[0], vertex[1], vertex[2]);
   indices.push(indices.length);
+}
+
+function looksLikeGlb(bytes) {
+  if (bytes.length < 20) return false;
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  return view.getUint32(0, true) === 0x46546c67 && view.getUint32(4, true) === 2;
+}
+
+function parseGlb(bytes) {
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  if (view.getUint32(0, true) !== 0x46546c67) {
+    throw new Error("GLB magic header is invalid.");
+  }
+  if (view.getUint32(4, true) !== 2) {
+    throw new Error("Browser advisory runtime supports GLB version 2 only.");
+  }
+
+  const totalLength = view.getUint32(8, true);
+  const chunks = readGlbChunks(bytes, Math.min(totalLength, bytes.length));
+  const jsonBytes = chunks.get("JSON");
+  const binBytes = chunks.get("BIN");
+  if (!jsonBytes || !binBytes) {
+    throw new Error("GLB must include JSON and BIN chunks.");
+  }
+
+  const gltf = JSON.parse(new TextDecoder("utf-8").decode(jsonBytes).trim());
+  const positions = [];
+  const indices = [];
+
+  for (const mesh of gltf.meshes || []) {
+    for (const primitive of mesh.primitives || []) {
+      const positionAccessorIndex = primitive.attributes?.POSITION;
+      if (positionAccessorIndex === undefined) continue;
+      const primitivePositions = readGlbAccessorVec3(gltf, binBytes, positionAccessorIndex);
+      const primitiveIndices = primitive.indices === undefined
+        ? sequentialIndices(primitivePositions.length / 3)
+        : readGlbAccessorScalars(gltf, binBytes, primitive.indices);
+      const baseVertex = positions.length / 3;
+      positions.push(...primitivePositions);
+      for (const index of primitiveIndices) indices.push(baseVertex + index);
+    }
+  }
+
+  if (positions.length === 0 || indices.length === 0) {
+    throw new Error("GLB did not contain mesh primitive triangle data.");
+  }
+  return { positions, indices };
+}
+
+function readGlbChunks(bytes, totalLength) {
+  const chunks = new Map();
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  let offset = 12;
+  while (offset + 8 <= totalLength) {
+    const chunkLength = view.getUint32(offset, true);
+    const chunkType = view.getUint32(offset + 4, true);
+    offset += 8;
+    if (offset + chunkLength > bytes.length) break;
+    const chunkBytes = bytes.slice(offset, offset + chunkLength);
+    if (chunkType === 0x4e4f534a) chunks.set("JSON", chunkBytes);
+    if (chunkType === 0x004e4942) chunks.set("BIN", chunkBytes);
+    offset += chunkLength;
+  }
+  return chunks;
+}
+
+function sequentialIndices(count) {
+  return Array.from({ length: count }, (_, index) => index);
+}
+
+function readGlbAccessorVec3(gltf, binBytes, accessorIndex) {
+  const accessor = gltf.accessors?.[accessorIndex];
+  if (!accessor || accessor.type !== "VEC3" || accessor.componentType !== 5126) {
+    throw new Error("GLB POSITION accessor must be VEC3 float32.");
+  }
+  const { view, start, stride } = glbAccessorView(gltf, binBytes, accessor);
+  const values = [];
+  for (let index = 0; index < accessor.count; index += 1) {
+    const offset = start + index * stride;
+    values.push(
+      view.getFloat32(offset, true),
+      view.getFloat32(offset + 4, true),
+      view.getFloat32(offset + 8, true)
+    );
+  }
+  return values;
+}
+
+function readGlbAccessorScalars(gltf, binBytes, accessorIndex) {
+  const accessor = gltf.accessors?.[accessorIndex];
+  if (!accessor || accessor.type !== "SCALAR") {
+    throw new Error("GLB index accessor must be scalar.");
+  }
+  const { view, start, stride } = glbAccessorView(gltf, binBytes, accessor);
+  const reader = glbScalarReader(view, accessor.componentType);
+  const values = [];
+  for (let index = 0; index < accessor.count; index += 1) {
+    values.push(reader(start + index * stride));
+  }
+  return values;
+}
+
+function glbAccessorView(gltf, binBytes, accessor) {
+  const bufferView = gltf.bufferViews?.[accessor.bufferView];
+  if (!bufferView || bufferView.buffer !== 0) {
+    throw new Error("GLB accessor must reference the embedded BIN buffer.");
+  }
+  const componentSize = glbComponentSize(accessor.componentType);
+  const typeWidth = accessor.type === "VEC3" ? 3 : 1;
+  return {
+    view: new DataView(binBytes.buffer, binBytes.byteOffset, binBytes.byteLength),
+    start: (bufferView.byteOffset || 0) + (accessor.byteOffset || 0),
+    stride: bufferView.byteStride || componentSize * typeWidth
+  };
+}
+
+function glbComponentSize(componentType) {
+  if (componentType === 5120 || componentType === 5121) return 1;
+  if (componentType === 5122 || componentType === 5123) return 2;
+  if (componentType === 5125 || componentType === 5126) return 4;
+  throw new Error(`Unsupported GLB accessor component type: ${componentType}`);
+}
+
+function glbScalarReader(view, componentType) {
+  if (componentType === 5121) return offset => view.getUint8(offset);
+  if (componentType === 5123) return offset => view.getUint16(offset, true);
+  if (componentType === 5125) return offset => view.getUint32(offset, true);
+  throw new Error("GLB indices must use unsigned byte, unsigned short, or unsigned int components.");
 }
 
 function computeMetrics(mesh) {
