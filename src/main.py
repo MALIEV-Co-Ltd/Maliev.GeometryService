@@ -10,7 +10,7 @@ from collections import OrderedDict
 from collections.abc import AsyncGenerator, Awaitable, Callable
 from contextlib import asynccontextmanager, suppress
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeVar
 
 import jwt
 
@@ -25,7 +25,7 @@ from starlette.responses import Response
 from src.consumers.upload_consumer import UploadConsumer
 from src.core.config import settings
 from src.core.geometry import GeometryProcessor
-from src.core.observability import setup_observability
+from src.core.observability import meter, setup_observability
 from src.infrastructure.event_publisher import publish_event
 from src.infrastructure.iam_registration import register_iam_permissions
 from src.infrastructure.storage import HttpDownloadService
@@ -155,6 +155,7 @@ _PUBLIC_PATHS = {
 }
 
 _CLIENT_RUNTIME_PREFIX = "/geometry/client-runtime/"
+_ResponseT = TypeVar("_ResponseT", bound=Response)
 _CLIENT_RUNTIME_MANIFEST_VERSION = 1
 _CLIENT_RUNTIME_VERSION = "1.0.0"
 _CLIENT_RUNTIME_ALGORITHM_VERSION = "browser-first-dfm-v1"
@@ -178,6 +179,42 @@ _CLIENT_RUNTIME_DEVICE_PROFILES = {
         "timeoutMs": 20_000,
     },
 }
+
+_CLIENT_RUNTIME_DELIVERY_COUNTER = meter.create_counter(
+    "geometry.client_runtime.delivery.requests",
+    description="Counts browser-first geometry runtime manifest and asset delivery.",
+)
+_SERVER_DFM_COUNTER = meter.create_counter(
+    "geometry.server_dfm.requests",
+    description="Counts GeometryService DFM requests that consume server CPU.",
+)
+
+
+def _add_local_runtime_headers(response: _ResponseT) -> _ResponseT:
+    response.headers["X-Maliev-Geometry-Execution-Mode"] = "primary_interactive"
+    response.headers["X-Maliev-Geometry-Authority"] = "local_primary"
+    response.headers["X-Maliev-Geometry-Server-Role"] = (
+        "fallback_and_final_validation"
+    )
+    return response
+
+
+def _add_server_dfm_headers(
+    response: _ResponseT,
+    process_code: str,
+    cache_status: str | None = None,
+) -> _ResponseT:
+    response.headers["X-Maliev-Geometry-Execution-Mode"] = (
+        "server_fallback_final_validation"
+    )
+    response.headers["X-Maliev-Geometry-Authority"] = "server_authoritative"
+    response.headers["X-Maliev-Geometry-Server-Role"] = (
+        "fallback_and_final_validation"
+    )
+    response.headers["X-Maliev-Geometry-Process-Code"] = process_code
+    if cache_status:
+        response.headers["X-Maliev-Geometry-Cache-Status"] = cache_status
+    return response
 
 
 def _is_public_path(path: str) -> bool:
@@ -328,6 +365,14 @@ def _client_runtime_worker_asset_name() -> str:
 @router.get("/client-runtime/manifest.json", tags=["Client Runtime"])
 async def client_runtime_manifest() -> JSONResponse:
     """Return the browser-first geometry runtime manifest."""
+    _CLIENT_RUNTIME_DELIVERY_COUNTER.add(
+        1,
+        {
+            "asset_type": "manifest",
+            "execution_mode": "primary_interactive",
+            "authority": "local_primary",
+        },
+    )
     worker_asset_name = _client_runtime_worker_asset_name()
     response = JSONResponse(
         content={
@@ -374,7 +419,7 @@ async def client_runtime_manifest() -> JSONResponse:
         }
     )
     response.headers["Cache-Control"] = "no-cache"
-    return response
+    return _add_local_runtime_headers(response)
 
 
 @router.get("/client-runtime/assets/{asset_name}", tags=["Client Runtime"])
@@ -387,12 +432,20 @@ async def client_runtime_asset(asset_name: str) -> Response:
             status_code=404,
         )
 
+    _CLIENT_RUNTIME_DELIVERY_COUNTER.add(
+        1,
+        {
+            "asset_type": "worker",
+            "execution_mode": "primary_interactive",
+            "authority": "local_primary",
+        },
+    )
     response = Response(
         content=_CLIENT_RUNTIME_WORKER_PATH.read_bytes(),
         media_type="text/javascript; charset=utf-8",
     )
     response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
-    return response
+    return _add_local_runtime_headers(response)
 
 
 # ---------------------------------------------------------------------------
@@ -721,6 +774,24 @@ async def analyze_for_process(
             }
         )
 
+    def build_dfm_response(
+        content: dict[str, Any],
+        status_code: int = 200,
+        cache_status: str | None = None,
+    ) -> JSONResponse:
+        response = JSONResponse(content=content, status_code=status_code)
+        _SERVER_DFM_COUNTER.add(
+            1,
+            {
+                "process_code": process_code,
+                "status_code": status_code,
+                "cache_status": cache_status or "none",
+                "execution_mode": "server_fallback_final_validation",
+                "authority": "server_authoritative",
+            },
+        )
+        return _add_server_dfm_headers(response, process_code, cache_status)
+
     async def publish_dfm_ready_event(
         result: dict[str, Any], overlay_paths: dict[str, str] | None = None
     ) -> None:
@@ -779,8 +850,8 @@ async def analyze_for_process(
     # Cache miss: need to re-download from GCS
     if upload_id not in _file_analysis_cache:
         if not storage_path and not download_url:
-            return JSONResponse(
-                content={
+            return build_dfm_response(
+                {
                     "upload_id": upload_id,
                     "status": "error",
                     "error_type": "NotFound",
@@ -792,8 +863,8 @@ async def analyze_for_process(
         # Re-download from GCS
         try:
             if not download_url:
-                return JSONResponse(
-                    content={
+                return build_dfm_response(
+                    {
                         "upload_id": upload_id,
                         "status": "error",
                         "error_type": "BadRequest",
@@ -825,8 +896,8 @@ async def analyze_for_process(
                     _metrics = await _loop.run_in_executor(None, _cmw, data, _ext)
                     _stl = _metrics.get("mesh_stl_bytes") or b""
                     if not _stl:
-                        return JSONResponse(
-                            content={
+                        return build_dfm_response(
+                            {
                                 "upload_id": upload_id,
                                 "status": "error",
                                 "error_type": "TessellationFailed",
@@ -901,8 +972,8 @@ async def analyze_for_process(
                     f"Permanent download failure for {upload_id} — file is gone from storage: {e}",  # noqa: E501
                     extra={"upload_id": upload_id},
                 )
-                return JSONResponse(
-                    content={
+                return build_dfm_response(
+                    {
                         "upload_id": upload_id,
                         "status": "file_missing",
                         "error_type": "FileMissing",
@@ -916,8 +987,8 @@ async def analyze_for_process(
                 extra={"upload_id": upload_id},
                 exc_info=True,
             )
-            return JSONResponse(
-                content={
+            return build_dfm_response(
+                {
                     "upload_id": upload_id,
                     "status": "error",
                     "error_type": type(e).__name__,
@@ -1021,8 +1092,8 @@ async def analyze_for_process(
                         extra={"upload_id": upload_id, "process_code": process_code},
                         exc_info=True,
                     )
-                return JSONResponse(
-                    content={
+                return build_dfm_response(
+                    {
                         "upload_id": upload_id,
                         "process_code": process_code,
                         "status": "error",
@@ -1032,6 +1103,7 @@ async def analyze_for_process(
                         "body_count": file_data.get("body_count"),
                     },
                     status_code=500,
+                    cache_status="cold",
                 )
 
             logger.info(
@@ -1131,8 +1203,8 @@ async def analyze_for_process(
                 exc_info=True,
             )
 
-        return JSONResponse(
-            content={
+        return build_dfm_response(
+            {
                 "upload_id": upload_id,
                 "process_code": process_code,
                 "status": "analysis_complete",
@@ -1140,7 +1212,8 @@ async def analyze_for_process(
                 "overlay_paths": overlay_paths or {},
                 "cache_status": cache_status,
                 "body_count": file_data.get("body_count"),
-            }
+            },
+            cache_status=cache_status,
         )
 
     except asyncio.TimeoutError:
@@ -1165,8 +1238,8 @@ async def analyze_for_process(
                 extra={"upload_id": upload_id, "process_code": process_code},
                 exc_info=True,
             )
-        return JSONResponse(
-            content={
+        return build_dfm_response(
+            {
                 "upload_id": upload_id,
                 "process_code": process_code,
                 "status": "timeout",
@@ -1181,6 +1254,7 @@ async def analyze_for_process(
                 ),
             },
             status_code=504,
+            cache_status="cold",
         )
 
     except Exception as e:
@@ -1206,8 +1280,8 @@ async def analyze_for_process(
                 extra={"upload_id": upload_id, "process_code": process_code},
                 exc_info=True,
             )
-        return JSONResponse(
-            content={
+        return build_dfm_response(
+            {
                 "upload_id": upload_id,
                 "process_code": process_code,
                 "status": "error",
@@ -1220,6 +1294,7 @@ async def analyze_for_process(
                 ),
             },
             status_code=500,
+            cache_status="cold",
         )
 
 

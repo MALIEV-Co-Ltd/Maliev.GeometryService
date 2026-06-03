@@ -83,6 +83,13 @@ def test_client_runtime_manifest_is_public_and_not_cached():
 
     assert response.status_code == 200
     assert response.headers["cache-control"] == "no-cache"
+    assert response.headers["x-maliev-geometry-execution-mode"] == (
+        "primary_interactive"
+    )
+    assert response.headers["x-maliev-geometry-authority"] == "local_primary"
+    assert response.headers["x-maliev-geometry-server-role"] == (
+        "fallback_and_final_validation"
+    )
 
     body = response.json()
     assert body["manifestVersion"] == 1
@@ -150,6 +157,13 @@ def test_client_runtime_worker_asset_is_hash_named_and_immutable():
     assert response.status_code == 200
     assert response.headers["cache-control"] == "public, max-age=31536000, immutable"
     assert response.headers["content-type"].startswith("text/javascript")
+    assert response.headers["x-maliev-geometry-execution-mode"] == (
+        "primary_interactive"
+    )
+    assert response.headers["x-maliev-geometry-authority"] == "local_primary"
+    assert response.headers["x-maliev-geometry-server-role"] == (
+        "fallback_and_final_validation"
+    )
     assert "MALIEV_BROWSER_GEOMETRY_RUNTIME_VERSION" in response.text
     assert "primary_interactive" in response.text
 

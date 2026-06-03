@@ -121,6 +121,15 @@ class TestProcessAnalysisAPI:
 
         # Should return success
         assert response.status_code == 200
+        assert response.headers["x-maliev-geometry-execution-mode"] == (
+            "server_fallback_final_validation"
+        )
+        assert response.headers["x-maliev-geometry-authority"] == "server_authoritative"
+        assert response.headers["x-maliev-geometry-server-role"] == (
+            "fallback_and_final_validation"
+        )
+        assert response.headers["x-maliev-geometry-process-code"] == "FDM"
+        assert response.headers["x-maliev-geometry-cache-status"] == "cold"
         data = response.body.decode()
         assert "analysis_complete" in data
         assert "FDM" in data
@@ -133,6 +142,14 @@ class TestProcessAnalysisAPI:
 
         # Should return 404 - upload not found
         assert response.status_code == 404
+        assert response.headers["x-maliev-geometry-execution-mode"] == (
+            "server_fallback_final_validation"
+        )
+        assert response.headers["x-maliev-geometry-authority"] == "server_authoritative"
+        assert response.headers["x-maliev-geometry-server-role"] == (
+            "fallback_and_final_validation"
+        )
+        assert response.headers["x-maliev-geometry-process-code"] == "FDM"
         data = response.body.decode()
         assert "NotFound" in data
 
