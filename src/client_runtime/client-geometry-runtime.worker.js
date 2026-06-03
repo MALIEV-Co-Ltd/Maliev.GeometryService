@@ -24,6 +24,8 @@ async function analyze(input, processCode) {
   const metrics = computeMetrics(mesh);
   const inputHash = await hashMesh(mesh);
   const issues = buildIssues(metrics, processCode);
+  const publicMetrics = { ...metrics };
+  delete publicMetrics.triangles;
 
   return {
     runtimeVersion: MALIEV_BROWSER_GEOMETRY_RUNTIME_VERSION,
@@ -35,7 +37,7 @@ async function analyze(input, processCode) {
     status: "analysis_complete",
     processCode,
     inputHash,
-    metrics,
+    metrics: publicMetrics,
     issues,
     localOverlayHints: buildLocalOverlayHints(issues)
   };
@@ -160,8 +162,12 @@ function computeMetrics(mesh) {
   let area = 0;
   let signedVolume = 0;
   const edgeCounts = new Map();
+  const triangles = [];
+  const minZ = min[2];
+  const zTolerance = Math.max(0.01, (max[2] - min[2]) * 0.001);
 
   for (let index = 0; index < indices.length; index += 3) {
+    const faceIndex = index / 3;
     const ia = indices[index] * 3;
     const ib = indices[index + 1] * 3;
     const ic = indices[index + 2] * 3;
@@ -171,11 +177,32 @@ function computeMetrics(mesh) {
     const ab = subtract(b, a);
     const ac = subtract(c, a);
     const cross = crossProduct(ab, ac);
-    area += vectorLength(cross) / 2;
+    const crossLength = vectorLength(cross);
+    const faceArea = crossLength / 2;
+    const normal = crossLength > 0
+      ? [cross[0] / crossLength, cross[1] / crossLength, cross[2] / crossLength]
+      : [0, 0, 0];
+    const centroid = [
+      (a[0] + b[0] + c[0]) / 3,
+      (a[1] + b[1] + c[1]) / 3,
+      (a[2] + b[2] + c[2]) / 3
+    ];
+    const touchesBuildPlate = a[2] <= minZ + zTolerance
+      && b[2] <= minZ + zTolerance
+      && c[2] <= minZ + zTolerance;
+
+    area += faceArea;
     signedVolume += dot(a, crossProduct(b, c)) / 6;
     countEdge(edgeCounts, indices[index], indices[index + 1]);
     countEdge(edgeCounts, indices[index + 1], indices[index + 2]);
     countEdge(edgeCounts, indices[index + 2], indices[index]);
+    triangles.push({
+      faceIndex,
+      areaMm2: faceArea,
+      normal,
+      centroid,
+      touchesBuildPlate
+    });
   }
 
   const nonManifoldEdgeCount = Array.from(edgeCounts.values()).filter(count => count !== 2).length;
@@ -189,6 +216,7 @@ function computeMetrics(mesh) {
     boundingBox: { x: extents[0], y: extents[1], z: extents[2] },
     isManifold: nonManifoldEdgeCount === 0,
     nonManifoldEdgeCount,
+    triangles,
     isEmpty: indices.length === 0,
     complexity: complexityFor(indices.length / 3)
   };
@@ -203,6 +231,7 @@ function emptyMetrics() {
     boundingBox: { x: 0, y: 0, z: 0 },
     isManifold: false,
     nonManifoldEdgeCount: 0,
+    triangles: [],
     isEmpty: true,
     complexity: "empty"
   };
@@ -218,16 +247,36 @@ function buildIssues(metrics, processCode) {
   }
 
   const minExtent = Math.min(metrics.boundingBox.x, metrics.boundingBox.y, metrics.boundingBox.z);
-  const printing = ["FDM", "SLA", "SLS", "MJF", "MJ", "BJ", "DMLS", "SLA_DLP", "DLP"].includes(String(processCode).toUpperCase());
+  const normalizedProcess = String(processCode).toUpperCase();
+  const printing = ["FDM", "SLA", "SLS", "MJF", "MJ", "BJ", "DMLS", "SLA_DLP", "DLP"].includes(normalizedProcess);
   if (printing && minExtent > 0 && minExtent < 0.8) {
     issues.push(issue("thin_wall", "warning", "Thin feature risk", "One model dimension is below the 0.8 mm local advisory threshold.", minExtent, 0.8));
+  }
+
+  const supportProcesses = ["FDM", "SLA", "SLA_DLP", "DLP"];
+  if (supportProcesses.includes(normalizedProcess)) {
+    const overhangFaces = metrics.triangles
+      .filter(triangle => !triangle.touchesBuildPlate && triangle.normal[2] < -0.5);
+    if (overhangFaces.length > 0) {
+      const overhangAreaMm2 = overhangFaces.reduce((sum, triangle) => sum + triangle.areaMm2, 0);
+      issues.push(issue(
+        "overhang",
+        "warning",
+        "Local support risk",
+        "Local analysis found downward-facing faces that may require supports. Server GeometryService remains authoritative.",
+        overhangAreaMm2 / 100,
+        0,
+        overhangFaces.map(triangle => triangle.faceIndex),
+        averageCentroid(overhangFaces)
+      ));
+    }
   }
 
   return issues;
 }
 
-function issue(category, severity, title, description, value, threshold) {
-  return { category, severity, title, description, value, threshold, faceIndices: [], centroid: [] };
+function issue(category, severity, title, description, value, threshold, faceIndices = [], centroid = []) {
+  return { category, severity, title, description, value, threshold, faceIndices, centroid };
 }
 
 function buildLocalOverlayHints(issues) {
@@ -271,6 +320,16 @@ function dot(a, b) {
 
 function vectorLength(v) {
   return Math.hypot(v[0], v[1], v[2]);
+}
+
+function averageCentroid(triangles) {
+  if (triangles.length === 0) return [];
+  const total = triangles.reduce((sum, triangle) => [
+    sum[0] + triangle.centroid[0],
+    sum[1] + triangle.centroid[1],
+    sum[2] + triangle.centroid[2]
+  ], [0, 0, 0]);
+  return total.map(value => value / triangles.length);
 }
 
 async function hashMesh(mesh) {
