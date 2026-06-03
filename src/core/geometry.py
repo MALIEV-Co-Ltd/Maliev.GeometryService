@@ -1660,7 +1660,11 @@ def _scale_meshes_to_mm_if_meter_scale(meshes: list[trimesh.Trimesh]) -> bool:
     return False
 
 
-def _compute_metrics_worker(data: bytes, file_extension: str) -> dict[str, Any]:
+def _compute_metrics_worker(
+    data: bytes,
+    file_extension: str,
+    include_glb_export: bool = True,
+) -> dict[str, Any]:
     """
     Phase 1 worker: loads mesh, computes metrics, exports mesh to STL bytes.
     Returns metrics dict + 'mesh_stl_bytes' for Phase 2.
@@ -1761,9 +1765,9 @@ def _compute_metrics_worker(data: bytes, file_extension: str) -> dict[str, Any]:
                 scaled = _scale_meshes_to_mm_if_meter_scale(mesh_list)
                 if scaled and metrics_mesh_raw is not None:
                     metrics_mesh_raw.apply_scale(1000.0)  # type: ignore[no-untyped-call]
-                cad_glb_bytes = (
-                    data  # uploaded GLB bytes stay in meters (correct for BabylonJS)
-                )
+                if include_glb_export:
+                    # Uploaded GLB bytes stay in meters, which is correct for BabylonJS.
+                    cad_glb_bytes = data
 
         if not mesh_list:
             raise ValueError("FILE_CORRUPT: No valid meshes found")
@@ -1869,7 +1873,11 @@ def _compute_metrics_worker(data: bytes, file_extension: str) -> dict[str, Any]:
         # STEP/IGES already have cad_glb_bytes from cascadio.
         # Uploaded GLBs use the original bytes.
         # STL/OBJ/3MF: export the processed mesh to GLB.
-        if not cad_glb_bytes and ext not in ("step", "stp", "igs", "iges"):
+        if (
+            include_glb_export
+            and not cad_glb_bytes
+            and ext not in ("step", "stp", "igs", "iges")
+        ):
             try:
                 if len(mesh_list) > 1:
                     cad_glb_bytes = _export_multibody_scene_glb(mesh_list, body_names)

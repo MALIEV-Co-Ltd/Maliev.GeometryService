@@ -435,12 +435,16 @@ class UploadConsumer:
                             if cached_metrics is not None:
                                 metrics_result = cached_metrics
                             else:
+                                include_glb_export = (
+                                    _browser_viewer_source_extension(file_ext) is None
+                                )
                                 metrics_result = await asyncio.wait_for(
                                     loop.run_in_executor(
                                         executor,
                                         _compute_metrics_worker,
                                         data,
                                         file_ext,
+                                        include_glb_export,
                                     ),
                                     timeout=PHASE1_TIMEOUT_SECONDS,
                                 )
@@ -686,6 +690,37 @@ class UploadConsumer:
         )
 
         if not cad_glb_bytes:
+            if _browser_viewer_source_extension(file_ext) is not None:
+                temp_dir = Path(tempfile.mkdtemp(prefix="geom_"))
+                job = ArtifactProcessingJob(
+                    file_id=file_id,
+                    upload_id=upload_id,
+                    storage_path=storage_path,
+                    file_ext=file_ext,
+                    file_name=file_name,
+                    file_size=file_size,
+                    correlation_id=correlation_id,
+                    metrics=metrics,
+                    body_count=body_count,
+                    body_infos=body_infos,
+                    temp_dir=temp_dir,
+                    cad_glb_path=temp_dir / "cad.glb",
+                    executor=self.geometry_processor.executor,
+                    queued_at=time.perf_counter(),
+                )
+                task = asyncio.create_task(self._run_artifact_job(job))
+                self._track_artifact_task(task, job)
+                logger.info(
+                    "Phase 2 browser viewer source job scheduled "
+                    "without server GLB bytes",
+                    extra={
+                        "event": "phase2_browser_source_no_glb_scheduled",
+                        "file_id": file_id,
+                        "active_artifact_tasks": len(self._artifact_tasks),
+                    },
+                )
+                return
+
             logger.warning(
                 "No GLB bytes available from Phase 1; artifact job not scheduled",
                 extra={"event": "phase2_skip", "file_id": file_id},

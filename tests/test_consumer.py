@@ -220,6 +220,43 @@ async def test_process_message_acks_after_metrics_without_waiting_for_artifacts(
 
 
 @pytest.mark.asyncio
+async def test_process_message_requests_no_glb_metrics_for_browser_viewable_mesh(
+    consumer: UploadConsumer,
+    mock_storage: AsyncMock,
+) -> None:
+    message = _build_upload_message("direct.stl")
+    message.process.return_value = _TrackedMessageProcess([])
+    mock_storage.download_file.return_value = io.BytesIO(b"fake-stl-content")
+    consumer.publish_event = AsyncMock()
+    consumer.validate_file_size_before_download = AsyncMock(return_value=True)
+    consumer._schedule_artifact_job_from_metrics = AsyncMock()  # type: ignore[method-assign]
+
+    captured_args: tuple[object, ...] | None = None
+    real_loop = asyncio.get_event_loop()
+
+    def fake_run_in_executor(executor, fn, *args):  # noqa: ANN001, ARG001
+        nonlocal captured_args
+        if fn.__name__ != "_compute_metrics_worker":
+            raise AssertionError(f"Unexpected executor function: {fn.__name__}")
+        captured_args = args
+        future = real_loop.create_future()
+        future.set_result({**_FAKE_METRICS_RESULT, "cad_glb_bytes": None})
+        return future
+
+    mock_loop = MagicMock(wraps=real_loop)
+    mock_loop.run_in_executor = fake_run_in_executor
+
+    with patch(
+        "src.consumers.upload_consumer.asyncio.get_running_loop",
+        return_value=mock_loop,
+    ):
+        await consumer.process_message(message)
+
+    assert captured_args == (b"fake-stl-content", ".stl", False)
+    consumer._schedule_artifact_job_from_metrics.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_artifact_job_waits_for_viewer_glb_before_secondary_artifacts(
     consumer: UploadConsumer,
     tmp_path,
@@ -388,6 +425,47 @@ async def test_artifact_job_skips_glb_export_for_browser_loadable_mesh(
         "reason": "browser_viewer_source",
         "file_extension": "stl",
     } in recorded
+
+
+@pytest.mark.asyncio
+async def test_schedule_artifact_job_publishes_browser_viewer_source_without_glb_bytes(
+    consumer: UploadConsumer,
+) -> None:
+    metrics_result = {**_FAKE_METRICS_RESULT, "cad_glb_bytes": None}
+    consumer.publish_event = AsyncMock()
+    consumer.publish_failure = AsyncMock()
+
+    await consumer._schedule_artifact_job_from_metrics(
+        metrics_result=metrics_result,
+        metrics=GeometryMetrics(
+            volumeCm3=1.0,
+            supportVolumeCm3=0.0,
+            surfaceAreaCm2=6.0,
+            boundingBox=BoundingBox(x=1.0, y=1.0, z=1.0),
+            isManifold=True,
+            triangleCount=12,
+            eulerNumber=2,
+        ),
+        file_id=str(uuid4()),
+        upload_id=str(uuid4()),
+        storage_path="projects/test/model.stl",
+        file_ext=".stl",
+        file_name="model.stl",
+        file_size=1024,
+        correlation_id=uuid4(),
+        body_count=1,
+        body_infos=None,
+    )
+    await consumer.wait_for_artifact_tasks()
+
+    consumer.publish_failure.assert_not_awaited()
+    consumer.publish_event.assert_awaited_once()
+    completed_event = consumer.publish_event.await_args.args[0]
+    assert completed_event.message.payload.glb_storage_path is None
+    assert completed_event.message.payload.viewer_storage_path == (
+        "projects/test/model.stl"
+    )
+    assert completed_event.message.payload.viewer_file_extension == ".stl"
 
 
 @pytest.mark.asyncio
