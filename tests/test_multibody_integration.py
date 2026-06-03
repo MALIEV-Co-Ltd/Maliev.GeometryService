@@ -203,8 +203,10 @@ class TestMultiBodyMetricsComputation:
             assert 0 in result["mesh_stl_bytes_dict"]
             assert 1 in result["mesh_stl_bytes_dict"]
 
-    def test_metrics_preserves_backward_compat_field(self, two_body_meshes):
-        """Legacy mesh_stl_bytes field should contain first body."""
+    def test_metrics_preserves_backward_compat_field_as_merged_stl(
+        self, two_body_meshes
+    ):
+        """Legacy mesh_stl_bytes field should contain the merged STL."""
         with patch(
             "src.core.geometry._load_cad_with_cascadio_isolated"
         ) as mock_cascadio:
@@ -219,8 +221,13 @@ class TestMultiBodyMetricsComputation:
 
             assert "mesh_stl_bytes" in result
             assert result["mesh_stl_bytes"] is not None
-            # Should be first body
-            assert result["mesh_stl_bytes"] == result["mesh_stl_bytes_dict"][0]
+            merged_mesh = trimesh.load(
+                io.BytesIO(result["mesh_stl_bytes"]),
+                file_type="stl",
+            )
+            assert len(merged_mesh.faces) == sum(
+                len(body_mesh.faces) for body_mesh in two_body_meshes
+            )
 
     def test_metrics_handles_empty_mesh_list(self):
         """Empty mesh list should raise ValueError."""

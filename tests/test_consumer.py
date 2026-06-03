@@ -252,7 +252,7 @@ async def test_process_message_requests_no_glb_metrics_for_browser_viewable_mesh
     ):
         await consumer.process_message(message)
 
-    assert captured_args == (b"fake-stl-content", ".stl", False)
+    assert captured_args == (b"fake-stl-content", ".stl", False, False)
     consumer._schedule_artifact_job_from_metrics.assert_awaited_once()
 
 
@@ -536,7 +536,6 @@ async def test_publish_glb_timeout_uses_source_glb_fallback(
         "projects/test/model.step_viewer.glb"
     )
     assert completed_event.message.payload.viewer_file_extension == ".glb"
-
 
 
 @pytest.mark.asyncio

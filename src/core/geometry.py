@@ -1308,12 +1308,14 @@ def _cascadio_subprocess_load(
     """
     import cascadio
 
-    return int(cascadio.step_to_glb(
-        file_path,
-        glb_output_path,
-        tol_linear=tol_linear,
-        tol_angular=tol_angular,
-    ))
+    return int(
+        cascadio.step_to_glb(
+            file_path,
+            glb_output_path,
+            tol_linear=tol_linear,
+            tol_angular=tol_angular,
+        )
+    )
 
 
 def _load_iges_with_occ(
@@ -1664,10 +1666,11 @@ def _compute_metrics_worker(
     data: bytes,
     file_extension: str,
     include_glb_export: bool = True,
+    include_stl_export: bool = True,
 ) -> dict[str, Any]:
     """
-    Phase 1 worker: loads mesh, computes metrics, exports mesh to STL bytes.
-    Returns metrics dict + 'mesh_stl_bytes' for Phase 2.
+    Phase 1 worker: loads mesh, computes metrics, and optionally exports mesh bytes.
+    Returns metrics dict plus 'mesh_stl_bytes' when Phase 2 DFM needs server STL.
     Runs in a separate process.
     """
     file_stream = io.BytesIO(data)
@@ -1839,35 +1842,36 @@ def _compute_metrics_worker(
 
         support_mm3 = max(0.0, vol_bbox - volume_mm3)
 
-        # Export STL bytes PER BODY (preserve multi-body structure for Phase 3)
         mesh_stl_bytes_dict: dict[int, bytes] = {}
-        for i, body_mesh in enumerate(mesh_list):
+        mesh_stl_bytes: bytes | None = None
+        if include_stl_export:
+            # Export STL bytes PER BODY (preserve multi-body structure for Phase 3)
+            for i, body_mesh in enumerate(mesh_list):
+                try:
+                    stl_bytes = cast(bytes, body_mesh.export(file_type="stl"))
+                    mesh_stl_bytes_dict[i] = stl_bytes
+                except Exception as ex:
+                    logger.warning(
+                        "STL export failed for body %d, Phase 3 may produce degraded results: %s",  # noqa: E501
+                        i,
+                        ex,
+                    )
+                    # If original file was STL, use original bytes for this body
+                    if ext == "stl" and i == 0:
+                        mesh_stl_bytes_dict[i] = data
+
+            # Phase 2 DFM analysis consumes mesh_stl_bytes as a single STL blob.
+            # On multi-body files we must export the MERGED metrics_mesh — using
+            # body 0 alone silently drops bodies 1..N from analysis.
             try:
-                stl_bytes = cast(bytes, body_mesh.export(file_type="stl"))
-                mesh_stl_bytes_dict[i] = stl_bytes
+                mesh_stl_bytes = cast(bytes, metrics_mesh.export(file_type="stl"))
             except Exception as ex:
                 logger.warning(
-                    "STL export failed for body %d, Phase 3 may produce degraded results: %s",  # noqa: E501
-                    i,
-                    ex,
+                    "Merged STL export failed; falling back to body 0 only: %s", ex
                 )
-                # If original file was STL, use original bytes for this body
-                if ext == "stl" and i == 0:
-                    mesh_stl_bytes_dict[i] = data
-
-        # Phase 2 DFM analysis consumes mesh_stl_bytes as a single STL blob.
-        # On multi-body files we must export the MERGED metrics_mesh — using
-        # body 0 alone silently drops bodies 1..N from analysis.
-        mesh_stl_bytes: bytes | None
-        try:
-            mesh_stl_bytes = cast(bytes, metrics_mesh.export(file_type="stl"))
-        except Exception as ex:
-            logger.warning(
-                "Merged STL export failed; falling back to body 0 only: %s", ex
-            )
-            mesh_stl_bytes = (
-                mesh_stl_bytes_dict.get(0) if mesh_stl_bytes_dict else None
-            )
+                mesh_stl_bytes = (
+                    mesh_stl_bytes_dict.get(0) if mesh_stl_bytes_dict else None
+                )
 
         # Export GLB for ALL formats so Phase 2 has a uniform artifact.
         # STEP/IGES already have cad_glb_bytes from cascadio.
@@ -1925,7 +1929,7 @@ def _compute_metrics_worker(
                 for m in mesh_list
             ],
             "mesh_stl_bytes_dict": mesh_stl_bytes_dict,  # Per-body STL bytes
-            "mesh_stl_bytes": mesh_stl_bytes,  # Legacy: first body only
+            "mesh_stl_bytes": mesh_stl_bytes,  # Legacy: merged STL for Phase 2
             "cad_glb_bytes": cad_glb_bytes,
         }
 

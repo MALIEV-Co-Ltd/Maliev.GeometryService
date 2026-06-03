@@ -435,9 +435,12 @@ class UploadConsumer:
                             if cached_metrics is not None:
                                 metrics_result = cached_metrics
                             else:
-                                include_glb_export = (
-                                    _browser_viewer_source_extension(file_ext) is None
+                                use_browser_viewer_source = (
+                                    _browser_viewer_source_extension(file_ext)
+                                    is not None
                                 )
+                                include_glb_export = not use_browser_viewer_source
+                                include_stl_export = not use_browser_viewer_source
                                 metrics_result = await asyncio.wait_for(
                                     loop.run_in_executor(
                                         executor,
@@ -445,6 +448,7 @@ class UploadConsumer:
                                         data,
                                         file_ext,
                                         include_glb_export,
+                                        include_stl_export,
                                     ),
                                     timeout=PHASE1_TIMEOUT_SECONDS,
                                 )
@@ -818,8 +822,8 @@ class UploadConsumer:
                     },
                 )
                 try:
-                    viewer_source_published = (
-                        await self._publish_browser_viewer_source(job)
+                    viewer_source_published = await self._publish_browser_viewer_source(
+                        job
                     )
                     if viewer_source_published:
                         span.set_attribute("artifact.viewer_source", "browser")
