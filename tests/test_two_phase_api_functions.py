@@ -129,10 +129,12 @@ class TestProcessAnalysisAPI:
             "fallback_and_final_validation"
         )
         assert response.headers["x-maliev-geometry-process-code"] == "FDM"
-        assert response.headers["x-maliev-geometry-cache-status"] == "cold"
-        data = response.body.decode()
-        assert "analysis_complete" in data
-        assert "FDM" in data
+        data = json.loads(response.body.decode())
+        assert response.headers["x-maliev-geometry-cache-status"] == data[
+            "cache_status"
+        ]
+        assert data["status"] == "analysis_complete"
+        assert data["process_code"] == "FDM"
 
     @pytest.mark.anyio
     async def test_process_analysis_requires_quality_check_first(self):
