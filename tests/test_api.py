@@ -111,6 +111,19 @@ def test_client_runtime_manifest_is_public_and_not_cached():
     )
     assert body["assets"]["worker"].endswith(".worker.js")
     assert body["assets"]["wasm"] is None
+    assert body["artifactPolicy"] == {
+        "directBrowserViewerExtensions": [".glb", ".obj", ".stl"],
+        "browserViewableUploads": {
+            "viewerSource": "original_upload",
+            "serverGlbExport": False,
+            "serverPreviewImages": False,
+        },
+        "serverGeneratedViewerUploads": {
+            "viewerSource": "generated_glb",
+            "serverGlbExport": True,
+            "serverPreviewImages": True,
+        },
+    }
     assert body["capabilities"]["inputs"] == {
         "meshBuffers": True,
         "binaryStl": True,

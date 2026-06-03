@@ -179,6 +179,19 @@ _CLIENT_RUNTIME_DEVICE_PROFILES = {
         "timeoutMs": 20_000,
     },
 }
+_CLIENT_RUNTIME_ARTIFACT_POLICY = {
+    "directBrowserViewerExtensions": [".glb", ".obj", ".stl"],
+    "browserViewableUploads": {
+        "viewerSource": "original_upload",
+        "serverGlbExport": False,
+        "serverPreviewImages": False,
+    },
+    "serverGeneratedViewerUploads": {
+        "viewerSource": "generated_glb",
+        "serverGlbExport": True,
+        "serverPreviewImages": True,
+    },
+}
 
 _CLIENT_RUNTIME_DELIVERY_COUNTER = meter.create_counter(
     "geometry.client_runtime.delivery.requests",
@@ -386,6 +399,7 @@ async def client_runtime_manifest() -> JSONResponse:
             "serverRole": "fallback_and_final_validation",
             "minFrontendApiVersion": 1,
             "deviceProfiles": _CLIENT_RUNTIME_DEVICE_PROFILES,
+            "artifactPolicy": _CLIENT_RUNTIME_ARTIFACT_POLICY,
             "fallbackPolicy": {
                 "fallbackOnUnsupportedDevice": True,
                 "fallbackOnTimeout": True,
