@@ -223,6 +223,7 @@ async def test_process_message_acks_after_metrics_without_waiting_for_artifacts(
 async def test_process_message_requests_no_glb_metrics_for_browser_viewable_mesh(
     consumer: UploadConsumer,
     mock_storage: AsyncMock,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     message = _build_upload_message("direct.stl")
     message.process.return_value = _TrackedMessageProcess([])
@@ -230,6 +231,11 @@ async def test_process_message_requests_no_glb_metrics_for_browser_viewable_mesh
     consumer.publish_event = AsyncMock()
     consumer.validate_file_size_before_download = AsyncMock(return_value=True)
     consumer._schedule_artifact_job_from_metrics = AsyncMock()  # type: ignore[method-assign]
+    counter = _RecordingCounter()
+    monkeypatch.setattr(
+        "src.consumers.upload_consumer._PHASE1_EXPORT_COUNTER",
+        counter,
+    )
 
     captured_args: tuple[object, ...] | None = None
     real_loop = asyncio.get_event_loop()
@@ -253,6 +259,23 @@ async def test_process_message_requests_no_glb_metrics_for_browser_viewable_mesh
         await consumer.process_message(message)
 
     assert captured_args == (b"fake-stl-content", ".stl", False, False)
+    recorded = [attributes for _, attributes in counter.calls]
+    assert {
+        "artifact": "glb",
+        "status": "skipped",
+        "execution_mode": "browser_primary",
+        "reason": "browser_viewer_source",
+        "file_extension": "stl",
+        "cache_status": "cold",
+    } in recorded
+    assert {
+        "artifact": "stl",
+        "status": "skipped",
+        "execution_mode": "browser_primary",
+        "reason": "browser_viewer_source",
+        "file_extension": "stl",
+        "cache_status": "cold",
+    } in recorded
     consumer._schedule_artifact_job_from_metrics.assert_awaited_once()
 
 

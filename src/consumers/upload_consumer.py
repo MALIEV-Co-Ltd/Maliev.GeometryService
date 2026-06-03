@@ -119,6 +119,13 @@ _ARTIFACT_PIPELINE_COUNTER = meter.create_counter(
         "geometry offload pipeline."
     ),
 )
+_PHASE1_EXPORT_COUNTER = meter.create_counter(
+    "geometry.phase1.export_requests",
+    description=(
+        "Counts Phase 1 GLB/STL export requests and skips for browser-first "
+        "geometry offload."
+    ),
+)
 
 
 @dataclass(frozen=True)
@@ -154,6 +161,28 @@ def _artifact_file_extension(file_ext: str) -> str:
     if ext.startswith("."):
         ext = ext[1:]
     return ext or "unknown"
+
+
+def _record_phase1_export_request(
+    *,
+    file_ext: str,
+    artifact: str,
+    status: str,
+    execution_mode: str,
+    reason: str,
+    cache_status: str,
+) -> None:
+    _PHASE1_EXPORT_COUNTER.add(
+        1,
+        {
+            "artifact": artifact,
+            "status": status,
+            "execution_mode": execution_mode,
+            "reason": reason,
+            "file_extension": _artifact_file_extension(file_ext),
+            "cache_status": cache_status,
+        },
+    )
 
 
 def _record_artifact_pipeline_operation(
@@ -434,6 +463,15 @@ class UploadConsumer:
                         try:
                             if cached_metrics is not None:
                                 metrics_result = cached_metrics
+                                for artifact in ("glb", "stl"):
+                                    _record_phase1_export_request(
+                                        file_ext=file_ext,
+                                        artifact=artifact,
+                                        status="cache_hit",
+                                        execution_mode="server_cache",
+                                        reason="tessellation_cache",
+                                        cache_status="hit",
+                                    )
                             else:
                                 use_browser_viewer_source = (
                                     _browser_viewer_source_extension(file_ext)
@@ -441,6 +479,36 @@ class UploadConsumer:
                                 )
                                 include_glb_export = not use_browser_viewer_source
                                 include_stl_export = not use_browser_viewer_source
+                                execution_mode = (
+                                    "browser_primary"
+                                    if use_browser_viewer_source
+                                    else "server_primary"
+                                )
+                                reason = (
+                                    "browser_viewer_source"
+                                    if use_browser_viewer_source
+                                    else "server_artifact_required"
+                                )
+                                _record_phase1_export_request(
+                                    file_ext=file_ext,
+                                    artifact="glb",
+                                    status=(
+                                        "requested" if include_glb_export else "skipped"
+                                    ),
+                                    execution_mode=execution_mode,
+                                    reason=reason,
+                                    cache_status="cold",
+                                )
+                                _record_phase1_export_request(
+                                    file_ext=file_ext,
+                                    artifact="stl",
+                                    status=(
+                                        "requested" if include_stl_export else "skipped"
+                                    ),
+                                    execution_mode=execution_mode,
+                                    reason=reason,
+                                    cache_status="cold",
+                                )
                                 metrics_result = await asyncio.wait_for(
                                     loop.run_in_executor(
                                         executor,
