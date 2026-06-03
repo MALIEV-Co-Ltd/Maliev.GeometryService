@@ -85,19 +85,59 @@ def test_client_runtime_manifest_is_public_and_not_cached():
     assert response.headers["cache-control"] == "no-cache"
 
     body = response.json()
-    assert body["runtimeVersion"] == "0.1.0"
-    assert body["algorithmVersion"] == "mesh-advisory-v1"
-    assert body["authority"] == "advisory"
+    assert body["manifestVersion"] == 1
+    assert body["runtimeVersion"] == "1.0.0"
+    assert body["algorithmVersion"] == "browser-first-dfm-v1"
+    assert body["runtimeKind"] == "browser-first-geometry"
+    assert body["executionMode"] == "primary_interactive"
+    assert body["authority"] == "local_primary"
+    assert body["isAuthoritative"] is False
+    assert body["serverRole"] == "fallback_and_final_validation"
+    assert body["fallbackPolicy"] == {
+        "fallbackOnUnsupportedDevice": True,
+        "fallbackOnTimeout": True,
+        "fallbackOnInputTooLarge": True,
+        "finalValidationRequired": True,
+    }
     assert body["assets"]["worker"].startswith(
         "/geometry/client-runtime/assets/client-geometry-runtime."
     )
     assert body["assets"]["worker"].endswith(".worker.js")
-    assert body["capabilities"] == {
+    assert body["assets"]["wasm"] is None
+    assert body["capabilities"]["inputs"] == {
         "meshBuffers": True,
         "binaryStl": True,
         "asciiStl": True,
-        "cadBrep": False,
-        "serverArtifacts": False,
+    }
+    assert body["capabilities"]["localOperations"] == [
+        "mesh_metrics",
+        "manifold_check",
+        "thin_feature_screening",
+        "process_dfm_screening",
+        "local_overlay_hints",
+    ]
+    assert body["capabilities"]["serverOperations"] == [
+        "authoritative_dfm",
+        "durable_glb_artifacts",
+        "durable_preview_images",
+        "final_quote_validation",
+    ]
+    assert body["deviceProfiles"] == {
+        "mobile": {
+            "maxInputBytes": 8_388_608,
+            "maxTriangles": 75_000,
+            "timeoutMs": 8_000,
+        },
+        "tablet": {
+            "maxInputBytes": 16_777_216,
+            "maxTriangles": 150_000,
+            "timeoutMs": 12_000,
+        },
+        "desktop": {
+            "maxInputBytes": 33_554_432,
+            "maxTriangles": 350_000,
+            "timeoutMs": 20_000,
+        },
     }
 
 
@@ -111,6 +151,7 @@ def test_client_runtime_worker_asset_is_hash_named_and_immutable():
     assert response.headers["cache-control"] == "public, max-age=31536000, immutable"
     assert response.headers["content-type"].startswith("text/javascript")
     assert "MALIEV_BROWSER_GEOMETRY_RUNTIME_VERSION" in response.text
+    assert "primary_interactive" in response.text
 
 
 def test_client_runtime_missing_asset_returns_404():

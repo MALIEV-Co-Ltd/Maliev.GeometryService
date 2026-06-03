@@ -155,11 +155,29 @@ _PUBLIC_PATHS = {
 }
 
 _CLIENT_RUNTIME_PREFIX = "/geometry/client-runtime/"
-_CLIENT_RUNTIME_VERSION = "0.1.0"
-_CLIENT_RUNTIME_ALGORITHM_VERSION = "mesh-advisory-v1"
+_CLIENT_RUNTIME_MANIFEST_VERSION = 1
+_CLIENT_RUNTIME_VERSION = "1.0.0"
+_CLIENT_RUNTIME_ALGORITHM_VERSION = "browser-first-dfm-v1"
 _CLIENT_RUNTIME_WORKER_BASENAME = "client-geometry-runtime.worker.js"
 _CLIENT_RUNTIME_DIR = Path(__file__).resolve().parent / "client_runtime"
 _CLIENT_RUNTIME_WORKER_PATH = _CLIENT_RUNTIME_DIR / _CLIENT_RUNTIME_WORKER_BASENAME
+_CLIENT_RUNTIME_DEVICE_PROFILES = {
+    "mobile": {
+        "maxInputBytes": 8 * 1024 * 1024,
+        "maxTriangles": 75_000,
+        "timeoutMs": 8_000,
+    },
+    "tablet": {
+        "maxInputBytes": 16 * 1024 * 1024,
+        "maxTriangles": 150_000,
+        "timeoutMs": 12_000,
+    },
+    "desktop": {
+        "maxInputBytes": 32 * 1024 * 1024,
+        "maxTriangles": 350_000,
+        "timeoutMs": 20_000,
+    },
+}
 
 
 def _is_public_path(path: str) -> bool:
@@ -309,24 +327,49 @@ def _client_runtime_worker_asset_name() -> str:
 
 @router.get("/client-runtime/manifest.json", tags=["Client Runtime"])
 async def client_runtime_manifest() -> JSONResponse:
-    """Return the browser advisory geometry runtime manifest."""
+    """Return the browser-first geometry runtime manifest."""
     worker_asset_name = _client_runtime_worker_asset_name()
     response = JSONResponse(
         content={
+            "manifestVersion": _CLIENT_RUNTIME_MANIFEST_VERSION,
             "runtimeVersion": _CLIENT_RUNTIME_VERSION,
             "algorithmVersion": _CLIENT_RUNTIME_ALGORITHM_VERSION,
-            "authority": "advisory",
+            "runtimeKind": "browser-first-geometry",
+            "executionMode": "primary_interactive",
+            "authority": "local_primary",
             "isAuthoritative": False,
+            "serverRole": "fallback_and_final_validation",
             "minFrontendApiVersion": 1,
+            "deviceProfiles": _CLIENT_RUNTIME_DEVICE_PROFILES,
+            "fallbackPolicy": {
+                "fallbackOnUnsupportedDevice": True,
+                "fallbackOnTimeout": True,
+                "fallbackOnInputTooLarge": True,
+                "finalValidationRequired": True,
+            },
             "assets": {
                 "worker": f"/geometry/client-runtime/assets/{worker_asset_name}",
+                "wasm": None,
             },
             "capabilities": {
-                "meshBuffers": True,
-                "binaryStl": True,
-                "asciiStl": True,
-                "cadBrep": False,
-                "serverArtifacts": False,
+                "inputs": {
+                    "meshBuffers": True,
+                    "binaryStl": True,
+                    "asciiStl": True,
+                },
+                "localOperations": [
+                    "mesh_metrics",
+                    "manifold_check",
+                    "thin_feature_screening",
+                    "process_dfm_screening",
+                    "local_overlay_hints",
+                ],
+                "serverOperations": [
+                    "authoritative_dfm",
+                    "durable_glb_artifacts",
+                    "durable_preview_images",
+                    "final_quote_validation",
+                ],
             },
         }
     )

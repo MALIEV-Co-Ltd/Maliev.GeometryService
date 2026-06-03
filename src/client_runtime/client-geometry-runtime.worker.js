@@ -1,5 +1,6 @@
-const MALIEV_BROWSER_GEOMETRY_RUNTIME_VERSION = "0.1.0";
-const MALIEV_BROWSER_GEOMETRY_ALGORITHM_VERSION = "mesh-advisory-v1";
+const MALIEV_BROWSER_GEOMETRY_RUNTIME_VERSION = "1.0.0";
+const MALIEV_BROWSER_GEOMETRY_ALGORITHM_VERSION = "browser-first-dfm-v1";
+const MALIEV_BROWSER_GEOMETRY_EXECUTION_MODE = "primary_interactive";
 
 self.onmessage = async event => {
   const message = event.data || {};
@@ -27,13 +28,16 @@ async function analyze(input, processCode) {
   return {
     runtimeVersion: MALIEV_BROWSER_GEOMETRY_RUNTIME_VERSION,
     algorithmVersion: MALIEV_BROWSER_GEOMETRY_ALGORITHM_VERSION,
+    executionMode: MALIEV_BROWSER_GEOMETRY_EXECUTION_MODE,
     isAuthoritative: false,
-    authority: "advisory",
+    authority: "local_primary",
+    serverRole: "fallback_and_final_validation",
     status: "analysis_complete",
     processCode,
     inputHash,
     metrics,
-    issues
+    issues,
+    localOverlayHints: buildLocalOverlayHints(issues)
   };
 }
 
@@ -224,6 +228,16 @@ function buildIssues(metrics, processCode) {
 
 function issue(category, severity, title, description, value, threshold) {
   return { category, severity, title, description, value, threshold, faceIndices: [], centroid: [] };
+}
+
+function buildLocalOverlayHints(issues) {
+  return issues.map(issue => ({
+    category: issue.category,
+    severity: issue.severity,
+    title: issue.title,
+    faceIndices: issue.faceIndices || [],
+    centroid: issue.centroid || []
+  }));
 }
 
 function complexityFor(faceCount) {
