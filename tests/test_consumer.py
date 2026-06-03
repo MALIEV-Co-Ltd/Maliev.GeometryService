@@ -9,7 +9,11 @@ import httpx
 import pytest
 import respx
 
-from src.consumers.upload_consumer import ArtifactProcessingJob, UploadConsumer
+from src.consumers.upload_consumer import (
+    ArtifactProcessingJob,
+    UploadConsumer,
+    _browser_viewer_source_extension,
+)
 from src.core.geometry import BoundingBox, GeometryMetrics
 from src.core.schemas import (
     FileUploadedEvent,
@@ -274,6 +278,67 @@ async def test_artifact_job_waits_for_viewer_glb_before_secondary_artifacts(
     consumer.publish_failure.assert_not_called()
 
 
+def test_browser_viewer_source_extension_allows_only_self_contained_meshes() -> None:
+    assert _browser_viewer_source_extension("stl") == ".stl"
+    assert _browser_viewer_source_extension(".OBJ") == ".obj"
+    assert _browser_viewer_source_extension(".glb") == ".glb"
+    assert _browser_viewer_source_extension(".step") is None
+    assert _browser_viewer_source_extension(".gltf") is None
+    assert _browser_viewer_source_extension(".3mf") is None
+
+
+@pytest.mark.asyncio
+async def test_artifact_job_skips_glb_export_for_browser_loadable_mesh(
+    consumer: UploadConsumer,
+    tmp_path,
+) -> None:
+    artifact_temp_dir = tmp_path / "artifact"
+    artifact_temp_dir.mkdir()
+    job = ArtifactProcessingJob(
+        file_id=str(uuid4()),
+        upload_id=str(uuid4()),
+        storage_path="projects/test/model.stl",
+        file_ext=".stl",
+        file_name="model.stl",
+        file_size=1024,
+        correlation_id=uuid4(),
+        metrics=GeometryMetrics(
+            volumeCm3=1.0,
+            supportVolumeCm3=0.0,
+            surfaceAreaCm2=6.0,
+            boundingBox=BoundingBox(x=1.0, y=1.0, z=1.0),
+            isManifold=True,
+            triangleCount=12,
+            eulerNumber=2,
+        ),
+        body_count=1,
+        body_infos=None,
+        temp_dir=artifact_temp_dir,
+        cad_glb_path=artifact_temp_dir / "cad.glb",
+        executor=None,
+        queued_at=0.0,
+    )
+    consumer._publish_glb = AsyncMock(return_value=False)  # type: ignore[method-assign]
+    consumer._publish_small_thumbnail = AsyncMock(  # type: ignore[method-assign]
+        return_value=True
+    )
+    consumer._publish_previews = AsyncMock(return_value=True)  # type: ignore[method-assign]
+    consumer.publish_failure = AsyncMock()
+    consumer.publish_event = AsyncMock()
+
+    await consumer._run_artifact_job(job)
+
+    consumer._publish_glb.assert_not_awaited()
+    consumer.publish_failure.assert_not_awaited()
+    consumer.publish_event.assert_awaited_once()
+    completed_event = consumer.publish_event.await_args.args[0]
+    assert completed_event.message.payload.glb_storage_path is None
+    assert completed_event.message.payload.viewer_storage_path == (
+        "projects/test/model.stl"
+    )
+    assert completed_event.message.payload.viewer_file_extension == ".stl"
+
+
 @pytest.mark.asyncio
 async def test_publish_glb_timeout_uses_source_glb_fallback(
     consumer: UploadConsumer,
@@ -338,6 +403,11 @@ async def test_publish_glb_timeout_uses_source_glb_fallback(
     assert completed_event.message.payload.glb_storage_path == (
         "projects/test/model.step_viewer.glb"
     )
+    assert completed_event.message.payload.viewer_storage_path == (
+        "projects/test/model.step_viewer.glb"
+    )
+    assert completed_event.message.payload.viewer_file_extension == ".glb"
+
 
 
 @pytest.mark.asyncio

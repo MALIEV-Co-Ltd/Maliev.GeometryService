@@ -111,6 +111,7 @@ _PREVIEW_BUDGET_S = (
     60  # 7-view preview generation (reduced for faster failure detection)
 )
 _PHASE2_HARD_DEADLINE_S = 300
+_BROWSER_VIEWER_SOURCE_EXTENSIONS = frozenset({".glb", ".obj", ".stl"})
 
 
 @dataclass(frozen=True)
@@ -129,6 +130,16 @@ class ArtifactProcessingJob:
     cad_glb_path: Path
     executor: Any
     queued_at: float
+
+
+def _browser_viewer_source_extension(file_ext: str) -> str | None:
+    """Return the direct browser viewer extension for mesh files we can load locally."""
+    ext = file_ext.strip().lower()
+    if not ext:
+        return None
+    if not ext.startswith("."):
+        ext = f".{ext}"
+    return ext if ext in _BROWSER_VIEWER_SOURCE_EXTENSIONS else None
 
 
 def _shutdown_executor_gracefully(
@@ -738,16 +749,20 @@ class UploadConsumer:
                     },
                 )
                 try:
-                    glb_published = await self._publish_glb(job)
-                    if not glb_published:
-                        await self.publish_failure(
-                            job.correlation_id,
-                            job.file_id,
-                            "GEOMETRY_NO_RESULT",
-                            "Phase 2 did not produce a GLB artifact",
-                            job.storage_path,
-                        )
-                        return
+                    viewer_source_published = (
+                        await self._publish_browser_viewer_source(job)
+                    )
+                    if not viewer_source_published:
+                        glb_published = await self._publish_glb(job)
+                        if not glb_published:
+                            await self.publish_failure(
+                                job.correlation_id,
+                                job.file_id,
+                                "GEOMETRY_NO_RESULT",
+                                "Phase 2 did not produce a browser viewer source",
+                                job.storage_path,
+                            )
+                            return
 
                     secondary_timeout_s = max(
                         0.0,
@@ -953,6 +968,28 @@ class UploadConsumer:
                 },
             )
 
+    async def _publish_browser_viewer_source(self, job: ArtifactProcessingJob) -> bool:
+        viewer_file_extension = _browser_viewer_source_extension(job.file_ext)
+        if viewer_file_extension is None:
+            return False
+
+        await self._publish_file_analyzed_event(
+            job,
+            glb_path=None,
+            viewer_storage_path=job.storage_path,
+            viewer_file_extension=viewer_file_extension,
+        )
+        logger.info(
+            "Published original upload as browser viewer source",
+            extra={
+                "event": "browser_viewer_source_published",
+                "file_id": job.file_id,
+                "storage_path": job.storage_path,
+                "viewer_file_extension": viewer_file_extension,
+            },
+        )
+        return True
+
     async def _publish_source_glb_fallback(
         self, job: ArtifactProcessingJob, reason: str
     ) -> bool:
@@ -993,8 +1030,17 @@ class UploadConsumer:
         return True
 
     async def _publish_file_analyzed_event(
-        self, job: ArtifactProcessingJob, glb_path: str
+        self,
+        job: ArtifactProcessingJob,
+        glb_path: str | None,
+        viewer_storage_path: str | None = None,
+        viewer_file_extension: str | None = None,
     ) -> None:
+        resolved_viewer_storage_path = viewer_storage_path or glb_path
+        resolved_viewer_file_extension = viewer_file_extension
+        if resolved_viewer_storage_path and not resolved_viewer_file_extension:
+            resolved_viewer_file_extension = ".glb"
+
         now = datetime.now(timezone.utc)
         event = FileAnalyzedEvent(
             messageId=uuid4(),
@@ -1018,6 +1064,8 @@ class UploadConsumer:
                     metrics=job.metrics,
                     processedAt=now,
                     glbStoragePath=glb_path,
+                    viewerStoragePath=resolved_viewer_storage_path,
+                    viewerFileExtension=resolved_viewer_file_extension,
                     thumbnailStoragePath=None,
                     storagePath=job.storage_path,
                     dfmReport=None,

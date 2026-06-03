@@ -152,6 +152,10 @@ class FileAnalyzedPayload(BaseModel):
     metrics: GeometryMetrics
     processed_at: datetime = Field(alias="processedAt")
     glb_storage_path: str | None = Field(alias="glbStoragePath", default=None)
+    viewer_storage_path: str | None = Field(alias="viewerStoragePath", default=None)
+    viewer_file_extension: str | None = Field(
+        alias="viewerFileExtension", default=None
+    )
     thumbnail_storage_path: str | None = Field(
         alias="thumbnailStoragePath", default=None
     )
