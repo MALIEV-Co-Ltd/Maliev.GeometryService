@@ -69,6 +69,14 @@ def consumer(mock_storage, mock_processor):
     return UploadConsumer(mock_storage, mock_processor)
 
 
+class _RecordingCounter:
+    def __init__(self) -> None:
+        self.calls: list[tuple[int, dict[str, str]]] = []
+
+    def add(self, amount: int, attributes: dict[str, str] | None = None) -> None:
+        self.calls.append((amount, attributes or {}))
+
+
 @pytest.mark.asyncio
 async def test_validate_file_size_before_download_normalizes_mock_storage_url(
     consumer, monkeypatch
@@ -217,6 +225,11 @@ async def test_artifact_job_waits_for_viewer_glb_before_secondary_artifacts(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    counter = _RecordingCounter()
+    monkeypatch.setattr(
+        "src.consumers.upload_consumer._ARTIFACT_PIPELINE_COUNTER",
+        counter,
+    )
     events: list[str] = []
     glb_started = asyncio.Event()
     allow_glb_to_finish = asyncio.Event()
@@ -276,6 +289,21 @@ async def test_artifact_job_waits_for_viewer_glb_before_secondary_artifacts(
     assert events.index("thumb-start") > events.index("glb-end")
     assert events.index("previews-start") > events.index("glb-end")
     consumer.publish_failure.assert_not_called()
+    recorded = [attributes for _, attributes in counter.calls]
+    assert {
+        "operation": "viewer_glb_export",
+        "status": "scheduled",
+        "execution_mode": "server_artifact",
+        "reason": "browser_source_unavailable",
+        "file_extension": "step",
+    } in recorded
+    assert {
+        "operation": "secondary_artifacts",
+        "status": "scheduled",
+        "execution_mode": "server_artifact",
+        "reason": "server_viewer_artifact",
+        "file_extension": "step",
+    } in recorded
 
 
 def test_browser_viewer_source_extension_allows_only_self_contained_meshes() -> None:
@@ -290,8 +318,14 @@ def test_browser_viewer_source_extension_allows_only_self_contained_meshes() -> 
 @pytest.mark.asyncio
 async def test_artifact_job_skips_glb_export_for_browser_loadable_mesh(
     consumer: UploadConsumer,
+    monkeypatch: pytest.MonkeyPatch,
     tmp_path,
 ) -> None:
+    counter = _RecordingCounter()
+    monkeypatch.setattr(
+        "src.consumers.upload_consumer._ARTIFACT_PIPELINE_COUNTER",
+        counter,
+    )
     artifact_temp_dir = tmp_path / "artifact"
     artifact_temp_dir.mkdir()
     job = ArtifactProcessingJob(
@@ -339,6 +373,21 @@ async def test_artifact_job_skips_glb_export_for_browser_loadable_mesh(
         "projects/test/model.stl"
     )
     assert completed_event.message.payload.viewer_file_extension == ".stl"
+    recorded = [attributes for _, attributes in counter.calls]
+    assert {
+        "operation": "viewer_source",
+        "status": "published",
+        "execution_mode": "browser_primary",
+        "reason": "direct_source",
+        "file_extension": "stl",
+    } in recorded
+    assert {
+        "operation": "secondary_artifacts",
+        "status": "skipped",
+        "execution_mode": "browser_primary",
+        "reason": "browser_viewer_source",
+        "file_extension": "stl",
+    } in recorded
 
 
 @pytest.mark.asyncio

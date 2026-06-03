@@ -36,7 +36,7 @@ from src.core.geometry import (
     _render_thumbnail_worker,
     compute_metrics_trimesh_only,
 )
-from src.core.observability import tracer
+from src.core.observability import meter, tracer
 from src.core.schemas import (
     BodyInfo,
     FileAnalysisFailedEvent,
@@ -112,6 +112,13 @@ _PREVIEW_BUDGET_S = (
 )
 _PHASE2_HARD_DEADLINE_S = 300
 _BROWSER_VIEWER_SOURCE_EXTENSIONS = frozenset({".glb", ".obj", ".stl"})
+_ARTIFACT_PIPELINE_COUNTER = meter.create_counter(
+    "geometry.artifact_pipeline.operations",
+    description=(
+        "Counts server artifact work executed or skipped by the browser-first "
+        "geometry offload pipeline."
+    ),
+)
 
 
 @dataclass(frozen=True)
@@ -140,6 +147,33 @@ def _browser_viewer_source_extension(file_ext: str) -> str | None:
     if not ext.startswith("."):
         ext = f".{ext}"
     return ext if ext in _BROWSER_VIEWER_SOURCE_EXTENSIONS else None
+
+
+def _artifact_file_extension(file_ext: str) -> str:
+    ext = file_ext.strip().lower()
+    if ext.startswith("."):
+        ext = ext[1:]
+    return ext or "unknown"
+
+
+def _record_artifact_pipeline_operation(
+    *,
+    job: ArtifactProcessingJob,
+    operation: str,
+    status: str,
+    execution_mode: str,
+    reason: str,
+) -> None:
+    _ARTIFACT_PIPELINE_COUNTER.add(
+        1,
+        {
+            "operation": operation,
+            "status": status,
+            "execution_mode": execution_mode,
+            "reason": reason,
+            "file_extension": _artifact_file_extension(job.file_ext),
+        },
+    )
 
 
 def _shutdown_executor_gracefully(
@@ -755,6 +789,13 @@ class UploadConsumer:
                     if viewer_source_published:
                         span.set_attribute("artifact.viewer_source", "browser")
                         span.set_attribute("artifact.secondary_artifacts_skipped", True)
+                        _record_artifact_pipeline_operation(
+                            job=job,
+                            operation="secondary_artifacts",
+                            status="skipped",
+                            execution_mode="browser_primary",
+                            reason="browser_viewer_source",
+                        )
                         logger.info(
                             "Skipping server thumbnail and preview generation "
                             "for browser-renderable upload",
@@ -768,8 +809,22 @@ class UploadConsumer:
                         return
 
                     if not viewer_source_published:
+                        _record_artifact_pipeline_operation(
+                            job=job,
+                            operation="viewer_glb_export",
+                            status="scheduled",
+                            execution_mode="server_artifact",
+                            reason="browser_source_unavailable",
+                        )
                         glb_published = await self._publish_glb(job)
                         if not glb_published:
+                            _record_artifact_pipeline_operation(
+                                job=job,
+                                operation="viewer_glb_export",
+                                status="failed",
+                                execution_mode="server_artifact",
+                                reason="browser_source_unavailable",
+                            )
                             await self.publish_failure(
                                 job.correlation_id,
                                 job.file_id,
@@ -779,6 +834,13 @@ class UploadConsumer:
                             )
                             return
 
+                    _record_artifact_pipeline_operation(
+                        job=job,
+                        operation="secondary_artifacts",
+                        status="scheduled",
+                        execution_mode="server_artifact",
+                        reason="server_viewer_artifact",
+                    )
                     secondary_timeout_s = max(
                         0.0,
                         _PHASE2_HARD_DEADLINE_S - (time.perf_counter() - started_at),
@@ -993,6 +1055,13 @@ class UploadConsumer:
             glb_path=None,
             viewer_storage_path=job.storage_path,
             viewer_file_extension=viewer_file_extension,
+        )
+        _record_artifact_pipeline_operation(
+            job=job,
+            operation="viewer_source",
+            status="published",
+            execution_mode="browser_primary",
+            reason="direct_source",
         )
         logger.info(
             "Published original upload as browser viewer source",
