@@ -329,6 +329,8 @@ async def test_artifact_job_skips_glb_export_for_browser_loadable_mesh(
     await consumer._run_artifact_job(job)
 
     consumer._publish_glb.assert_not_awaited()
+    consumer._publish_small_thumbnail.assert_not_awaited()
+    consumer._publish_previews.assert_not_awaited()
     consumer.publish_failure.assert_not_awaited()
     consumer.publish_event.assert_awaited_once()
     completed_event = consumer.publish_event.await_args.args[0]

@@ -752,6 +752,21 @@ class UploadConsumer:
                     viewer_source_published = (
                         await self._publish_browser_viewer_source(job)
                     )
+                    if viewer_source_published:
+                        span.set_attribute("artifact.viewer_source", "browser")
+                        span.set_attribute("artifact.secondary_artifacts_skipped", True)
+                        logger.info(
+                            "Skipping server thumbnail and preview generation "
+                            "for browser-renderable upload",
+                            extra={
+                                "event": "browser_viewer_secondary_artifacts_skipped",
+                                "file_id": job.file_id,
+                                "storage_path": job.storage_path,
+                                "file_ext": job.file_ext,
+                            },
+                        )
+                        return
+
                     if not viewer_source_published:
                         glb_published = await self._publish_glb(job)
                         if not glb_published:
