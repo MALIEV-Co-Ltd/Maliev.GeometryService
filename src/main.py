@@ -206,9 +206,7 @@ _SERVER_DFM_COUNTER = meter.create_counter(
 def _add_local_runtime_headers(response: _ResponseT) -> _ResponseT:
     response.headers["X-Maliev-Geometry-Execution-Mode"] = "primary_interactive"
     response.headers["X-Maliev-Geometry-Authority"] = "local_primary"
-    response.headers["X-Maliev-Geometry-Server-Role"] = (
-        "fallback_and_final_validation"
-    )
+    response.headers["X-Maliev-Geometry-Server-Role"] = "fallback_and_final_validation"
     return response
 
 
@@ -221,9 +219,7 @@ def _add_server_dfm_headers(
         "server_fallback_final_validation"
     )
     response.headers["X-Maliev-Geometry-Authority"] = "server_authoritative"
-    response.headers["X-Maliev-Geometry-Server-Role"] = (
-        "fallback_and_final_validation"
-    )
+    response.headers["X-Maliev-Geometry-Server-Role"] = "fallback_and_final_validation"
     response.headers["X-Maliev-Geometry-Process-Code"] = process_code
     if cache_status:
         response.headers["X-Maliev-Geometry-Cache-Status"] = cache_status
@@ -312,6 +308,7 @@ async def require_geometry_auth(
         return _unauthorized_response("Invalid bearer token")
 
     return await call_next(request)
+
 
 router = APIRouter(prefix="/geometry")
 
@@ -415,6 +412,7 @@ async def client_runtime_manifest() -> JSONResponse:
                     "meshBuffers": True,
                     "binaryStl": True,
                     "asciiStl": True,
+                    "obj": True,
                 },
                 "localOperations": [
                     "mesh_metrics",

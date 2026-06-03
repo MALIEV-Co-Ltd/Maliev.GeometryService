@@ -78,10 +78,13 @@ function meshFromFile(fileBytes, fileName) {
     ? fileBytes
     : new Uint8Array(fileBytes);
   const lowerName = String(fileName || "").toLowerCase();
+  if (lowerName.endsWith(".obj") || looksLikeObj(bytes)) {
+    return parseObj(bytes);
+  }
   if (lowerName.endsWith(".stl") || looksLikeStl(bytes)) {
     return parseStl(bytes);
   }
-  throw new Error("Browser advisory runtime v1 supports STL bytes or viewer mesh buffers.");
+  throw new Error("Browser advisory runtime v1 supports STL/OBJ bytes or viewer mesh buffers.");
 }
 
 function looksLikeStl(bytes) {
@@ -141,6 +144,60 @@ function parseAsciiStl(bytes) {
     throw new Error("ASCII STL did not contain complete triangle vertex data.");
   }
   return { positions, indices };
+}
+
+function looksLikeObj(bytes) {
+  const prefix = new TextDecoder("utf-8").decode(bytes.slice(0, Math.min(bytes.length, 2048)));
+  return /(^|\n)\s*v\s+[-+0-9.eE]+\s+[-+0-9.eE]+\s+[-+0-9.eE]+/.test(prefix)
+    && /(^|\n)\s*f\s+\S+\s+\S+\s+\S+/.test(prefix);
+}
+
+function parseObj(bytes) {
+  const text = new TextDecoder("utf-8").decode(bytes);
+  const sourceVertices = [];
+  const positions = [];
+  const indices = [];
+
+  for (const rawLine of text.split(/\r?\n/)) {
+    const line = rawLine.split("#", 1)[0].trim();
+    if (!line) continue;
+    const parts = line.split(/\s+/);
+    if (parts[0] === "v" && parts.length >= 4) {
+      sourceVertices.push([Number(parts[1]), Number(parts[2]), Number(parts[3])]);
+      continue;
+    }
+    if (parts[0] !== "f" || parts.length < 4) continue;
+
+    const faceVertexIndices = parts.slice(1)
+      .map(token => parseObjVertexIndex(token, sourceVertices.length))
+      .filter(index => index !== null);
+    if (faceVertexIndices.length < 3) continue;
+
+    for (let index = 1; index < faceVertexIndices.length - 1; index += 1) {
+      appendObjVertex(sourceVertices, positions, indices, faceVertexIndices[0]);
+      appendObjVertex(sourceVertices, positions, indices, faceVertexIndices[index]);
+      appendObjVertex(sourceVertices, positions, indices, faceVertexIndices[index + 1]);
+    }
+  }
+
+  if (positions.length === 0 || indices.length === 0) {
+    throw new Error("OBJ did not contain complete triangle face data.");
+  }
+  return { positions, indices };
+}
+
+function parseObjVertexIndex(token, vertexCount) {
+  const rawIndex = Number.parseInt(String(token).split("/")[0], 10);
+  if (!Number.isFinite(rawIndex) || rawIndex === 0) return null;
+  const index = rawIndex > 0 ? rawIndex - 1 : vertexCount + rawIndex;
+  return index >= 0 && index < vertexCount ? index : null;
+}
+
+function appendObjVertex(sourceVertices, positions, indices, sourceIndex) {
+  const vertex = sourceVertices[sourceIndex];
+  if (!vertex) return;
+  positions.push(vertex[0], vertex[1], vertex[2]);
+  indices.push(indices.length);
 }
 
 function computeMetrics(mesh) {
