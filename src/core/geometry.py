@@ -1282,7 +1282,11 @@ def _load_cad_with_cascadio(
     """
     with open(file_path, "rb") as f:  # noqa: PTH123
         file_bytes = f.read()
-    return _load_cad_with_cascadio_isolated(file_bytes, timeout_seconds)
+    return _load_cad_with_cascadio_isolated(
+        file_bytes,
+        timeout_seconds,
+        Path(file_path).suffix,
+    )
 
 
 def _cascadio_subprocess_load(
@@ -1312,6 +1316,96 @@ def _cascadio_subprocess_load(
     ))
 
 
+def _load_iges_with_occ(
+    file_bytes: bytes,
+    file_extension: str,
+) -> tuple[list[trimesh.Trimesh], bytes, int, list[str]]:
+    """Load IGES bytes through OpenCascade and return the standard CAD mesh tuple."""
+    from OCP.BRep import BRep_Tool
+    from OCP.BRepMesh import BRepMesh_IncrementalMesh
+    from OCP.IFSelect import IFSelect_RetDone
+    from OCP.IGESControl import IGESControl_Reader
+    from OCP.TopAbs import TopAbs_FACE, TopAbs_REVERSED
+    from OCP.TopExp import TopExp_Explorer
+    from OCP.TopoDS import TopoDS
+
+    suffix = file_extension.lower().strip()
+    if not suffix.startswith("."):
+        suffix = f".{suffix}"
+    if suffix not in {".igs", ".iges"}:
+        suffix = ".iges"
+
+    tmp_path: str | None = None
+    try:
+        with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
+            tmp.write(file_bytes)
+            tmp_path = tmp.name
+
+        reader = IGESControl_Reader()
+        if reader.ReadFile(tmp_path) != IFSelect_RetDone:
+            raise ValueError("OCC failed to read IGES file")
+
+        transferred = int(reader.TransferRoots())
+        if transferred <= 0:
+            raise ValueError("OCC did not transfer any IGES roots")
+
+        shape = reader.OneShape()
+        if shape.IsNull():
+            raise ValueError("OCC produced an empty IGES shape")
+
+        BRepMesh_IncrementalMesh(shape, 0.1, False, 0.5, True)
+
+        vertices: list[list[float]] = []
+        faces: list[list[int]] = []
+        explorer = TopExp_Explorer(shape, TopAbs_FACE)
+        while explorer.More():
+            face = TopoDS.Face_s(explorer.Current())
+            explorer.Next()
+
+            location = face.Location()
+            triangulation = BRep_Tool.Triangulation_s(face, location)
+            if triangulation is None:
+                continue
+
+            transform = location.Transformation()
+            vertex_offset = len(vertices)
+            for node_index in range(1, triangulation.NbNodes() + 1):
+                point = triangulation.Node(node_index).Transformed(transform)
+                vertices.append([float(point.X()), float(point.Y()), float(point.Z())])
+
+            is_reversed = face.Orientation() == TopAbs_REVERSED
+            for triangle_index in range(1, triangulation.NbTriangles() + 1):
+                n1, n2, n3 = triangulation.Triangle(triangle_index).Get()
+                if is_reversed:
+                    n2, n3 = n3, n2
+                faces.append(
+                    [
+                        vertex_offset + n1 - 1,
+                        vertex_offset + n2 - 1,
+                        vertex_offset + n3 - 1,
+                    ]
+                )
+
+        if not vertices or not faces:
+            raise ValueError("OCC produced an empty IGES tessellation")
+
+        mesh = trimesh.Trimesh(
+            vertices=np.array(vertices, dtype=np.float64),
+            faces=np.array(faces, dtype=np.int64),
+            process=False,
+        )
+        mesh.merge_vertices(digits_vertex=6)
+        trimesh.repair.fix_winding(mesh)  # type: ignore[no-untyped-call]
+        if len(mesh.vertices) == 0 or len(mesh.faces) == 0:
+            raise ValueError("OCC produced an empty IGES mesh")
+
+        glb_bytes = cast(bytes, mesh.export(file_type="glb"))
+        return [mesh], glb_bytes, 1, ["Body_01"]
+    finally:
+        if tmp_path and os.path.exists(tmp_path):  # noqa: PTH110
+            os.unlink(tmp_path)  # noqa: PTH108
+
+
 def _adaptive_cascadio_tolerance(file_bytes_len: int) -> float:
     """Pick a starting cascadio linear tolerance based on file size.
 
@@ -1333,6 +1427,7 @@ def _adaptive_cascadio_tolerance(file_bytes_len: int) -> float:
 def _load_cad_with_cascadio_isolated(
     file_bytes: bytes,
     timeout_seconds: int = 60,
+    file_extension: str = ".stp",
 ) -> tuple[list[trimesh.Trimesh], bytes, int, list[str]]:
     """Load CAD via cascadio in isolated process with proper timeout handling.
 
@@ -1351,8 +1446,16 @@ def _load_cad_with_cascadio_isolated(
     import os
     import tempfile
 
-    # Write input to temp file for subprocess
-    with tempfile.NamedTemporaryFile(suffix=".stp", delete=False) as inp:
+    suffix = file_extension.lower().strip()
+    if not suffix.startswith("."):
+        suffix = f".{suffix}"
+    if suffix not in {".step", ".stp", ".igs", ".iges"}:
+        suffix = ".stp"
+    if suffix in {".igs", ".iges"}:
+        return _load_iges_with_occ(file_bytes, suffix)
+
+    # Cascadio uses the file extension to choose the parser.
+    with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as inp:
         inp.write(file_bytes)
         inp_path = inp.name
 
@@ -1594,6 +1697,7 @@ def _compute_metrics_worker(data: bytes, file_extension: str) -> dict[str, Any]:
                     _load_cad_with_cascadio_isolated(
                         open(tmp_path, "rb").read(),  # noqa: SIM115, PTH123
                         timeout_seconds=60,
+                        file_extension=ext,
                     )
                 )
                 total_triangles = sum(len(m.faces) for m in mesh_list)
@@ -5099,6 +5203,7 @@ def compute_multi_body_dfm_analysis(
 def load_cascadio_geometry(
     file_bytes: bytes,
     timeout_seconds: int = 60,
+    file_extension: str = ".stp",
 ) -> dict[str, Any]:
     """Load CAD file via cascadio and return structured result.
 
@@ -5115,7 +5220,11 @@ def load_cascadio_geometry(
     """
     try:
         meshes, _combined_glb, body_count, body_names = (
-            _load_cad_with_cascadio_isolated(file_bytes, timeout_seconds)
+            _load_cad_with_cascadio_isolated(
+                file_bytes,
+                timeout_seconds,
+                file_extension,
+            )
         )
         bodies = [
             {"mesh": mesh.export(file_type="glb"), "name": name}
