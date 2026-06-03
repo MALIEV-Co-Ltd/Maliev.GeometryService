@@ -46,7 +46,7 @@ def test_client_runtime_worker_detects_local_overhang_hints() -> None:
         const workerPath = {json.dumps(str(WORKER_PATH))};
         vm.runInContext(fs.readFileSync(workerPath, 'utf8'), context);
 
-        context.self.onmessage({{
+        const event = {{
           data: {{
             id: 'overhang-smoke',
             processCode: 'FDM',
@@ -65,15 +65,15 @@ def test_client_runtime_worker_detects_local_overhang_hints() -> None:
               }}
             }}
           }}
-        }});
+        }};
 
-        setTimeout(() => {{
+        Promise.resolve(context.self.onmessage(event)).then(() => {{
           if (!posted) {{
             console.error('worker did not post a result');
             process.exit(1);
           }}
           console.log(JSON.stringify(posted));
-        }}, 0);
+        }});
         """
     )
 

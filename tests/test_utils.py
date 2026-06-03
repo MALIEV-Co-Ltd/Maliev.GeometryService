@@ -51,6 +51,7 @@ class ProcessMonitor:
         if self._monitoring:
             return
 
+        self.snapshots.append(self._take_snapshot())
         self._monitoring = True
         self._monitor_thread = threading.Thread(target=self._monitor_loop, daemon=True)
         self._monitor_thread.start()
@@ -62,6 +63,7 @@ class ProcessMonitor:
         if self._monitor_thread:
             self._monitor_thread.join(timeout=5.0)
             self._monitor_thread = None
+        self.snapshots.append(self._take_snapshot())
         logger.info(
             f"Stopped monitoring process {self.pid}, collected {len(self.snapshots)} snapshots"  # noqa: E501
         )
