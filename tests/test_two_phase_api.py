@@ -203,7 +203,7 @@ class TestProcessAnalysisEndpoint:
         print(f"FDM issues found: {len(dfm_report['issues'])}")
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("process_code", ["FDM", "SLA", "CNC_MILL"])
+    @pytest.mark.parametrize("process_code", ["FDM", "SLA", "CNC_MILL", "CNC_TURN"])
     async def test_multiple_processes_sequentially(
         self, client, sample_stl_file, process_code
     ):

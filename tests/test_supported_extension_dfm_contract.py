@@ -11,6 +11,7 @@ from trimesh.exchange import gltf
 from src.core.geometry import _analyze_single_process, _compute_metrics_worker
 
 ASSETS = Path(__file__).parent / "assets"
+PROCESS_CODES = ("FDM", "SLA", "CNC_MILL", "CNC_TURN")
 
 
 def _generated_glb_bytes() -> bytes:
@@ -79,13 +80,14 @@ def test_supported_extension_produces_dfm_ready_mesh(
     cad_extensions = {"step", "stp", "iges", "igs"}
     cad_bytes = source_bytes if extension in cad_extensions else None
     cad_extension = extension if extension in cad_extensions else None
-    report = _analyze_single_process(
-        stl_bytes,
-        "FDM",
-        cad_bytes,
-        cad_extension,
-    )
+    for process_code in PROCESS_CODES:
+        report = _analyze_single_process(
+            stl_bytes,
+            process_code,
+            cad_bytes,
+            cad_extension,
+        )
 
-    assert "error_type" not in report
-    assert report["reportType"] == "FDM"
-    assert isinstance(report["issues"], list)
+        assert "error_type" not in report
+        assert report["reportType"] == process_code
+        assert isinstance(report["issues"], list)
