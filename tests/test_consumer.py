@@ -628,13 +628,66 @@ async def test_artifact_job_records_server_work_executed_for_generated_artifacts
     } in recorded
 
 
-def test_browser_viewer_source_extension_allows_only_self_contained_meshes() -> None:
+def test_browser_viewer_source_extension_allows_browser_runtime_mesh_sources() -> None:
     assert _browser_viewer_source_extension("stl") == ".stl"
     assert _browser_viewer_source_extension(".OBJ") == ".obj"
     assert _browser_viewer_source_extension(".glb") == ".glb"
+    assert _browser_viewer_source_extension(".gltf") == ".gltf"
     assert _browser_viewer_source_extension(".step") is None
-    assert _browser_viewer_source_extension(".gltf") is None
     assert _browser_viewer_source_extension(".3mf") is None
+
+
+@pytest.mark.asyncio
+async def test_process_message_skips_server_work_for_browser_primary_gltf_upload(
+    consumer: UploadConsumer,
+    mock_storage: AsyncMock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    message = _build_upload_message("direct.gltf")
+    message.process.return_value = _TrackedMessageProcess([])
+    consumer.publish_event = AsyncMock()
+    consumer.validate_file_size_before_download = AsyncMock(return_value=True)
+    consumer._schedule_artifact_job_from_metrics = AsyncMock()  # type: ignore[method-assign]
+    avoided_work_counter = _RecordingCounter()
+    monkeypatch.setattr(
+        "src.consumers.upload_consumer._SERVER_WORK_AVOIDED_COUNTER",
+        avoided_work_counter,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        "src.consumers.upload_consumer.settings.GEOMETRY_BROWSER_PRIMARY_SKIP_EAGER_ANALYSIS",
+        True,
+        raising=False,
+    )
+
+    real_loop = asyncio.get_event_loop()
+    mock_loop = MagicMock(wraps=real_loop)
+    mock_loop.run_in_executor = MagicMock()
+
+    with patch(
+        "src.consumers.upload_consumer.asyncio.get_running_loop",
+        return_value=mock_loop,
+    ):
+        await consumer.process_message(message)
+
+    mock_storage.download_file.assert_not_awaited()
+    mock_loop.run_in_executor.assert_not_called()
+    consumer._schedule_artifact_job_from_metrics.assert_not_awaited()
+
+    completed_event = consumer.publish_event.await_args.args[0]
+    payload = completed_event.message.payload
+    assert payload.storage_path == "test/direct.gltf"
+    assert payload.glb_storage_path is None
+    assert payload.viewer_storage_path == "test/direct.gltf"
+    assert payload.viewer_file_extension == ".gltf"
+
+    recorded = [attributes for _, attributes in avoided_work_counter.calls]
+    assert {
+        "operation": "viewer_glb_export",
+        "execution_mode": "browser_primary",
+        "reason": "browser_primary_upload",
+        "file_extension": "gltf",
+    } in recorded
 
 
 @pytest.mark.asyncio

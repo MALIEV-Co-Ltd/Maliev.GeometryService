@@ -111,7 +111,7 @@ _PREVIEW_BUDGET_S = (
     60  # 7-view preview generation (reduced for faster failure detection)
 )
 _PHASE2_HARD_DEADLINE_S = 300
-_BROWSER_VIEWER_SOURCE_EXTENSIONS = frozenset({".glb", ".obj", ".stl"})
+_BROWSER_VIEWER_SOURCE_EXTENSIONS = frozenset({".glb", ".gltf", ".obj", ".stl"})
 _ARTIFACT_PIPELINE_COUNTER = meter.create_counter(
     "geometry.artifact_pipeline.operations",
     description=(
