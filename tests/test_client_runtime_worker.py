@@ -18,6 +18,11 @@ WORKER_PATH = (
     / "client_runtime"
     / "client-geometry-runtime.worker.js"
 )
+KERNEL_WASM_BASE64 = (
+    "AGFzbQEAAAABEANgAAF/YAF/AX9gAn9/AX8DBAMAAQIHQwMPcnVudGltZV92ZXJzaW9u"
+    "AAAbdHJpYW5nbGVfY291bnRfZnJvbV9pbmRpY2VzAAEPaXNfd2l0aGluX2xpbWl0AAIK"
+    "FgMEAEEBCwcAIABBA24LBwAgACABTQs="
+)
 
 
 def _pad_glb_chunk(data: bytes, pad_byte: bytes) -> bytes:
@@ -263,6 +268,93 @@ def test_client_runtime_worker_detects_local_overhang_hints() -> None:
         hint for hint in result["localOverlayHints"] if hint["category"] == "overhang"
     )
     assert overhang_hint["faceIndices"] == [1]
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="Node.js is required")
+def test_client_runtime_worker_loads_manifest_wasm_kernel() -> None:
+    script = textwrap.dedent(
+        f"""
+        const fs = require('node:fs');
+        const vm = require('node:vm');
+
+        let posted = null;
+        let fetchedUrl = null;
+        const wasmBase64 = {json.dumps(KERNEL_WASM_BASE64)};
+        const context = {{
+          console,
+          TextDecoder,
+          TextEncoder,
+          Uint8Array,
+          DataView,
+          Map,
+          Math,
+          Number,
+          Infinity,
+          WebAssembly,
+          crypto: globalThis.crypto,
+          JSON,
+          fetch: async url => {{
+            fetchedUrl = String(url);
+            const bytes = Buffer.from(wasmBase64, 'base64');
+            const end = bytes.byteOffset + bytes.byteLength;
+            return {{
+              ok: true,
+              arrayBuffer: async () => bytes.buffer.slice(bytes.byteOffset, end)
+            }};
+          }},
+          self: {{
+            crypto: globalThis.crypto,
+            postMessage: message => {{ posted = message; }}
+          }}
+        }};
+        vm.createContext(context);
+        const workerPath = {json.dumps(str(WORKER_PATH))};
+        vm.runInContext(fs.readFileSync(workerPath, 'utf8'), context);
+
+        const event = {{
+          data: {{
+            id: 'wasm-kernel',
+            processCode: 'CNC_MILL',
+            wasmUrl: '/geometry/client-runtime/assets/client-geometry-kernel.test.wasm',
+            input: {{
+              meshBuffers: [{{
+                positions: [0, 0, 0, 10, 0, 0, 10, 20, 0, 0, 20, 0],
+                indices: [0, 1, 2, 0, 2, 3]
+              }}]
+            }}
+          }}
+        }};
+
+        Promise.resolve(context.self.onmessage(event)).then(() => {{
+          if (!posted) {{
+            console.error('worker did not post a result');
+            process.exit(1);
+          }}
+          console.log(JSON.stringify({{ posted, fetchedUrl }}));
+        }});
+        """
+    )
+
+    completed = subprocess.run(
+        ["node", "-e", script],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    probe = json.loads(completed.stdout)
+    posted = probe["posted"]
+
+    assert probe["fetchedUrl"] == (
+        "/geometry/client-runtime/assets/client-geometry-kernel.test.wasm"
+    )
+    assert posted["ok"] is True
+    result = posted["result"]
+    assert result["runtimeKernel"] == {
+        "wasmLoaded": True,
+        "runtimeVersion": 1,
+    }
+    assert result["metrics"]["faceCount"] == 2
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="Node.js is required")

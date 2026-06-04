@@ -2,10 +2,16 @@ const MALIEV_BROWSER_GEOMETRY_RUNTIME_VERSION = "1.0.0";
 const MALIEV_BROWSER_GEOMETRY_ALGORITHM_VERSION = "browser-first-dfm-v1";
 const MALIEV_BROWSER_GEOMETRY_EXECUTION_MODE = "primary_interactive";
 
+let runtimeKernelPromise = null;
+let runtimeKernelUrl = null;
+
 self.onmessage = async event => {
   const message = event.data || {};
   try {
-    const result = await analyze(message.input || {}, message.processCode || "FDM");
+    const runtimeKernel = await loadRuntimeKernel(
+      message.wasmUrl || message.runtimeKernel?.wasmUrl || message.kernelAssetUrl
+    );
+    const result = await analyze(message.input || {}, message.processCode || "FDM", runtimeKernel);
     self.postMessage({ id: message.id || null, ok: true, result });
   } catch (error) {
     self.postMessage({
@@ -16,12 +22,38 @@ self.onmessage = async event => {
   }
 };
 
-async function analyze(input, processCode) {
+async function loadRuntimeKernel(wasmUrl) {
+  const url = String(wasmUrl || "");
+  if (!url || typeof WebAssembly === "undefined" || typeof fetch !== "function") {
+    return null;
+  }
+
+  if (runtimeKernelPromise && runtimeKernelUrl === url) return runtimeKernelPromise;
+  runtimeKernelUrl = url;
+  runtimeKernelPromise = (async () => {
+    const response = await fetch(url);
+    if (!response?.ok || typeof response.arrayBuffer !== "function") return null;
+
+    const bytes = await response.arrayBuffer();
+    const instance = await WebAssembly.instantiate(bytes, {});
+    const exports = instance?.instance?.exports || {};
+    const runtimeVersion = Number(exports.runtime_version?.());
+    if (runtimeVersion !== 1) return null;
+
+    return {
+      exports,
+      runtimeVersion
+    };
+  })().catch(() => null);
+  return runtimeKernelPromise;
+}
+
+async function analyze(input, processCode, runtimeKernel = null) {
   const mesh = input.meshBuffers
     ? meshFromBuffers(input.meshBuffers)
     : meshFromFile(input.fileBytes, input.fileName || input.fileExtension || "");
 
-  const metrics = computeMetrics(mesh);
+  const metrics = computeMetrics(mesh, runtimeKernel);
   const inputHash = await hashMesh(mesh);
   const issues = buildIssues(metrics, processCode);
   const publicMetrics = { ...metrics };
@@ -37,6 +69,10 @@ async function analyze(input, processCode) {
     status: "analysis_complete",
     processCode,
     inputHash,
+    runtimeKernel: {
+      wasmLoaded: Boolean(runtimeKernel),
+      runtimeVersion: runtimeKernel?.runtimeVersion ?? null
+    },
     metrics: publicMetrics,
     issues,
     localOverlayHints: buildLocalOverlayHints(issues)
@@ -381,7 +417,7 @@ function glbScalarReader(view, componentType) {
   throw new Error("GLB indices must use unsigned byte, unsigned short, or unsigned int components.");
 }
 
-function computeMetrics(mesh) {
+function computeMetrics(mesh, runtimeKernel = null) {
   const { positions, indices } = mesh;
   if (positions.length === 0 || indices.length === 0) {
     return emptyMetrics();
@@ -445,10 +481,11 @@ function computeMetrics(mesh) {
 
   const nonManifoldEdgeCount = Array.from(edgeCounts.values()).filter(count => count !== 2).length;
   const extents = [max[0] - min[0], max[1] - min[1], max[2] - min[2]];
+  const faceCount = computeTriangleCount(indices.length, runtimeKernel);
 
   return {
     vertexCount: positions.length / 3,
-    faceCount: indices.length / 3,
+    faceCount,
     volumeMm3: Math.abs(signedVolume),
     surfaceAreaMm2: area,
     boundingBox: { x: extents[0], y: extents[1], z: extents[2] },
@@ -456,8 +493,17 @@ function computeMetrics(mesh) {
     nonManifoldEdgeCount,
     triangles,
     isEmpty: indices.length === 0,
-    complexity: complexityFor(indices.length / 3)
+    complexity: complexityFor(faceCount)
   };
+}
+
+function computeTriangleCount(indexCount, runtimeKernel = null) {
+  const wasmTriangleCounter = runtimeKernel?.exports?.triangle_count_from_indices;
+  if (typeof wasmTriangleCounter === "function") {
+    const count = Number(wasmTriangleCounter(Math.max(0, Math.trunc(indexCount))));
+    if (Number.isFinite(count) && count >= 0) return count;
+  }
+  return indexCount / 3;
 }
 
 function emptyMetrics() {

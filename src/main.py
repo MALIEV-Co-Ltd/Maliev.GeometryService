@@ -162,6 +162,11 @@ _CLIENT_RUNTIME_ALGORITHM_VERSION = "browser-first-dfm-v1"
 _CLIENT_RUNTIME_WORKER_BASENAME = "client-geometry-runtime.worker.js"
 _CLIENT_RUNTIME_DIR = Path(__file__).resolve().parent / "client_runtime"
 _CLIENT_RUNTIME_WORKER_PATH = _CLIENT_RUNTIME_DIR / _CLIENT_RUNTIME_WORKER_BASENAME
+_CLIENT_RUNTIME_WASM_BYTES = base64.b64decode(
+    "AGFzbQEAAAABEANgAAF/YAF/AX9gAn9/AX8DBAMAAQIHQwMPcnVudGltZV92ZXJzaW9u"
+    "AAAbdHJpYW5nbGVfY291bnRfZnJvbV9pbmRpY2VzAAEPaXNfd2l0aGluX2xpbWl0AAIK"
+    "FgMEAEEBCwcAIABBA24LBwAgACABTQs="
+)
 _CLIENT_RUNTIME_DEVICE_PROFILES = {
     "mobile": {
         "maxInputBytes": 8 * 1024 * 1024,
@@ -374,6 +379,11 @@ def _client_runtime_worker_asset_name() -> str:
     return f"client-geometry-runtime.{digest}.worker.js"
 
 
+def _client_runtime_wasm_asset_name() -> str:
+    digest = hashlib.sha256(_CLIENT_RUNTIME_WASM_BYTES).hexdigest()[:16]
+    return f"client-geometry-kernel.{digest}.wasm"
+
+
 @router.get("/client-runtime/manifest.json", tags=["Client Runtime"])
 async def client_runtime_manifest() -> JSONResponse:
     """Return the browser-first geometry runtime manifest."""
@@ -386,6 +396,7 @@ async def client_runtime_manifest() -> JSONResponse:
         },
     )
     worker_asset_name = _client_runtime_worker_asset_name()
+    wasm_asset_name = _client_runtime_wasm_asset_name()
     response = JSONResponse(
         content={
             "manifestVersion": _CLIENT_RUNTIME_MANIFEST_VERSION,
@@ -407,7 +418,7 @@ async def client_runtime_manifest() -> JSONResponse:
             },
             "assets": {
                 "worker": f"/geometry/client-runtime/assets/{worker_asset_name}",
-                "wasm": None,
+                "wasm": f"/geometry/client-runtime/assets/{wasm_asset_name}",
             },
             "capabilities": {
                 "inputs": {
@@ -441,8 +452,17 @@ async def client_runtime_manifest() -> JSONResponse:
 @router.get("/client-runtime/assets/{asset_name}", tags=["Client Runtime"])
 async def client_runtime_asset(asset_name: str) -> Response:
     """Serve content-hashed browser advisory geometry runtime assets."""
-    expected_name = _client_runtime_worker_asset_name()
-    if asset_name != expected_name:
+    worker_asset_name = _client_runtime_worker_asset_name()
+    wasm_asset_name = _client_runtime_wasm_asset_name()
+    if asset_name == worker_asset_name:
+        content = _CLIENT_RUNTIME_WORKER_PATH.read_bytes()
+        media_type = "text/javascript; charset=utf-8"
+        asset_type = "worker"
+    elif asset_name == wasm_asset_name:
+        content = _CLIENT_RUNTIME_WASM_BYTES
+        media_type = "application/wasm"
+        asset_type = "wasm"
+    else:
         return JSONResponse(
             content={"detail": "Runtime asset not found"},
             status_code=404,
@@ -451,14 +471,14 @@ async def client_runtime_asset(asset_name: str) -> Response:
     _CLIENT_RUNTIME_DELIVERY_COUNTER.add(
         1,
         {
-            "asset_type": "worker",
+            "asset_type": asset_type,
             "execution_mode": "primary_interactive",
             "authority": "local_primary",
         },
     )
     response = Response(
-        content=_CLIENT_RUNTIME_WORKER_PATH.read_bytes(),
-        media_type="text/javascript; charset=utf-8",
+        content=content,
+        media_type=media_type,
     )
     response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
     return _add_local_runtime_headers(response)

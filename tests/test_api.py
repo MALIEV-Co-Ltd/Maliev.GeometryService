@@ -110,7 +110,10 @@ def test_client_runtime_manifest_is_public_and_not_cached():
         "/geometry/client-runtime/assets/client-geometry-runtime."
     )
     assert body["assets"]["worker"].endswith(".worker.js")
-    assert body["assets"]["wasm"] is None
+    assert body["assets"]["wasm"].startswith(
+        "/geometry/client-runtime/assets/client-geometry-kernel."
+    )
+    assert body["assets"]["wasm"].endswith(".wasm")
     assert body["artifactPolicy"] == {
         "directBrowserViewerExtensions": [".glb", ".gltf", ".obj", ".stl"],
         "browserViewableUploads": {
@@ -184,6 +187,25 @@ def test_client_runtime_worker_asset_is_hash_named_and_immutable():
     )
     assert "MALIEV_BROWSER_GEOMETRY_RUNTIME_VERSION" in response.text
     assert "primary_interactive" in response.text
+
+
+def test_client_runtime_wasm_asset_is_hash_named_and_immutable():
+    manifest = client.get("/geometry/client-runtime/manifest.json").json()
+    asset_url = manifest["assets"]["wasm"]
+
+    response = client.get(asset_url)
+
+    assert response.status_code == 200
+    assert response.headers["cache-control"] == "public, max-age=31536000, immutable"
+    assert response.headers["content-type"] == "application/wasm"
+    assert response.headers["x-maliev-geometry-execution-mode"] == (
+        "primary_interactive"
+    )
+    assert response.headers["x-maliev-geometry-authority"] == "local_primary"
+    assert response.headers["x-maliev-geometry-server-role"] == (
+        "fallback_and_final_validation"
+    )
+    assert response.content.startswith(b"\x00asm")
 
 
 def test_client_runtime_missing_asset_returns_404():
