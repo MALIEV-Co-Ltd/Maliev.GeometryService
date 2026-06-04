@@ -1,8 +1,10 @@
 from datetime import datetime, timedelta, timezone
+from typing import Any
 
 import jwt
 from fastapi.testclient import TestClient
 
+from src import main
 from src.core.config import settings
 from src.main import app
 
@@ -16,6 +18,14 @@ settings.JWT_ISSUER = ISSUER
 settings.JWT_AUDIENCE = AUDIENCE
 
 client = TestClient(app)
+
+
+class _RecordingCounter:
+    def __init__(self) -> None:
+        self.calls: list[tuple[int, dict[str, Any]]] = []
+
+    def add(self, amount: int, attributes: dict[str, Any] | None = None) -> None:
+        self.calls.append((amount, attributes or {}))
 
 
 def _auth_headers() -> dict[str, str]:
@@ -169,6 +179,33 @@ def test_client_runtime_manifest_is_public_and_not_cached():
     }
 
 
+def test_client_runtime_manifest_emits_browser_primary_offload_decision(monkeypatch):
+    counter = _RecordingCounter()
+    monkeypatch.setattr(
+        main,
+        "_GEOMETRY_OFFLOAD_DECISION_COUNTER",
+        counter,
+        raising=False,
+    )
+
+    response = client.get("/geometry/client-runtime/manifest.json")
+
+    assert response.status_code == 200
+    assert counter.calls == [
+        (
+            1,
+            {
+                "decision": "runtime_delivered",
+                "execution_path": "browser_primary",
+                "execution_mode": "primary_interactive",
+                "authority": "local_primary",
+                "server_cpu": "avoided",
+                "asset_type": "manifest",
+            },
+        )
+    ]
+
+
 def test_client_runtime_worker_asset_is_hash_named_and_immutable():
     manifest = client.get("/geometry/client-runtime/manifest.json").json()
     asset_url = manifest["assets"]["worker"]
@@ -214,3 +251,35 @@ def test_client_runtime_missing_asset_returns_404():
     )
 
     assert response.status_code == 404
+
+
+def test_server_dfm_response_emits_server_fallback_offload_decision(monkeypatch):
+    counter = _RecordingCounter()
+    monkeypatch.setattr(
+        main,
+        "_GEOMETRY_OFFLOAD_DECISION_COUNTER",
+        counter,
+        raising=False,
+    )
+
+    response = client.post(
+        "/geometry/uploads/test-upload-no-quality/dfm/FDM",
+        headers=_auth_headers(),
+    )
+
+    assert response.status_code == 404
+    assert counter.calls == [
+        (
+            1,
+            {
+                "decision": "required",
+                "execution_path": "server_fallback",
+                "execution_mode": "server_fallback_final_validation",
+                "authority": "server_authoritative",
+                "server_cpu": "consumed",
+                "process_code": "FDM",
+                "status_code": 404,
+                "cache_status": "none",
+            },
+        )
+    ]

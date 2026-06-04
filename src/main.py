@@ -208,6 +208,13 @@ _SERVER_DFM_COUNTER = meter.create_counter(
     "geometry.server_dfm.requests",
     description="Counts GeometryService DFM requests that consume server CPU.",
 )
+_GEOMETRY_OFFLOAD_DECISION_COUNTER = meter.create_counter(
+    "geometry.dfm.execution.decisions",
+    description=(
+        "Counts whether interactive DFM work was offloaded to the browser runtime "
+        "or required GeometryService server fallback work."
+    ),
+)
 
 
 def _add_local_runtime_headers(response: _ResponseT) -> _ResponseT:
@@ -231,6 +238,37 @@ def _add_server_dfm_headers(
     if cache_status:
         response.headers["X-Maliev-Geometry-Cache-Status"] = cache_status
     return response
+
+
+def _record_geometry_offload_decision(
+    *,
+    decision: str,
+    execution_path: str,
+    execution_mode: str,
+    authority: str,
+    server_cpu: str,
+    asset_type: str | None = None,
+    process_code: str | None = None,
+    status_code: int | None = None,
+    cache_status: str | None = None,
+) -> None:
+    tags: dict[str, Any] = {
+        "decision": decision,
+        "execution_path": execution_path,
+        "execution_mode": execution_mode,
+        "authority": authority,
+        "server_cpu": server_cpu,
+    }
+    if asset_type is not None:
+        tags["asset_type"] = asset_type
+    if process_code is not None:
+        tags["process_code"] = process_code
+    if status_code is not None:
+        tags["status_code"] = status_code
+    if cache_status is not None:
+        tags["cache_status"] = cache_status
+
+    _GEOMETRY_OFFLOAD_DECISION_COUNTER.add(1, tags)
 
 
 def _is_public_path(path: str) -> bool:
@@ -395,6 +433,14 @@ async def client_runtime_manifest() -> JSONResponse:
             "authority": "local_primary",
         },
     )
+    _record_geometry_offload_decision(
+        decision="runtime_delivered",
+        execution_path="browser_primary",
+        execution_mode="primary_interactive",
+        authority="local_primary",
+        server_cpu="avoided",
+        asset_type="manifest",
+    )
     worker_asset_name = _client_runtime_worker_asset_name()
     wasm_asset_name = _client_runtime_wasm_asset_name()
     response = JSONResponse(
@@ -475,6 +521,14 @@ async def client_runtime_asset(asset_name: str) -> Response:
             "execution_mode": "primary_interactive",
             "authority": "local_primary",
         },
+    )
+    _record_geometry_offload_decision(
+        decision="runtime_delivered",
+        execution_path="browser_primary",
+        execution_mode="primary_interactive",
+        authority="local_primary",
+        server_cpu="avoided",
+        asset_type=asset_type,
     )
     response = Response(
         content=content,
@@ -825,6 +879,16 @@ async def analyze_for_process(
                 "execution_mode": "server_fallback_final_validation",
                 "authority": "server_authoritative",
             },
+        )
+        _record_geometry_offload_decision(
+            decision="required",
+            execution_path="server_fallback",
+            execution_mode="server_fallback_final_validation",
+            authority="server_authoritative",
+            server_cpu="consumed",
+            process_code=process_code,
+            status_code=status_code,
+            cache_status=cache_status or "none",
         )
         return _add_server_dfm_headers(response, process_code, cache_status)
 
