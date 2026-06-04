@@ -180,7 +180,7 @@ _CLIENT_RUNTIME_DEVICE_PROFILES = {
     },
 }
 _CLIENT_RUNTIME_ARTIFACT_POLICY = {
-    "directBrowserViewerExtensions": [".glb", ".obj", ".stl"],
+    "directBrowserViewerExtensions": [".glb", ".gltf", ".obj", ".stl"],
     "browserViewableUploads": {
         "viewerSource": "original_upload",
         "serverEagerMetrics": False,
@@ -416,6 +416,7 @@ async def client_runtime_manifest() -> JSONResponse:
                     "asciiStl": True,
                     "obj": True,
                     "glb": True,
+                    "gltf": True,
                 },
                 "localOperations": [
                     "mesh_metrics",

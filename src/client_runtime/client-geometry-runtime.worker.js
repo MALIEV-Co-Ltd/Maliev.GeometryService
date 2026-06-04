@@ -81,13 +81,16 @@ function meshFromFile(fileBytes, fileName) {
   if (lowerName.endsWith(".glb") || looksLikeGlb(bytes)) {
     return parseGlb(bytes);
   }
+  if (lowerName.endsWith(".gltf") || looksLikeGltf(bytes)) {
+    return parseGltf(bytes);
+  }
   if (lowerName.endsWith(".obj") || looksLikeObj(bytes)) {
     return parseObj(bytes);
   }
   if (lowerName.endsWith(".stl") || looksLikeStl(bytes)) {
     return parseStl(bytes);
   }
-  throw new Error("Browser advisory runtime v1 supports STL/OBJ/GLB bytes or viewer mesh buffers.");
+  throw new Error("Browser advisory runtime v1 supports STL/OBJ/glTF/GLB bytes or viewer mesh buffers.");
 }
 
 function looksLikeStl(bytes) {
@@ -209,6 +212,12 @@ function looksLikeGlb(bytes) {
   return view.getUint32(0, true) === 0x46546c67 && view.getUint32(4, true) === 2;
 }
 
+function looksLikeGltf(bytes) {
+  const prefix = new TextDecoder("utf-8").decode(bytes.slice(0, Math.min(bytes.length, 2048))).trimStart();
+  if (!prefix.startsWith("{")) return false;
+  return /"asset"\s*:/.test(prefix) && /"version"\s*:\s*"2\.0"/.test(prefix);
+}
+
 function parseGlb(bytes) {
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   if (view.getUint32(0, true) !== 0x46546c67) {
@@ -227,6 +236,42 @@ function parseGlb(bytes) {
   }
 
   const gltf = JSON.parse(new TextDecoder("utf-8").decode(jsonBytes).trim());
+  return meshFromGltf(gltf, [binBytes], "GLB");
+}
+
+function parseGltf(bytes) {
+  const gltf = JSON.parse(new TextDecoder("utf-8").decode(bytes).trim());
+  const buffers = (gltf.buffers || []).map((buffer, index) => readGltfBufferBytes(buffer, index));
+  return meshFromGltf(gltf, buffers, "glTF");
+}
+
+function readGltfBufferBytes(buffer, index) {
+  const uri = String(buffer?.uri || "");
+  if (!uri.startsWith("data:")) {
+    throw new Error(`glTF buffer ${index} must be embedded as a data URI for browser-local analysis.`);
+  }
+
+  const commaIndex = uri.indexOf(",");
+  if (commaIndex < 0) {
+    throw new Error(`glTF buffer ${index} data URI is malformed.`);
+  }
+
+  const metadata = uri.slice(0, commaIndex).toLowerCase();
+  const payload = uri.slice(commaIndex + 1);
+  if (!metadata.includes(";base64")) {
+    throw new Error(`glTF buffer ${index} must use base64 data URI encoding.`);
+  }
+
+  const decoded = atob(payload);
+  const bytes = new Uint8Array(decoded.length);
+  for (let offset = 0; offset < decoded.length; offset += 1) {
+    bytes[offset] = decoded.charCodeAt(offset);
+  }
+
+  return bytes;
+}
+
+function meshFromGltf(gltf, buffers, sourceName) {
   const positions = [];
   const indices = [];
 
@@ -234,10 +279,10 @@ function parseGlb(bytes) {
     for (const primitive of mesh.primitives || []) {
       const positionAccessorIndex = primitive.attributes?.POSITION;
       if (positionAccessorIndex === undefined) continue;
-      const primitivePositions = readGlbAccessorVec3(gltf, binBytes, positionAccessorIndex);
+      const primitivePositions = readGltfAccessorVec3(gltf, buffers, positionAccessorIndex, sourceName);
       const primitiveIndices = primitive.indices === undefined
         ? sequentialIndices(primitivePositions.length / 3)
-        : readGlbAccessorScalars(gltf, binBytes, primitive.indices);
+        : readGltfAccessorScalars(gltf, buffers, primitive.indices, sourceName);
       const baseVertex = positions.length / 3;
       positions.push(...primitivePositions);
       for (const index of primitiveIndices) indices.push(baseVertex + index);
@@ -245,7 +290,7 @@ function parseGlb(bytes) {
   }
 
   if (positions.length === 0 || indices.length === 0) {
-    throw new Error("GLB did not contain mesh primitive triangle data.");
+    throw new Error(`${sourceName} did not contain mesh primitive triangle data.`);
   }
   return { positions, indices };
 }
@@ -271,12 +316,12 @@ function sequentialIndices(count) {
   return Array.from({ length: count }, (_, index) => index);
 }
 
-function readGlbAccessorVec3(gltf, binBytes, accessorIndex) {
+function readGltfAccessorVec3(gltf, buffers, accessorIndex, sourceName) {
   const accessor = gltf.accessors?.[accessorIndex];
   if (!accessor || accessor.type !== "VEC3" || accessor.componentType !== 5126) {
-    throw new Error("GLB POSITION accessor must be VEC3 float32.");
+    throw new Error(`${sourceName} POSITION accessor must be VEC3 float32.`);
   }
-  const { view, start, stride } = glbAccessorView(gltf, binBytes, accessor);
+  const { view, start, stride } = gltfAccessorView(gltf, buffers, accessor, sourceName);
   const values = [];
   for (let index = 0; index < accessor.count; index += 1) {
     const offset = start + index * stride;
@@ -289,12 +334,12 @@ function readGlbAccessorVec3(gltf, binBytes, accessorIndex) {
   return values;
 }
 
-function readGlbAccessorScalars(gltf, binBytes, accessorIndex) {
+function readGltfAccessorScalars(gltf, buffers, accessorIndex, sourceName) {
   const accessor = gltf.accessors?.[accessorIndex];
   if (!accessor || accessor.type !== "SCALAR") {
-    throw new Error("GLB index accessor must be scalar.");
+    throw new Error(`${sourceName} index accessor must be scalar.`);
   }
-  const { view, start, stride } = glbAccessorView(gltf, binBytes, accessor);
+  const { view, start, stride } = gltfAccessorView(gltf, buffers, accessor, sourceName);
   const reader = glbScalarReader(view, accessor.componentType);
   const values = [];
   for (let index = 0; index < accessor.count; index += 1) {
@@ -303,15 +348,20 @@ function readGlbAccessorScalars(gltf, binBytes, accessorIndex) {
   return values;
 }
 
-function glbAccessorView(gltf, binBytes, accessor) {
+function gltfAccessorView(gltf, buffers, accessor, sourceName) {
   const bufferView = gltf.bufferViews?.[accessor.bufferView];
-  if (!bufferView || bufferView.buffer !== 0) {
-    throw new Error("GLB accessor must reference the embedded BIN buffer.");
+  if (!bufferView) {
+    throw new Error(`${sourceName} accessor must reference a bufferView.`);
+  }
+  const bufferIndex = bufferView.buffer || 0;
+  const bufferBytes = buffers[bufferIndex];
+  if (!bufferBytes) {
+    throw new Error(`${sourceName} bufferView references missing buffer ${bufferIndex}.`);
   }
   const componentSize = glbComponentSize(accessor.componentType);
   const typeWidth = accessor.type === "VEC3" ? 3 : 1;
   return {
-    view: new DataView(binBytes.buffer, binBytes.byteOffset, binBytes.byteLength),
+    view: new DataView(bufferBytes.buffer, bufferBytes.byteOffset, bufferBytes.byteLength),
     start: (bufferView.byteOffset || 0) + (accessor.byteOffset || 0),
     stride: bufferView.byteStride || componentSize * typeWidth
   };
