@@ -285,6 +285,73 @@ async def test_process_message_requests_no_glb_metrics_for_browser_viewable_mesh
 
 
 @pytest.mark.asyncio
+async def test_process_message_records_server_work_executed_for_server_primary_upload(
+    consumer: UploadConsumer,
+    mock_storage: AsyncMock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    message = _build_upload_message("server.step")
+    message.process.return_value = _TrackedMessageProcess([])
+    mock_storage.download_file.return_value = io.BytesIO(b"fake-step-content")
+    consumer.publish_event = AsyncMock()
+    consumer.validate_file_size_before_download = AsyncMock(return_value=True)
+    consumer._schedule_artifact_job_from_metrics = AsyncMock()  # type: ignore[method-assign]
+    executed_work_counter = _RecordingCounter()
+    monkeypatch.setattr(
+        "src.consumers.upload_consumer._SERVER_WORK_EXECUTED_COUNTER",
+        executed_work_counter,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        "src.consumers.upload_consumer.get_cached_tessellation",
+        AsyncMock(return_value=None),
+    )
+
+    captured_args: tuple[object, ...] | None = None
+    real_loop = asyncio.get_event_loop()
+
+    def fake_run_in_executor(executor, fn, *args):  # noqa: ANN001, ARG001
+        nonlocal captured_args
+        if fn.__name__ != "_compute_metrics_worker":
+            raise AssertionError(f"Unexpected executor function: {fn.__name__}")
+        captured_args = args
+        future = real_loop.create_future()
+        future.set_result(_FAKE_METRICS_RESULT)
+        return future
+
+    mock_loop = MagicMock(wraps=real_loop)
+    mock_loop.run_in_executor = fake_run_in_executor
+
+    with patch(
+        "src.consumers.upload_consumer.asyncio.get_running_loop",
+        return_value=mock_loop,
+    ):
+        await consumer.process_message(message)
+
+    assert captured_args == (b"fake-step-content", ".step", True, True)
+    recorded = [attributes for _, attributes in executed_work_counter.calls]
+    assert {
+        "operation": "eager_metrics",
+        "execution_mode": "server_primary",
+        "reason": "server_artifact_required",
+        "file_extension": "step",
+    } in recorded
+    assert {
+        "operation": "viewer_glb_export",
+        "execution_mode": "server_primary",
+        "reason": "server_artifact_required",
+        "file_extension": "step",
+    } in recorded
+    assert {
+        "operation": "mesh_stl_export",
+        "execution_mode": "server_primary",
+        "reason": "server_artifact_required",
+        "file_extension": "step",
+    } in recorded
+    consumer._schedule_artifact_job_from_metrics.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_process_message_skips_eager_metrics_for_browser_primary_upload(
     consumer: UploadConsumer,
     mock_storage: AsyncMock,
@@ -488,6 +555,73 @@ async def test_artifact_job_waits_for_viewer_glb_before_secondary_artifacts(
     assert {
         "operation": "secondary_artifacts",
         "status": "scheduled",
+        "execution_mode": "server_artifact",
+        "reason": "server_viewer_artifact",
+        "file_extension": "step",
+    } in recorded
+
+
+@pytest.mark.asyncio
+async def test_artifact_job_records_server_work_executed_for_generated_artifacts(
+    consumer: UploadConsumer,
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    executed_work_counter = _RecordingCounter()
+    monkeypatch.setattr(
+        "src.consumers.upload_consumer._SERVER_WORK_EXECUTED_COUNTER",
+        executed_work_counter,
+        raising=False,
+    )
+    artifact_temp_dir = tmp_path / "artifact"
+    artifact_temp_dir.mkdir()
+    job = ArtifactProcessingJob(
+        file_id=str(uuid4()),
+        upload_id=str(uuid4()),
+        storage_path="projects/test/model.step",
+        file_ext=".step",
+        file_name="model.step",
+        file_size=1024,
+        correlation_id=uuid4(),
+        metrics=MagicMock(),
+        body_count=1,
+        body_infos=None,
+        temp_dir=artifact_temp_dir,
+        cad_glb_path=artifact_temp_dir / "cad.glb",
+        executor=MagicMock(),
+        queued_at=0.0,
+    )
+
+    async def fake_publish_glb(job: ArtifactProcessingJob) -> bool:  # noqa: ARG001
+        return True
+
+    async def fake_publish_small_thumbnail(
+        job: ArtifactProcessingJob,  # noqa: ARG001
+    ) -> bool:
+        return True
+
+    async def fake_publish_previews(job: ArtifactProcessingJob) -> bool:  # noqa: ARG001
+        return True
+
+    monkeypatch.setattr(consumer, "_publish_glb", fake_publish_glb)
+    monkeypatch.setattr(
+        consumer,
+        "_publish_small_thumbnail",
+        fake_publish_small_thumbnail,
+    )
+    monkeypatch.setattr(consumer, "_publish_previews", fake_publish_previews)
+
+    await consumer._run_artifact_job(job)
+
+    recorded = [attributes for _, attributes in executed_work_counter.calls]
+    assert {
+        "operation": "viewer_glb_export",
+        "execution_mode": "server_artifact",
+        "reason": "browser_source_unavailable",
+        "file_extension": "step",
+    } in recorded
+    assert {
+        "operation": "preview_images",
         "execution_mode": "server_artifact",
         "reason": "server_viewer_artifact",
         "file_extension": "step",

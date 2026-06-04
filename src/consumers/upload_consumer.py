@@ -140,6 +140,13 @@ _SERVER_WORK_AVOIDED_COUNTER = meter.create_counter(
         "geometry execution."
     ),
 )
+_SERVER_WORK_EXECUTED_COUNTER = meter.create_counter(
+    "geometry.server_work.executed_operations",
+    description=(
+        "Counts CPU-heavy GeometryService operations executed on the server so "
+        "they can be compared with browser-first avoided work."
+    ),
+)
 _BROWSER_PRIMARY_UPLOAD_AVOIDED_OPERATIONS = (
     "eager_metrics",
     "viewer_glb_export",
@@ -260,6 +267,24 @@ def _record_server_work_avoided(
     )
 
 
+def _record_server_work_executed(
+    *,
+    file_ext: str,
+    operation: str,
+    execution_mode: str,
+    reason: str,
+) -> None:
+    _SERVER_WORK_EXECUTED_COUNTER.add(
+        1,
+        {
+            "operation": operation,
+            "execution_mode": execution_mode,
+            "reason": reason,
+            "file_extension": _artifact_file_extension(file_ext),
+        },
+    )
+
+
 def _record_browser_primary_upload_work_avoided(*, file_ext: str) -> None:
     for operation in _BROWSER_PRIMARY_UPLOAD_AVOIDED_OPERATIONS:
         _record_server_work_avoided(
@@ -267,6 +292,36 @@ def _record_browser_primary_upload_work_avoided(*, file_ext: str) -> None:
             operation=operation,
             execution_mode="browser_primary",
             reason="browser_primary_upload",
+        )
+
+
+def _record_phase1_worker_work_executed(
+    *,
+    file_ext: str,
+    include_glb_export: bool,
+    include_stl_export: bool,
+    execution_mode: str,
+    reason: str,
+) -> None:
+    _record_server_work_executed(
+        file_ext=file_ext,
+        operation="eager_metrics",
+        execution_mode=execution_mode,
+        reason=reason,
+    )
+    if include_glb_export:
+        _record_server_work_executed(
+            file_ext=file_ext,
+            operation="viewer_glb_export",
+            execution_mode=execution_mode,
+            reason=reason,
+        )
+    if include_stl_export:
+        _record_server_work_executed(
+            file_ext=file_ext,
+            operation="mesh_stl_export",
+            execution_mode=execution_mode,
+            reason=reason,
         )
 
 
@@ -633,6 +688,13 @@ class UploadConsumer:
                                     execution_mode=execution_mode,
                                     reason=reason,
                                     cache_status="cold",
+                                )
+                                _record_phase1_worker_work_executed(
+                                    file_ext=file_ext,
+                                    include_glb_export=include_glb_export,
+                                    include_stl_export=include_stl_export,
+                                    execution_mode=execution_mode,
+                                    reason=reason,
                                 )
                                 metrics_result = await asyncio.wait_for(
                                     loop.run_in_executor(
@@ -1048,6 +1110,12 @@ class UploadConsumer:
                             execution_mode="server_artifact",
                             reason="browser_source_unavailable",
                         )
+                        _record_server_work_executed(
+                            file_ext=job.file_ext,
+                            operation="viewer_glb_export",
+                            execution_mode="server_artifact",
+                            reason="browser_source_unavailable",
+                        )
                         glb_published = await self._publish_glb(job)
                         if not glb_published:
                             _record_artifact_pipeline_operation(
@@ -1070,6 +1138,12 @@ class UploadConsumer:
                         job=job,
                         operation="secondary_artifacts",
                         status="scheduled",
+                        execution_mode="server_artifact",
+                        reason="server_viewer_artifact",
+                    )
+                    _record_server_work_executed(
+                        file_ext=job.file_ext,
+                        operation="preview_images",
                         execution_mode="server_artifact",
                         reason="server_viewer_artifact",
                     )
