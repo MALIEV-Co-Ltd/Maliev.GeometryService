@@ -183,11 +183,13 @@ _CLIENT_RUNTIME_ARTIFACT_POLICY = {
     "directBrowserViewerExtensions": [".glb", ".obj", ".stl"],
     "browserViewableUploads": {
         "viewerSource": "original_upload",
+        "serverEagerMetrics": False,
         "serverGlbExport": False,
         "serverPreviewImages": False,
     },
     "serverGeneratedViewerUploads": {
         "viewerSource": "generated_glb",
+        "serverEagerMetrics": True,
         "serverGlbExport": True,
         "serverPreviewImages": True,
     },

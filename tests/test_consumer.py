@@ -236,6 +236,11 @@ async def test_process_message_requests_no_glb_metrics_for_browser_viewable_mesh
         "src.consumers.upload_consumer._PHASE1_EXPORT_COUNTER",
         counter,
     )
+    monkeypatch.setattr(
+        "src.consumers.upload_consumer.settings.GEOMETRY_BROWSER_PRIMARY_SKIP_EAGER_ANALYSIS",
+        False,
+        raising=False,
+    )
 
     captured_args: tuple[object, ...] | None = None
     real_loop = asyncio.get_event_loop()
@@ -277,6 +282,65 @@ async def test_process_message_requests_no_glb_metrics_for_browser_viewable_mesh
         "cache_status": "cold",
     } in recorded
     consumer._schedule_artifact_job_from_metrics.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_process_message_skips_eager_metrics_for_browser_primary_upload(
+    consumer: UploadConsumer,
+    mock_storage: AsyncMock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    message = _build_upload_message("direct.stl")
+    message.process.return_value = _TrackedMessageProcess([])
+    consumer.publish_event = AsyncMock()
+    consumer.validate_file_size_before_download = AsyncMock(return_value=True)
+    consumer._schedule_artifact_job_from_metrics = AsyncMock()  # type: ignore[method-assign]
+    counter = _RecordingCounter()
+    monkeypatch.setattr(
+        "src.consumers.upload_consumer._PHASE1_ANALYSIS_COUNTER",
+        counter,
+    )
+    monkeypatch.setattr(
+        "src.consumers.upload_consumer.settings.GEOMETRY_BROWSER_PRIMARY_SKIP_EAGER_ANALYSIS",
+        True,
+        raising=False,
+    )
+
+    real_loop = asyncio.get_event_loop()
+    mock_loop = MagicMock(wraps=real_loop)
+    mock_loop.run_in_executor = MagicMock()
+
+    with patch(
+        "src.consumers.upload_consumer.asyncio.get_running_loop",
+        return_value=mock_loop,
+    ):
+        await consumer.process_message(message)
+
+    consumer.validate_file_size_before_download.assert_not_awaited()
+    mock_storage.download_file.assert_not_awaited()
+    mock_loop.run_in_executor.assert_not_called()
+    consumer._schedule_artifact_job_from_metrics.assert_not_awaited()
+
+    routing_keys = [call.args[1] for call in consumer.publish_event.await_args_list]
+    assert routing_keys == ["maliev.geometryservice.v1.analysis.completed"]
+    completed_event = consumer.publish_event.await_args.args[0]
+    payload = completed_event.message.payload
+    assert payload.storage_path == "test/direct.stl"
+    assert payload.glb_storage_path is None
+    assert payload.viewer_storage_path == "test/direct.stl"
+    assert payload.viewer_file_extension == ".stl"
+    assert payload.metrics.volume_cm3 == 0
+    assert payload.metrics.surface_area_cm2 == 0
+    assert payload.metrics.triangle_count == 0
+
+    recorded = [attributes for _, attributes in counter.calls]
+    assert {
+        "operation": "eager_metrics",
+        "status": "skipped",
+        "execution_mode": "browser_primary",
+        "reason": "browser_primary_upload",
+        "file_extension": "stl",
+    } in recorded
 
 
 @pytest.mark.asyncio
@@ -630,8 +694,8 @@ async def test_process_message_success(consumer, mock_storage, mock_processor): 
         uploadId=upload_id,
         fileId=file_id,
         serviceId="test-service",
-        fileName="test.stl",
-        storagePath="test/test.stl",
+        fileName="test.step",
+        storagePath="test/test.step",
         downloadUrl="http://signed-url",
         contentType="model/stl",
         fileSize=1024,
@@ -858,8 +922,8 @@ async def test_process_message_failure(consumer, mock_storage):
     inner_msg = UploadCompletedMessage(
         uploadId=str(uuid4()),
         serviceId="test-service",
-        fileName="test.stl",
-        storagePath="test/test.stl",
+        fileName="test.step",
+        storagePath="test/test.step",
         downloadUrl="http://signed-url",
         contentType="model/stl",
         fileSize=1024,

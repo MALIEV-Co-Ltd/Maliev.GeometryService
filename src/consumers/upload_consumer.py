@@ -126,6 +126,13 @@ _PHASE1_EXPORT_COUNTER = meter.create_counter(
         "geometry offload."
     ),
 )
+_PHASE1_ANALYSIS_COUNTER = meter.create_counter(
+    "geometry.phase1.analysis_requests",
+    description=(
+        "Counts eager Phase 1 server analysis requests and skips for "
+        "browser-first geometry offload."
+    ),
+)
 
 
 @dataclass(frozen=True)
@@ -156,6 +163,23 @@ def _browser_viewer_source_extension(file_ext: str) -> str | None:
     return ext if ext in _BROWSER_VIEWER_SOURCE_EXTENSIONS else None
 
 
+def _placeholder_browser_primary_metrics() -> GeometryMetrics:
+    """Return contract-compatible zero metrics for browser-primary uploads.
+
+    Real dimensions/manifold state are computed by the browser runtime and
+    persisted by the frontend BFF after the local result is accepted.
+    """
+    return GeometryMetrics(
+        volumeCm3=0,
+        supportVolumeCm3=0,
+        surfaceAreaCm2=0,
+        boundingBox=BoundingBox(x=0, y=0, z=0),
+        isManifold=True,
+        triangleCount=0,
+        eulerNumber=0,
+    )
+
+
 def _artifact_file_extension(file_ext: str) -> str:
     ext = file_ext.strip().lower()
     if ext.startswith("."):
@@ -181,6 +205,26 @@ def _record_phase1_export_request(
             "reason": reason,
             "file_extension": _artifact_file_extension(file_ext),
             "cache_status": cache_status,
+        },
+    )
+
+
+def _record_phase1_analysis_request(
+    *,
+    file_ext: str,
+    operation: str,
+    status: str,
+    execution_mode: str,
+    reason: str,
+) -> None:
+    _PHASE1_ANALYSIS_COUNTER.add(
+        1,
+        {
+            "operation": operation,
+            "status": status,
+            "execution_mode": execution_mode,
+            "reason": reason,
+            "file_extension": _artifact_file_extension(file_ext),
         },
     )
 
@@ -387,6 +431,43 @@ class UploadConsumer:
                         "Processing 3D file",
                         extra={"file.id": str(file_id), "extension": file_ext},
                     )
+
+                    browser_viewer_extension = _browser_viewer_source_extension(
+                        file_ext
+                    )
+                    if (
+                        self._settings.GEOMETRY_BROWSER_PRIMARY_SKIP_EAGER_ANALYSIS
+                        and browser_viewer_extension is not None
+                    ):
+                        if (
+                            inner_msg.file_size
+                            > settings.MAX_FILE_SIZE_MB * 1024 * 1024
+                        ):
+                            raise ValueError("SIZE_LIMIT_EXCEEDED")
+
+                        _record_phase1_analysis_request(
+                            file_ext=file_ext,
+                            operation="eager_metrics",
+                            status="skipped",
+                            execution_mode="browser_primary",
+                            reason="browser_primary_upload",
+                        )
+                        await self._publish_browser_primary_file_analyzed_event(
+                            file_id=str(file_id),
+                            storage_path=inner_msg.storage_path,
+                            viewer_file_extension=browser_viewer_extension,
+                            correlation_id=correlation_id,
+                        )
+                        logger.info(
+                            "Skipped eager server metrics for browser-primary upload",
+                            extra={
+                                "event": "browser_primary_eager_metrics_skipped",
+                                "file_id": str(file_id),
+                                "storage_path": inner_msg.storage_path,
+                                "file_extension": browser_viewer_extension,
+                            },
+                        )
+                        return
 
                     # 1. Early file size validation (before download)
                     if not inner_msg.download_url:
@@ -1262,6 +1343,52 @@ class UploadConsumer:
                     dfmReport=None,
                     bodyCount=job.body_count,
                     bodies=job.body_infos,
+                ),
+            ),
+        )
+        await self.publish_event(
+            event,
+            "maliev.geometryservice.v1.analysis.completed",
+        )
+
+    async def _publish_browser_primary_file_analyzed_event(
+        self,
+        *,
+        file_id: str,
+        storage_path: str,
+        viewer_file_extension: str,
+        correlation_id: UUID | None,
+    ) -> None:
+        now = datetime.now(timezone.utc)
+        event = FileAnalyzedEvent(
+            messageId=uuid4(),
+            correlationId=correlation_id,
+            messageType=[
+                "urn:message:Maliev.MessagingContracts.Contracts.Geometry:FileAnalyzedEvent"
+            ],
+            message=FileAnalyzedMessageBody(
+                messageId=uuid4(),
+                messageName="FileAnalyzedEvent",
+                messageType=MessageTypeEnum.Event,
+                messageVersion="1.0.0",
+                publishedBy="GeometryService",
+                consumedBy=["IntranetBff"],
+                correlationId=correlation_id,
+                causationId=None,
+                occurredAtUtc=now,
+                isPublic=False,
+                payload=FileAnalyzedPayload(
+                    fileId=file_id,
+                    metrics=_placeholder_browser_primary_metrics(),
+                    processedAt=now,
+                    glbStoragePath=None,
+                    viewerStoragePath=storage_path,
+                    viewerFileExtension=viewer_file_extension,
+                    thumbnailStoragePath=None,
+                    storagePath=storage_path,
+                    dfmReport=None,
+                    bodyCount=1,
+                    bodies=None,
                 ),
             ),
         )
