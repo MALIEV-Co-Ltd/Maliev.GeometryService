@@ -807,6 +807,54 @@ async def test_schedule_artifact_job_publishes_browser_viewer_source_without_glb
 
 
 @pytest.mark.asyncio
+async def test_schedule_artifact_job_publishes_browser_viewer_source_directly(
+    consumer: UploadConsumer,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    metrics_result = {**_FAKE_METRICS_RESULT, "cad_glb_bytes": b"cached-glb"}
+    consumer.publish_event = AsyncMock()
+    consumer.publish_failure = AsyncMock()
+
+    def fail_mkdtemp(*args, **kwargs):  # noqa: ANN002, ANN003, ARG001
+        raise AssertionError("browser-viewable uploads should not stage artifacts")
+
+    monkeypatch.setattr(
+        "src.consumers.upload_consumer.tempfile.mkdtemp",
+        fail_mkdtemp,
+    )
+
+    await consumer._schedule_artifact_job_from_metrics(
+        metrics_result=metrics_result,
+        metrics=GeometryMetrics(
+            volumeCm3=1.0,
+            supportVolumeCm3=0.0,
+            surfaceAreaCm2=6.0,
+            boundingBox=BoundingBox(x=1.0, y=1.0, z=1.0),
+            isManifold=True,
+            triangleCount=12,
+            eulerNumber=2,
+        ),
+        file_id=str(uuid4()),
+        upload_id=str(uuid4()),
+        storage_path="projects/test/model.stl",
+        file_ext=".stl",
+        file_name="model.stl",
+        file_size=1024,
+        correlation_id=uuid4(),
+        body_count=1,
+        body_infos=None,
+    )
+
+    consumer.publish_failure.assert_not_awaited()
+    consumer.publish_event.assert_awaited_once()
+    completed_event = consumer.publish_event.await_args.args[0]
+    payload = completed_event.message.payload
+    assert payload.viewer_storage_path == "projects/test/model.stl"
+    assert payload.viewer_file_extension == ".stl"
+    assert payload.glb_storage_path is None
+
+
+@pytest.mark.asyncio
 async def test_publish_glb_timeout_uses_source_glb_fallback(
     consumer: UploadConsumer,
     tmp_path,
