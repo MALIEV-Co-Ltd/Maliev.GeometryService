@@ -133,6 +133,19 @@ _PHASE1_ANALYSIS_COUNTER = meter.create_counter(
         "browser-first geometry offload."
     ),
 )
+_SERVER_WORK_AVOIDED_COUNTER = meter.create_counter(
+    "geometry.server_work.avoided_operations",
+    description=(
+        "Counts CPU-heavy GeometryService operations avoided by browser-first "
+        "geometry execution."
+    ),
+)
+_BROWSER_PRIMARY_UPLOAD_AVOIDED_OPERATIONS = (
+    "eager_metrics",
+    "viewer_glb_export",
+    "mesh_stl_export",
+    "preview_images",
+)
 
 
 @dataclass(frozen=True)
@@ -227,6 +240,34 @@ def _record_phase1_analysis_request(
             "file_extension": _artifact_file_extension(file_ext),
         },
     )
+
+
+def _record_server_work_avoided(
+    *,
+    file_ext: str,
+    operation: str,
+    execution_mode: str,
+    reason: str,
+) -> None:
+    _SERVER_WORK_AVOIDED_COUNTER.add(
+        1,
+        {
+            "operation": operation,
+            "execution_mode": execution_mode,
+            "reason": reason,
+            "file_extension": _artifact_file_extension(file_ext),
+        },
+    )
+
+
+def _record_browser_primary_upload_work_avoided(*, file_ext: str) -> None:
+    for operation in _BROWSER_PRIMARY_UPLOAD_AVOIDED_OPERATIONS:
+        _record_server_work_avoided(
+            file_ext=file_ext,
+            operation=operation,
+            execution_mode="browser_primary",
+            reason="browser_primary_upload",
+        )
 
 
 def _record_artifact_pipeline_operation(
@@ -451,6 +492,9 @@ class UploadConsumer:
                             status="skipped",
                             execution_mode="browser_primary",
                             reason="browser_primary_upload",
+                        )
+                        _record_browser_primary_upload_work_avoided(
+                            file_ext=file_ext
                         )
                         await self._publish_browser_primary_file_analyzed_event(
                             file_id=str(file_id),
