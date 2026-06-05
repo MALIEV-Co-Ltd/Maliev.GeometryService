@@ -146,6 +146,7 @@ def test_client_runtime_manifest_is_public_and_not_cached():
         "obj": True,
         "glb": True,
         "gltf": True,
+        "threeMf": True,
     }
     assert body["capabilities"]["localOperations"] == [
         "mesh_metrics",

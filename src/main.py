@@ -474,6 +474,7 @@ async def client_runtime_manifest() -> JSONResponse:
                     "obj": True,
                     "glb": True,
                     "gltf": True,
+                    "threeMf": True,
                 },
                 "localOperations": [
                     "mesh_metrics",

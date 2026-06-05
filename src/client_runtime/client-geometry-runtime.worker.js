@@ -51,7 +51,7 @@ async function loadRuntimeKernel(wasmUrl) {
 async function analyze(input, processCode, runtimeKernel = null) {
   const mesh = input.meshBuffers
     ? meshFromBuffers(input.meshBuffers)
-    : meshFromFile(input.fileBytes, input.fileName || input.fileExtension || "");
+    : await meshFromFile(input.fileBytes, input.fileName || input.fileExtension || "");
 
   const metrics = computeMetrics(mesh, runtimeKernel);
   const inputHash = await hashMesh(mesh);
@@ -108,12 +108,15 @@ function meshFromBuffers(buffers) {
   return { positions, indices };
 }
 
-function meshFromFile(fileBytes, fileName) {
+async function meshFromFile(fileBytes, fileName) {
   if (!fileBytes) throw new Error("No mesh bytes were provided.");
   const bytes = fileBytes instanceof Uint8Array
     ? fileBytes
     : new Uint8Array(fileBytes);
   const lowerName = String(fileName || "").toLowerCase();
+  if (lowerName.endsWith(".3mf") || looksLike3mf(bytes)) {
+    return await parse3mf(bytes);
+  }
   if (lowerName.endsWith(".glb") || looksLikeGlb(bytes)) {
     return parseGlb(bytes);
   }
@@ -126,7 +129,7 @@ function meshFromFile(fileBytes, fileName) {
   if (lowerName.endsWith(".stl") || looksLikeStl(bytes)) {
     return parseStl(bytes);
   }
-  throw new Error("Browser advisory runtime v1 supports STL/OBJ/glTF/GLB bytes or viewer mesh buffers.");
+  throw new Error("Browser advisory runtime v1 supports STL/OBJ/3MF/glTF/GLB bytes or viewer mesh buffers.");
 }
 
 function looksLikeStl(bytes) {
@@ -240,6 +243,173 @@ function appendObjVertex(sourceVertices, positions, indices, sourceIndex) {
   if (!vertex) return;
   positions.push(vertex[0], vertex[1], vertex[2]);
   indices.push(indices.length);
+}
+
+function looksLike3mf(bytes) {
+  if (bytes.length < 4) return false;
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  return view.getUint32(0, true) === 0x04034b50;
+}
+
+async function parse3mf(bytes) {
+  const modelBytes = await readZipEntry(bytes, name => name.toLowerCase().endsWith(".model"));
+  if (!modelBytes) {
+    throw new Error("3MF archive did not contain a model entry.");
+  }
+  return meshFrom3mfModelXml(new TextDecoder("utf-8").decode(modelBytes));
+}
+
+async function readZipEntry(bytes, predicate) {
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  let offset = 0;
+
+  while (offset + 30 <= bytes.length) {
+    const signature = view.getUint32(offset, true);
+    if (signature === 0x02014b50 || signature === 0x06054b50) break;
+    if (signature !== 0x04034b50) {
+      offset += 1;
+      continue;
+    }
+
+    const flags = view.getUint16(offset + 6, true);
+    const compressionMethod = view.getUint16(offset + 8, true);
+    const rawCompressedSize = view.getUint32(offset + 18, true);
+    const rawUncompressedSize = view.getUint32(offset + 22, true);
+    const fileNameLength = view.getUint16(offset + 26, true);
+    const extraLength = view.getUint16(offset + 28, true);
+    const fileNameStart = offset + 30;
+    const fileNameEnd = fileNameStart + fileNameLength;
+    const extraStart = fileNameEnd;
+    const extraEnd = extraStart + extraLength;
+    const zip64Sizes = readZip64ExtraSizes(
+      view,
+      extraStart,
+      extraEnd,
+      rawUncompressedSize === 0xffffffff,
+      rawCompressedSize === 0xffffffff);
+    const compressedSize = zip64Sizes.compressedSize ?? rawCompressedSize;
+    const dataStart = extraEnd;
+    const dataEnd = dataStart + compressedSize;
+
+    if (fileNameEnd > bytes.length || extraEnd > bytes.length || dataEnd > bytes.length) break;
+
+    const fileName = new TextDecoder((flags & 0x0800) !== 0 ? "utf-8" : "ascii")
+      .decode(bytes.slice(fileNameStart, fileNameEnd));
+    const entryBytes = bytes.slice(dataStart, dataEnd);
+    if (predicate(fileName)) {
+      return await decompressZipEntry(entryBytes, compressionMethod);
+    }
+
+    offset = dataEnd;
+  }
+
+  return null;
+}
+
+function readZip64ExtraSizes(view, start, end, needsUncompressedSize, needsCompressedSize) {
+  let offset = start;
+  while (offset + 4 <= end) {
+    const headerId = view.getUint16(offset, true);
+    const fieldSize = view.getUint16(offset + 2, true);
+    const fieldStart = offset + 4;
+    const fieldEnd = fieldStart + fieldSize;
+    if (fieldEnd > end) break;
+
+    if (headerId === 0x0001) {
+      let cursor = fieldStart;
+      let uncompressedSize = null;
+      let compressedSize = null;
+      if (needsUncompressedSize && cursor + 8 <= fieldEnd) {
+        uncompressedSize = readZipUint64(view, cursor);
+        cursor += 8;
+      }
+      if (needsCompressedSize && cursor + 8 <= fieldEnd) {
+        compressedSize = readZipUint64(view, cursor);
+      }
+      return { uncompressedSize, compressedSize };
+    }
+
+    offset = fieldEnd;
+  }
+
+  return { uncompressedSize: null, compressedSize: null };
+}
+
+function readZipUint64(view, offset) {
+  const low = view.getUint32(offset, true);
+  const high = view.getUint32(offset + 4, true);
+  const value = high * 0x100000000 + low;
+  if (!Number.isSafeInteger(value)) {
+    throw new Error("3MF ZIP64 entry is too large for browser-local analysis.");
+  }
+  return value;
+}
+
+async function decompressZipEntry(bytes, compressionMethod) {
+  if (compressionMethod === 0) return bytes;
+  if (compressionMethod !== 8) {
+    throw new Error(`Unsupported 3MF ZIP compression method: ${compressionMethod}`);
+  }
+  if (typeof DecompressionStream !== "function" ||
+    typeof Blob !== "function" ||
+    typeof Response !== "function") {
+    throw new Error("3MF ZIP deflate decompression is not available in this browser.");
+  }
+
+  const stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream("deflate-raw"));
+  return new Uint8Array(await new Response(stream).arrayBuffer());
+}
+
+function meshFrom3mfModelXml(xml) {
+  const positions = [];
+  const indices = [];
+  const meshBlocks = xml.matchAll(/<mesh\b[\s\S]*?<\/mesh>/gi);
+
+  for (const meshMatch of meshBlocks) {
+    const meshXml = meshMatch[0];
+    const sourceVertices = [];
+    for (const vertexMatch of meshXml.matchAll(/<vertex\b([^>]*)\/?>/gi)) {
+      const attrs = readXmlAttributes(vertexMatch[1]);
+      const x = Number(attrs.x);
+      const y = Number(attrs.y);
+      const z = Number(attrs.z);
+      if (Number.isFinite(x) && Number.isFinite(y) && Number.isFinite(z)) {
+        sourceVertices.push([x, y, z]);
+      }
+    }
+
+    const baseVertex = positions.length / 3;
+    for (const vertex of sourceVertices) positions.push(vertex[0], vertex[1], vertex[2]);
+
+    for (const triangleMatch of meshXml.matchAll(/<triangle\b([^>]*)\/?>/gi)) {
+      const attrs = readXmlAttributes(triangleMatch[1]);
+      const a = Number.parseInt(attrs.v1, 10);
+      const b = Number.parseInt(attrs.v2, 10);
+      const c = Number.parseInt(attrs.v3, 10);
+      if (isValid3mfVertexIndex(a, sourceVertices.length) &&
+        isValid3mfVertexIndex(b, sourceVertices.length) &&
+        isValid3mfVertexIndex(c, sourceVertices.length)) {
+        indices.push(baseVertex + a, baseVertex + b, baseVertex + c);
+      }
+    }
+  }
+
+  if (positions.length === 0 || indices.length === 0) {
+    throw new Error("3MF model did not contain complete triangle mesh data.");
+  }
+  return { positions, indices };
+}
+
+function readXmlAttributes(source) {
+  const attrs = {};
+  for (const match of String(source || "").matchAll(/([A-Za-z_:][-A-Za-z0-9_:.]*)\s*=\s*(?:"([^"]*)"|'([^']*)')/g)) {
+    attrs[match[1]] = match[2] ?? match[3] ?? "";
+  }
+  return attrs;
+}
+
+function isValid3mfVertexIndex(index, vertexCount) {
+  return Number.isInteger(index) && index >= 0 && index < vertexCount;
 }
 
 function looksLikeGlb(bytes) {
