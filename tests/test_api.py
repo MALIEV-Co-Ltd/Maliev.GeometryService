@@ -125,7 +125,7 @@ def test_client_runtime_manifest_is_public_and_not_cached():
     )
     assert body["assets"]["wasm"].endswith(".wasm")
     assert body["artifactPolicy"] == {
-        "directBrowserViewerExtensions": [".glb", ".gltf", ".obj", ".stl"],
+        "directBrowserViewerExtensions": [".3mf", ".glb", ".gltf", ".obj", ".stl"],
         "browserViewableUploads": {
             "viewerSource": "original_upload",
             "serverEagerMetrics": False,

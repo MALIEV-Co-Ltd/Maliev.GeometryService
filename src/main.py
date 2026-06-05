@@ -185,7 +185,7 @@ _CLIENT_RUNTIME_DEVICE_PROFILES = {
     },
 }
 _CLIENT_RUNTIME_ARTIFACT_POLICY = {
-    "directBrowserViewerExtensions": [".glb", ".gltf", ".obj", ".stl"],
+    "directBrowserViewerExtensions": [".3mf", ".glb", ".gltf", ".obj", ".stl"],
     "browserViewableUploads": {
         "viewerSource": "original_upload",
         "serverEagerMetrics": False,
