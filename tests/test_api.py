@@ -114,6 +114,7 @@ def test_client_runtime_manifest_is_public_and_not_cached():
         "fallbackOnUnsupportedDevice": True,
         "fallbackOnTimeout": True,
         "fallbackOnInputTooLarge": True,
+        "interactiveServerDfmFallbackForBrowserPrimaryUploads": False,
         "finalValidationRequired": True,
     }
     assert body["assets"]["worker"].startswith(

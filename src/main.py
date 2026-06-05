@@ -460,6 +460,7 @@ async def client_runtime_manifest() -> JSONResponse:
                 "fallbackOnUnsupportedDevice": True,
                 "fallbackOnTimeout": True,
                 "fallbackOnInputTooLarge": True,
+                "interactiveServerDfmFallbackForBrowserPrimaryUploads": False,
                 "finalValidationRequired": True,
             },
             "assets": {
