@@ -208,6 +208,20 @@ _SERVER_DFM_COUNTER = meter.create_counter(
     "geometry.server_dfm.requests",
     description="Counts GeometryService DFM requests that consume server CPU.",
 )
+_SERVER_DFM_INPUT_BYTES_HISTOGRAM = meter.create_histogram(
+    "geometry.server_dfm.input_bytes",
+    unit="By",
+    description=(
+        "Records input bytes for DFM workloads processed through GeometryService."
+    ),
+)
+_SERVER_DFM_INPUT_TRIANGLES_HISTOGRAM = meter.create_histogram(
+    "geometry.server_dfm.input_triangles",
+    unit="{triangle}",
+    description=(
+        "Records triangle workloads for DFM requests processed through GeometryService."
+    ),
+)
 _GEOMETRY_OFFLOAD_DECISION_COUNTER = meter.create_counter(
     "geometry.dfm.execution.decisions",
     description=(
@@ -269,6 +283,59 @@ def _record_geometry_offload_decision(
         tags["cache_status"] = cache_status
 
     _GEOMETRY_OFFLOAD_DECISION_COUNTER.add(1, tags)
+
+
+def _record_server_dfm_workload(
+    *,
+    process_code: str,
+    status_code: int,
+    cache_status: str,
+    file_data: dict[str, Any],
+) -> None:
+    stl_bytes = file_data.get("stl_bytes")
+    if isinstance(stl_bytes, str):
+        stl_bytes = stl_bytes.encode("utf-8")
+
+    tags: dict[str, str | int] = {
+        "process_code": process_code,
+        "status_code": status_code,
+        "cache_status": cache_status,
+        "execution_mode": "server_fallback_final_validation",
+        "authority": "server_authoritative",
+        "server_cpu": "consumed",
+    }
+
+    if isinstance(stl_bytes, bytes) and len(stl_bytes) > 0:
+        _SERVER_DFM_INPUT_BYTES_HISTOGRAM.record(len(stl_bytes), tags)
+
+    triangle_count = _resolve_server_dfm_triangle_count(file_data, stl_bytes)
+    if triangle_count is not None and triangle_count > 0:
+        _SERVER_DFM_INPUT_TRIANGLES_HISTOGRAM.record(triangle_count, tags)
+
+
+def _resolve_server_dfm_triangle_count(
+    file_data: dict[str, Any],
+    stl_bytes: object,
+) -> int | None:
+    for value in (
+        file_data.get("triangle_count"),
+        (file_data.get("quality") or {}).get("face_count")
+        if isinstance(file_data.get("quality"), dict)
+        else None,
+        file_data.get("face_count"),
+    ):
+        if isinstance(value, int) and value > 0:
+            return value
+        if isinstance(value, float) and value > 0:
+            return int(value)
+
+    if isinstance(stl_bytes, bytes) and len(stl_bytes) >= 84:
+        triangle_count = int.from_bytes(stl_bytes[80:84], "little", signed=False)
+        expected_size = 84 + triangle_count * 50
+        if triangle_count > 0 and expected_size == len(stl_bytes):
+            return triangle_count
+
+    return None
 
 
 def _is_public_path(path: str) -> bool:
@@ -892,6 +959,12 @@ async def analyze_for_process(
             process_code=process_code,
             status_code=status_code,
             cache_status=cache_status or "none",
+        )
+        _record_server_dfm_workload(
+            process_code=process_code,
+            status_code=status_code,
+            cache_status=cache_status or "none",
+            file_data=_file_analysis_cache.get(upload_id, {}) or {},
         )
         return _add_server_dfm_headers(response, process_code, cache_status)
 

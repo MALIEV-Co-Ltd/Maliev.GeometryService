@@ -28,6 +28,20 @@ class _RecordingCounter:
         self.calls.append((amount, attributes or {}))
 
 
+class _RecordingHistogram:
+    def __init__(self) -> None:
+        self.records: list[tuple[int, dict[str, Any]]] = []
+
+    def record(self, amount: int, attributes: dict[str, Any] | None = None) -> None:
+        self.records.append((amount, attributes or {}))
+
+
+def _binary_stl_bytes(triangle_count: int) -> bytes:
+    header = b"test-stl".ljust(80, b" ")
+    body = b"\0" * (triangle_count * 50)
+    return header + triangle_count.to_bytes(4, "little") + body
+
+
 def _auth_headers() -> dict[str, str]:
     now = datetime.now(timezone.utc)
     token = jwt.encode(
@@ -283,6 +297,94 @@ def test_server_dfm_response_emits_server_fallback_offload_decision(monkeypatch)
                 "process_code": "FDM",
                 "status_code": 404,
                 "cache_status": "none",
+            },
+        )
+    ]
+
+
+def test_server_dfm_response_records_fallback_input_workload(monkeypatch):
+    byte_histogram = _RecordingHistogram()
+    triangle_histogram = _RecordingHistogram()
+    monkeypatch.setattr(
+        main,
+        "_SERVER_DFM_INPUT_BYTES_HISTOGRAM",
+        byte_histogram,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        main,
+        "_SERVER_DFM_INPUT_TRIANGLES_HISTOGRAM",
+        triangle_histogram,
+        raising=False,
+    )
+
+    async def publish_noop(*_: Any, **__: Any) -> None:
+        return None
+
+    def analyze_noop(*_: Any, **__: Any) -> dict[str, Any]:
+        return {
+            "reportType": "FDM",
+            "thinWallCount": 0,
+            "thinWallRegions": [],
+            "overhangFaceCount": 0,
+            "overhangAreaCm2": 0.0,
+            "overhangRegions": [],
+            "supportRequired": False,
+            "estimatedSupportVolumeCm3": 0.0,
+            "smallDetailCount": 0,
+            "issues": [],
+            "analysisTimeSeconds": 0.01,
+        }
+
+    monkeypatch.setattr(main, "publish_event", publish_noop, raising=False)
+    monkeypatch.setattr(
+        "src.core.geometry._analyze_single_process",
+        analyze_noop,
+        raising=False,
+    )
+
+    upload_id = "test-server-workload"
+    stl_bytes = _binary_stl_bytes(3)
+    main._file_analysis_cache[upload_id] = {
+        "stl_bytes": stl_bytes,
+        "storage_path": "projects/test/server-workload.stl",
+        "quality": {"face_count": 7},
+        "body_count": 1,
+    }
+
+    try:
+        response = client.post(
+            f"/geometry/uploads/{upload_id}/dfm/FDM",
+            headers=_auth_headers(),
+        )
+    finally:
+        if upload_id in main._file_analysis_cache:
+            del main._file_analysis_cache[upload_id]
+
+    assert response.status_code == 200
+    assert byte_histogram.records == [
+        (
+            len(stl_bytes),
+            {
+                "process_code": "FDM",
+                "status_code": 200,
+                "cache_status": "cold",
+                "execution_mode": "server_fallback_final_validation",
+                "authority": "server_authoritative",
+                "server_cpu": "consumed",
+            },
+        )
+    ]
+    assert triangle_histogram.records == [
+        (
+            7,
+            {
+                "process_code": "FDM",
+                "status_code": 200,
+                "cache_status": "cold",
+                "execution_mode": "server_fallback_final_validation",
+                "authority": "server_authoritative",
+                "server_cpu": "consumed",
             },
         )
     ]
