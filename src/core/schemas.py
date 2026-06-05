@@ -112,6 +112,7 @@ class UploadCompletedMessage(BaseModel):
     content_type: str = Field(alias="contentType")
     file_size: int = Field(alias="fileSize")
     uploaded_at: datetime = Field(alias="uploadedAt")
+    metadata: dict[str, Any] | None = Field(alias="metadata", default=None)
 
 
 class FileUploadedMessage(BaseModel):

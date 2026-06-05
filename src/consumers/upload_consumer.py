@@ -114,6 +114,10 @@ _PHASE2_HARD_DEADLINE_S = 300
 _BROWSER_VIEWER_SOURCE_EXTENSIONS = frozenset(
     {".3mf", ".glb", ".gltf", ".obj", ".stl"}
 )
+_BROWSER_PRIMARY_EXECUTION_POLICY_KEY = "geometry.executionPolicy"
+_BROWSER_PRIMARY_EXECUTION_POLICY_VALUES = frozenset(
+    {"browser_primary", "browser-primary"}
+)
 _ARTIFACT_PIPELINE_COUNTER = meter.create_counter(
     "geometry.artifact_pipeline.operations",
     description=(
@@ -183,6 +187,51 @@ def _browser_viewer_source_extension(file_ext: str) -> str | None:
     if not ext.startswith("."):
         ext = f".{ext}"
     return ext if ext in _BROWSER_VIEWER_SOURCE_EXTENSIONS else None
+
+
+def _message_metadata_value(metadata: object, key: str) -> str | None:
+    if not isinstance(metadata, dict):
+        return None
+
+    value = metadata.get(key)
+    if isinstance(value, str):
+        return value
+    return None
+
+
+def _nested_custom_metadata(metadata: object) -> dict[str, Any] | None:
+    if not isinstance(metadata, dict):
+        return None
+
+    custom = metadata.get("custom")
+    if isinstance(custom, dict):
+        return cast(dict[str, Any], custom)
+    if not isinstance(custom, str):
+        return None
+
+    try:
+        parsed = json.loads(custom)
+    except json.JSONDecodeError:
+        return None
+
+    if isinstance(parsed, dict):
+        return cast(dict[str, Any], parsed)
+    return None
+
+
+def _has_browser_primary_upload_policy(metadata: object | None) -> bool:
+    """Return true only when the upload explicitly opted into local geometry work."""
+    direct_policy = _message_metadata_value(
+        metadata, _BROWSER_PRIMARY_EXECUTION_POLICY_KEY
+    )
+    nested_policy = _message_metadata_value(
+        _nested_custom_metadata(metadata), _BROWSER_PRIMARY_EXECUTION_POLICY_KEY
+    )
+    policy = direct_policy or nested_policy
+    return (
+        policy is not None
+        and policy.strip().lower() in _BROWSER_PRIMARY_EXECUTION_POLICY_VALUES
+    )
 
 
 def _placeholder_browser_primary_metrics() -> GeometryMetrics:
@@ -536,6 +585,7 @@ class UploadConsumer:
                     if (
                         self._settings.GEOMETRY_BROWSER_PRIMARY_SKIP_EAGER_ANALYSIS
                         and browser_viewer_extension is not None
+                        and _has_browser_primary_upload_policy(inner_msg.metadata)
                     ):
                         if (
                             inner_msg.file_size

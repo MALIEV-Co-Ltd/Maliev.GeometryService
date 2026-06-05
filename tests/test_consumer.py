@@ -111,7 +111,9 @@ class _TrackedMessageProcess:
         return False
 
 
-def _build_upload_message(file_name: str = "test.stl") -> MagicMock:
+def _build_upload_message(
+    file_name: str = "test.stl", metadata: dict[str, str] | None = None
+) -> MagicMock:
     inner_msg = UploadCompletedMessage(
         uploadId=str(uuid4()),
         fileId=str(uuid4()),
@@ -122,6 +124,7 @@ def _build_upload_message(file_name: str = "test.stl") -> MagicMock:
         contentType="model/stl",
         fileSize=1024,
         uploadedAt=datetime.now(timezone.utc),
+        metadata=metadata,
     )
     event = FileUploadedEvent(
         messageId=uuid4(),
@@ -138,6 +141,14 @@ def _build_upload_message(file_name: str = "test.stl") -> MagicMock:
     message = MagicMock()
     message.body = event.model_dump_json(by_alias=True).encode()
     return message
+
+
+def _browser_primary_metadata() -> dict[str, str]:
+    return {
+        "geometry.executionPolicy": "browser_primary",
+        "geometry.browserRuntime": "required",
+        "geometry.serverGlbExport": "skip_for_browser_viewable",
+    }
 
 
 def test_rabbitmq_prefetch_defaults_to_ingest_concurrency(
@@ -352,12 +363,59 @@ async def test_process_message_records_server_work_executed_for_server_primary_u
 
 
 @pytest.mark.asyncio
-async def test_process_message_skips_eager_metrics_for_browser_primary_upload(
+async def test_process_message_requires_browser_metadata_before_server_skip(
     consumer: UploadConsumer,
     mock_storage: AsyncMock,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     message = _build_upload_message("direct.stl")
+    message.process.return_value = _TrackedMessageProcess([])
+    mock_storage.download_file.return_value = io.BytesIO(b"fake-stl-content")
+    consumer.publish_event = AsyncMock()
+    consumer.validate_file_size_before_download = AsyncMock(return_value=True)
+    consumer._schedule_artifact_job_from_metrics = AsyncMock()  # type: ignore[method-assign]
+    monkeypatch.setattr(
+        "src.consumers.upload_consumer.settings.GEOMETRY_BROWSER_PRIMARY_SKIP_EAGER_ANALYSIS",
+        True,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        "src.consumers.upload_consumer.get_cached_tessellation",
+        AsyncMock(return_value=None),
+    )
+
+    captured_args: tuple[object, ...] | None = None
+    real_loop = asyncio.get_event_loop()
+
+    def fake_run_in_executor(executor, fn, *args):  # noqa: ANN001, ARG001
+        nonlocal captured_args
+        if fn.__name__ != "_compute_metrics_worker":
+            raise AssertionError(f"Unexpected executor function: {fn.__name__}")
+        captured_args = args
+        future = real_loop.create_future()
+        future.set_result({**_FAKE_METRICS_RESULT, "cad_glb_bytes": None})
+        return future
+
+    mock_loop = MagicMock(wraps=real_loop)
+    mock_loop.run_in_executor = fake_run_in_executor
+
+    with patch(
+        "src.consumers.upload_consumer.asyncio.get_running_loop",
+        return_value=mock_loop,
+    ):
+        await consumer.process_message(message)
+
+    assert captured_args == (b"fake-stl-content", ".stl", False, False)
+    mock_storage.download_file.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_process_message_skips_eager_metrics_for_browser_primary_upload(
+    consumer: UploadConsumer,
+    mock_storage: AsyncMock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    message = _build_upload_message("direct.stl", _browser_primary_metadata())
     message.process.return_value = _TrackedMessageProcess([])
     consumer.publish_event = AsyncMock()
     consumer.validate_file_size_before_download = AsyncMock(return_value=True)
@@ -416,7 +474,7 @@ async def test_process_message_records_server_work_avoided_for_browser_primary_u
     mock_storage: AsyncMock,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    message = _build_upload_message("direct.stl")
+    message = _build_upload_message("direct.stl", _browser_primary_metadata())
     message.process.return_value = _TrackedMessageProcess([])
     consumer.publish_event = AsyncMock()
     consumer.validate_file_size_before_download = AsyncMock(return_value=True)
@@ -643,7 +701,7 @@ async def test_process_message_skips_server_work_for_browser_primary_gltf_upload
     mock_storage: AsyncMock,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    message = _build_upload_message("direct.gltf")
+    message = _build_upload_message("direct.gltf", _browser_primary_metadata())
     message.process.return_value = _TrackedMessageProcess([])
     consumer.publish_event = AsyncMock()
     consumer.validate_file_size_before_download = AsyncMock(return_value=True)
@@ -696,7 +754,7 @@ async def test_process_message_skips_server_work_for_browser_primary_3mf_upload(
     mock_storage: AsyncMock,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    message = _build_upload_message("direct.3mf")
+    message = _build_upload_message("direct.3mf", _browser_primary_metadata())
     message.process.return_value = _TrackedMessageProcess([])
     consumer.publish_event = AsyncMock()
     consumer.validate_file_size_before_download = AsyncMock(return_value=True)
