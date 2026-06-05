@@ -641,3 +641,79 @@ def test_client_runtime_worker_accepts_compressed_3mf_file_bytes() -> None:
     assert result["processCode"] == "CNC_MILL"
     assert result["metrics"]["faceCount"] == 12
     assert result["metrics"]["boundingBox"] == {"x": 50, "y": 50, "z": 50}
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="Node.js is required")
+def test_client_runtime_worker_extracts_mesh_buffers_from_compressed_3mf() -> None:
+    fixture_path = Path(__file__).parent / "assets" / "50x50x50mm-solid-cube.3mf"
+    script = textwrap.dedent(
+        f"""
+        const fs = require('node:fs');
+        const vm = require('node:vm');
+
+        let posted = null;
+        const context = {{
+          console,
+          TextDecoder,
+          TextEncoder,
+          Uint8Array,
+          DataView,
+          Map,
+          Math,
+          Number,
+          Infinity,
+          Blob,
+          Response,
+          DecompressionStream,
+          crypto: globalThis.crypto,
+          JSON,
+          self: {{
+            crypto: globalThis.crypto,
+            postMessage: message => {{ posted = message; }}
+          }}
+        }};
+        vm.createContext(context);
+        const workerPath = {json.dumps(str(WORKER_PATH))};
+        const fixturePath = {json.dumps(str(fixture_path))};
+        vm.runInContext(fs.readFileSync(workerPath, 'utf8'), context);
+
+        const event = {{
+          data: {{
+            id: '3mf-mesh-extract',
+            operation: 'extract_mesh',
+            input: {{
+              fileName: 'cube.3mf',
+              fileBytes: new Uint8Array(fs.readFileSync(fixturePath))
+            }}
+          }}
+        }};
+
+        Promise.resolve(context.self.onmessage(event)).then(() => {{
+          if (!posted) {{
+            console.error('worker did not post a result');
+            process.exit(1);
+          }}
+          console.log(JSON.stringify(posted));
+        }});
+        """
+    )
+
+    completed = subprocess.run(
+        ["node", "-e", script],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    posted = json.loads(completed.stdout)
+
+    assert posted["ok"] is True
+    result = posted["result"]
+    assert result["runtimeVersion"] == "1.0.0"
+    assert result["operation"] == "extract_mesh"
+    assert result["sourceFormat"] == "3mf"
+    assert result["meshBuffers"]["positions"][0:3] == [-25, -25, 0]
+    assert len(result["meshBuffers"]["positions"]) == 24
+    assert len(result["meshBuffers"]["indices"]) == 36
+    assert result["metrics"]["faceCount"] == 12
+    assert result["metrics"]["boundingBox"] == {"x": 50, "y": 50, "z": 50}

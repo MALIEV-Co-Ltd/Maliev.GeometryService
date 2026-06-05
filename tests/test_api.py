@@ -149,6 +149,7 @@ def test_client_runtime_manifest_is_public_and_not_cached():
         "threeMf": True,
     }
     assert body["capabilities"]["localOperations"] == [
+        "mesh_extraction",
         "mesh_metrics",
         "manifold_check",
         "thin_feature_screening",

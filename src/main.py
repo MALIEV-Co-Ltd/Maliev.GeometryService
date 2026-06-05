@@ -477,6 +477,7 @@ async def client_runtime_manifest() -> JSONResponse:
                     "threeMf": True,
                 },
                 "localOperations": [
+                    "mesh_extraction",
                     "mesh_metrics",
                     "manifold_check",
                     "thin_feature_screening",

@@ -11,7 +11,10 @@ self.onmessage = async event => {
     const runtimeKernel = await loadRuntimeKernel(
       message.wasmUrl || message.runtimeKernel?.wasmUrl || message.kernelAssetUrl
     );
-    const result = await analyze(message.input || {}, message.processCode || "FDM", runtimeKernel);
+    const operation = String(message.operation || message.input?.operation || "analyze").toLowerCase();
+    const result = operation === "extract_mesh"
+      ? await extractMesh(message.input || {}, runtimeKernel)
+      : await analyze(message.input || {}, message.processCode || "FDM", runtimeKernel);
     self.postMessage({ id: message.id || null, ok: true, result });
   } catch (error) {
     self.postMessage({
@@ -79,6 +82,36 @@ async function analyze(input, processCode, runtimeKernel = null) {
   };
 }
 
+async function extractMesh(input, runtimeKernel = null) {
+  const fileName = input.fileName || input.fileExtension || "";
+  const mesh = input.meshBuffers
+    ? meshFromBuffers(input.meshBuffers)
+    : await meshFromFile(input.fileBytes, fileName);
+  const metrics = computeMetrics(mesh, runtimeKernel);
+  const publicMetrics = { ...metrics };
+  delete publicMetrics.triangles;
+
+  return {
+    runtimeVersion: MALIEV_BROWSER_GEOMETRY_RUNTIME_VERSION,
+    algorithmVersion: MALIEV_BROWSER_GEOMETRY_ALGORITHM_VERSION,
+    executionMode: MALIEV_BROWSER_GEOMETRY_EXECUTION_MODE,
+    isAuthoritative: false,
+    authority: "local_primary",
+    serverRole: "fallback_and_final_validation",
+    operation: "extract_mesh",
+    sourceFormat: input.meshBuffers ? "meshBuffers" : sourceFormatForFile(input.fileBytes, fileName),
+    meshBuffers: {
+      positions: mesh.positions,
+      indices: mesh.indices
+    },
+    metrics: publicMetrics,
+    runtimeKernel: {
+      wasmLoaded: Boolean(runtimeKernel),
+      runtimeVersion: runtimeKernel?.runtimeVersion ?? null
+    }
+  };
+}
+
 function meshFromBuffers(buffers) {
   const positions = [];
   const indices = [];
@@ -130,6 +163,19 @@ async function meshFromFile(fileBytes, fileName) {
     return parseStl(bytes);
   }
   throw new Error("Browser advisory runtime v1 supports STL/OBJ/3MF/glTF/GLB bytes or viewer mesh buffers.");
+}
+
+function sourceFormatForFile(fileBytes, fileName) {
+  const bytes = fileBytes instanceof Uint8Array
+    ? fileBytes
+    : new Uint8Array(fileBytes || []);
+  const lowerName = String(fileName || "").toLowerCase();
+  if (lowerName.endsWith(".3mf") || looksLike3mf(bytes)) return "3mf";
+  if (lowerName.endsWith(".glb") || looksLikeGlb(bytes)) return "glb";
+  if (lowerName.endsWith(".gltf") || looksLikeGltf(bytes)) return "gltf";
+  if (lowerName.endsWith(".obj") || looksLikeObj(bytes)) return "obj";
+  if (lowerName.endsWith(".stl") || looksLikeStl(bytes)) return "stl";
+  return "unknown";
 }
 
 function looksLikeStl(bytes) {
