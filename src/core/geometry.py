@@ -712,7 +712,7 @@ def _render_single_view(
     )
 
     pl = pv.Plotter(off_screen=True, window_size=[size, size], lighting=None)
-    pl.set_background(None)  # Transparent for light/dark mode theme overlay
+    pl.set_background([255, 255, 255])
     pl.enable_anti_aliasing("msaa")
 
     # Shaded body mesh

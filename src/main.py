@@ -157,7 +157,7 @@ _PUBLIC_PATHS = {
 _CLIENT_RUNTIME_PREFIX = "/geometry/client-runtime/"
 _ResponseT = TypeVar("_ResponseT", bound=Response)
 _CLIENT_RUNTIME_MANIFEST_VERSION = 1
-_CLIENT_RUNTIME_VERSION = "1.0.0"
+_CLIENT_RUNTIME_VERSION = "1.1.1"
 _CLIENT_RUNTIME_ALGORITHM_VERSION = "browser-first-dfm-v1"
 _CLIENT_RUNTIME_WORKER_BASENAME = "client-geometry-runtime.worker.js"
 _CLIENT_RUNTIME_DIR = Path(__file__).resolve().parent / "client_runtime"
@@ -196,7 +196,7 @@ _CLIENT_RUNTIME_ARTIFACT_POLICY = {
         "viewerSource": "generated_glb",
         "serverEagerMetrics": True,
         "serverGlbExport": True,
-        "serverPreviewImages": True,
+        "serverPreviewImages": False,
     },
 }
 
@@ -551,6 +551,7 @@ async def client_runtime_manifest() -> JSONResponse:
                     "thin_feature_screening",
                     "process_dfm_screening",
                     "local_overlay_hints",
+                    "local_preview_image_generation",
                 ],
                 "serverOperations": [
                     "authoritative_dfm",

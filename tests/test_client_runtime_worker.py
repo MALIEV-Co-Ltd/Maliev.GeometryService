@@ -709,7 +709,7 @@ def test_client_runtime_worker_extracts_mesh_buffers_from_compressed_3mf() -> No
 
     assert posted["ok"] is True
     result = posted["result"]
-    assert result["runtimeVersion"] == "1.0.0"
+    assert result["runtimeVersion"] == "1.1.1"
     assert result["operation"] == "extract_mesh"
     assert result["sourceFormat"] == "3mf"
     assert result["meshBuffers"]["positions"][0:3] == [-25, -25, 0]
@@ -717,3 +717,87 @@ def test_client_runtime_worker_extracts_mesh_buffers_from_compressed_3mf() -> No
     assert len(result["meshBuffers"]["indices"]) == 36
     assert result["metrics"]["faceCount"] == 12
     assert result["metrics"]["boundingBox"] == {"x": 50, "y": 50, "z": 50}
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="Node.js is required")
+def test_client_runtime_worker_analyzes_large_viewer_meshes() -> None:
+    """Large viewer meshes used to crash the worker with a call-stack overflow
+    (positions were appended via push(...spread)). The DFM run then fell back
+    to the server with 'worker_failed'. 60k triangles exceeds the V8 argument
+    limit, so this test fails if the spread pattern ever returns."""
+    script = textwrap.dedent(
+        f"""
+        const fs = require('node:fs');
+        const vm = require('node:vm');
+
+        let posted = null;
+        const context = {{
+          console,
+          TextDecoder,
+          TextEncoder,
+          Uint8Array,
+          DataView,
+          Map,
+          Math,
+          Number,
+          Infinity,
+          crypto: globalThis.crypto,
+          self: {{
+            crypto: globalThis.crypto,
+            postMessage: message => {{ posted = message; }}
+          }}
+        }};
+        vm.createContext(context);
+        const workerPath = {json.dumps(str(WORKER_PATH))};
+        vm.runInContext(fs.readFileSync(workerPath, 'utf8'), context);
+
+        // 60,000 disconnected upward-facing triangles laid out on a grid.
+        const triangleCount = 60000;
+        const positions = new Array(triangleCount * 9);
+        const indices = new Array(triangleCount * 3);
+        for (let t = 0; t < triangleCount; t += 1) {{
+          const x = (t % 300) * 2;
+          const y = Math.floor(t / 300) * 2;
+          positions[t * 9 + 0] = x;     positions[t * 9 + 1] = y;     positions[t * 9 + 2] = 0;
+          positions[t * 9 + 3] = x + 1; positions[t * 9 + 4] = y;     positions[t * 9 + 5] = 0;
+          positions[t * 9 + 6] = x;     positions[t * 9 + 7] = y + 1; positions[t * 9 + 8] = 0;
+          indices[t * 3 + 0] = t * 3;
+          indices[t * 3 + 1] = t * 3 + 1;
+          indices[t * 3 + 2] = t * 3 + 2;
+        }}
+
+        const event = {{
+          data: {{
+            id: 'large-mesh-smoke',
+            processCode: 'CNC_MILL',
+            input: {{ meshBuffers: {{ positions, indices }} }}
+          }}
+        }};
+
+        Promise.resolve(context.self.onmessage(event)).then(() => {{
+          if (!posted) {{
+            console.error('worker did not post a result');
+            process.exit(1);
+          }}
+          console.log(JSON.stringify({{
+            ok: posted.ok,
+            error: posted.error ?? null,
+            faceCount: posted.result?.metrics?.faceCount ?? null,
+            authority: posted.result?.authority ?? null
+          }}));
+        }});
+        """
+    )
+
+    completed = subprocess.run(
+        ["node", "-e", script],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    posted = json.loads(completed.stdout)
+
+    assert posted["ok"] is True, f"worker failed on large mesh: {posted['error']}"
+    assert posted["faceCount"] == 60000
+    assert posted["authority"] == "local_primary"

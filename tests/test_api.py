@@ -117,7 +117,7 @@ def test_client_runtime_manifest_is_public_and_not_cached():
 
     body = response.json()
     assert body["manifestVersion"] == 1
-    assert body["runtimeVersion"] == "1.0.0"
+    assert body["runtimeVersion"] == "1.1.1"
     assert body["algorithmVersion"] == "browser-first-dfm-v1"
     assert body["runtimeKind"] == "browser-first-geometry"
     assert body["executionMode"] == "primary_interactive"
@@ -151,7 +151,7 @@ def test_client_runtime_manifest_is_public_and_not_cached():
             "viewerSource": "generated_glb",
             "serverEagerMetrics": True,
             "serverGlbExport": True,
-            "serverPreviewImages": True,
+            "serverPreviewImages": False,
         },
     }
     assert body["capabilities"]["inputs"] == {
@@ -170,6 +170,7 @@ def test_client_runtime_manifest_is_public_and_not_cached():
         "thin_feature_screening",
         "process_dfm_screening",
         "local_overlay_hints",
+        "local_preview_image_generation",
     ]
     assert body["capabilities"]["serverOperations"] == [
         "authoritative_dfm",

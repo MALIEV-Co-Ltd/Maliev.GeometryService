@@ -1,4 +1,4 @@
-const MALIEV_BROWSER_GEOMETRY_RUNTIME_VERSION = "1.0.0";
+const MALIEV_BROWSER_GEOMETRY_RUNTIME_VERSION = "1.1.1";
 const MALIEV_BROWSER_GEOMETRY_ALGORITHM_VERSION = "browser-first-dfm-v1";
 const MALIEV_BROWSER_GEOMETRY_EXECUTION_MODE = "primary_interactive";
 
@@ -123,7 +123,9 @@ function meshFromBuffers(buffers) {
     if (sourcePositions.length % 3 !== 0) {
       throw new Error("Mesh positions must be a flat XYZ array.");
     }
-    positions.push(...sourcePositions);
+    // Plain loop instead of push(...spread): spreading large viewer meshes
+    // (>~65k elements) overflows the call stack and kills the analysis run.
+    for (const position of sourcePositions) positions.push(position);
 
     const sourceIndices = Array.from(source.indices || []);
     if (sourceIndices.length > 0) {
@@ -536,7 +538,9 @@ function meshFromGltf(gltf, buffers, sourceName) {
         ? sequentialIndices(primitivePositions.length / 3)
         : readGltfAccessorScalars(gltf, buffers, primitive.indices, sourceName);
       const baseVertex = positions.length / 3;
-      positions.push(...primitivePositions);
+      // Plain loop instead of push(...spread): large GLB primitives overflow
+      // the call stack when spread as arguments.
+      for (const position of primitivePositions) positions.push(position);
       for (const index of primitiveIndices) indices.push(baseVertex + index);
     }
   }
@@ -743,7 +747,7 @@ function buildIssues(metrics, processCode) {
     issues.push(issue("system", "error", "Empty mesh", "No triangle geometry was available for local advisory analysis.", 0, 1));
   }
   if (!metrics.isManifold) {
-    issues.push(issue("mesh_integrity", "warning", "Mesh may be non-manifold", "Local analysis found boundary or over-shared triangle edges. Server GeometryService remains authoritative.", metrics.nonManifoldEdgeCount, 0));
+    issues.push(issue("mesh_integrity", "warning", "Non-manifold mesh", `Found ${metrics.nonManifoldEdgeCount.toLocaleString()} non-manifold edge(s). This may cause problems during manufacturing.`, metrics.nonManifoldEdgeCount, 0));
   }
 
   const minExtent = Math.min(metrics.boundingBox.x, metrics.boundingBox.y, metrics.boundingBox.z);
@@ -763,7 +767,7 @@ function buildIssues(metrics, processCode) {
         "overhang",
         "warning",
         "Local support risk",
-        "Local analysis found downward-facing faces that may require supports. Server GeometryService remains authoritative.",
+        "Local analysis found downward-facing faces that may require supports.",
         overhangAreaMm2 / 100,
         0,
         overhangFaces.map(triangle => triangle.faceIndex),
@@ -776,7 +780,7 @@ function buildIssues(metrics, processCode) {
 }
 
 function issue(category, severity, title, description, value, threshold, faceIndices = [], centroid = []) {
-  return { category, severity, title, description, value, threshold, faceIndices, centroid };
+  return { category, severity, title, description, value, threshold, faceIndices, centroid, source: "local" };
 }
 
 function buildLocalOverlayHints(issues) {

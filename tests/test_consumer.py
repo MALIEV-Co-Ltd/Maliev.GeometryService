@@ -533,19 +533,20 @@ async def test_process_message_records_server_work_avoided_for_browser_primary_u
 
 
 @pytest.mark.asyncio
-async def test_artifact_job_waits_for_viewer_glb_before_secondary_artifacts(
+async def test_artifact_job_skips_secondary_artifacts_after_viewer_glb(
     consumer: UploadConsumer,
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """The exported viewer GLB is browser-renderable — clients generate
+    thumbnails/previews locally from it, so server previews must be skipped
+    (they would race with and overwrite the client-generated set)."""
     counter = _RecordingCounter()
     monkeypatch.setattr(
         "src.consumers.upload_consumer._ARTIFACT_PIPELINE_COUNTER",
         counter,
     )
     events: list[str] = []
-    glb_started = asyncio.Event()
-    allow_glb_to_finish = asyncio.Event()
 
     artifact_temp_dir = tmp_path / "artifact"
     artifact_temp_dir.mkdir()
@@ -567,20 +568,17 @@ async def test_artifact_job_waits_for_viewer_glb_before_secondary_artifacts(
     )
 
     async def fake_publish_glb(job: ArtifactProcessingJob) -> bool:  # noqa: ARG001
-        events.append("glb-start")
-        glb_started.set()
-        await allow_glb_to_finish.wait()
-        events.append("glb-end")
+        events.append("glb")
         return True
 
     async def fake_publish_small_thumbnail(
         job: ArtifactProcessingJob,  # noqa: ARG001
     ) -> bool:
-        events.append("thumb-start")
+        events.append("thumb")
         return True
 
     async def fake_publish_previews(job: ArtifactProcessingJob) -> bool:  # noqa: ARG001
-        events.append("previews-start")
+        events.append("previews")
         return True
 
     monkeypatch.setattr(consumer, "_publish_glb", fake_publish_glb)
@@ -590,17 +588,9 @@ async def test_artifact_job_waits_for_viewer_glb_before_secondary_artifacts(
     monkeypatch.setattr(consumer, "_publish_previews", fake_publish_previews)
     consumer.publish_failure = AsyncMock()
 
-    task = asyncio.create_task(consumer._run_artifact_job(job))
-    await asyncio.wait_for(glb_started.wait(), timeout=1)
-    await asyncio.sleep(0)
+    await consumer._run_artifact_job(job)
 
-    assert events == ["glb-start"]
-
-    allow_glb_to_finish.set()
-    await task
-
-    assert events.index("thumb-start") > events.index("glb-end")
-    assert events.index("previews-start") > events.index("glb-end")
+    assert events == ["glb"], "server previews must not run after a viewer GLB"
     consumer.publish_failure.assert_not_called()
     recorded = [attributes for _, attributes in counter.calls]
     assert {
@@ -612,9 +602,9 @@ async def test_artifact_job_waits_for_viewer_glb_before_secondary_artifacts(
     } in recorded
     assert {
         "operation": "secondary_artifacts",
-        "status": "scheduled",
-        "execution_mode": "server_artifact",
-        "reason": "server_viewer_artifact",
+        "status": "skipped",
+        "execution_mode": "browser_primary",
+        "reason": "client_local_previews",
         "file_extension": "step",
     } in recorded
 
@@ -678,12 +668,11 @@ async def test_artifact_job_records_server_work_executed_for_generated_artifacts
         "reason": "browser_source_unavailable",
         "file_extension": "step",
     } in recorded
-    assert {
-        "operation": "preview_images",
-        "execution_mode": "server_artifact",
-        "reason": "server_viewer_artifact",
-        "file_extension": "step",
-    } in recorded
+    # Preview images are generated client-side from the viewer GLB —
+    # no server preview work may be recorded.
+    assert all(
+        attributes.get("operation") != "preview_images" for attributes in recorded
+    )
 
 
 def test_browser_viewer_source_extension_allows_browser_runtime_mesh_sources() -> None:

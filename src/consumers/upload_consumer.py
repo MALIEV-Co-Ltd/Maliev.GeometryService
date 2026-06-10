@@ -1221,61 +1221,31 @@ class UploadConsumer:
                             )
                             return
 
+                    # The exported viewer GLB is itself a browser-renderable
+                    # source: clients generate thumbnails and preview images
+                    # locally from it. Server-side previews would race with —
+                    # and overwrite — the client-generated set, so they are
+                    # skipped entirely. The preview renderers remain available
+                    # for explicit fallback requests only.
+                    span.set_attribute("artifact.viewer_source", "server_glb")
+                    span.set_attribute("artifact.secondary_artifacts_skipped", True)
                     _record_artifact_pipeline_operation(
                         job=job,
                         operation="secondary_artifacts",
-                        status="scheduled",
-                        execution_mode="server_artifact",
-                        reason="server_viewer_artifact",
+                        status="skipped",
+                        execution_mode="browser_primary",
+                        reason="client_local_previews",
                     )
-                    _record_server_work_executed(
-                        file_ext=job.file_ext,
-                        operation="preview_images",
-                        execution_mode="server_artifact",
-                        reason="server_viewer_artifact",
+                    logger.info(
+                        "Skipping server thumbnail and preview generation "
+                        "for server-exported viewer GLB (client renders previews locally)",
+                        extra={
+                            "event": "glb_viewer_secondary_artifacts_skipped",
+                            "file_id": job.file_id,
+                            "storage_path": job.storage_path,
+                            "file_ext": job.file_ext,
+                        },
                     )
-                    secondary_timeout_s = max(
-                        0.0,
-                        _PHASE2_HARD_DEADLINE_S - (time.perf_counter() - started_at),
-                    )
-                    tasks = {
-                        "thumb": asyncio.create_task(
-                            self._publish_small_thumbnail(job)
-                        ),
-                        "previews": asyncio.create_task(self._publish_previews(job)),
-                    }
-                    done, pending = await asyncio.wait(
-                        tasks.values(),
-                        timeout=secondary_timeout_s,
-                    )
-                    for pending_task in pending:
-                        pending_task.cancel()
-                    if pending:
-                        await asyncio.gather(*pending, return_exceptions=True)
-                        logger.warning(
-                            "Phase 2 artifact tasks cancelled after deadline",
-                            extra={
-                                "event": "phase2_deadline",
-                                "file_id": job.file_id,
-                                "pending_count": len(pending),
-                            },
-                        )
-
-                    for name, task in tasks.items():
-                        if task not in done:
-                            continue
-                        try:
-                            task.result()
-                        except Exception as exc:
-                            logger.warning(
-                                "Phase 2 artifact task failed",
-                                extra={
-                                    "event": "phase2_artifact_error",
-                                    "file_id": job.file_id,
-                                    "artifact": name,
-                                    "error": str(exc),
-                                },
-                            )
 
                 finally:
                     import shutil
