@@ -8,6 +8,7 @@ import pytest
 import trimesh
 from trimesh.exchange import gltf
 
+from src.core import geometry
 from src.core.geometry import _analyze_single_process, _compute_metrics_worker
 
 ASSETS = Path(__file__).parent / "assets"
@@ -73,9 +74,9 @@ def test_supported_extension_produces_dfm_ready_mesh(
 
     stl_bytes = metrics.get("mesh_stl_bytes")
     assert stl_bytes, f"{extension}: metrics worker did not return STL bytes"
-    assert metrics.get("cad_glb_bytes"), (
-        f"{extension}: metrics worker did not return GLB bytes"
-    )
+    assert metrics.get(
+        "cad_glb_bytes"
+    ), f"{extension}: metrics worker did not return GLB bytes"
 
     cad_extensions = {"step", "stp", "iges", "igs"}
     cad_bytes = source_bytes if extension in cad_extensions else None
@@ -91,3 +92,35 @@ def test_supported_extension_produces_dfm_ready_mesh(
         assert "error_type" not in report
         assert report["reportType"] == process_code
         assert isinstance(report["issues"], list)
+
+
+def test_fbx_extension_converts_to_glb_and_produces_dfm_ready_mesh(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """FBX has no native trimesh loader, so the worker must normalize it to GLB."""
+
+    glb_bytes = _generated_glb_bytes()
+    calls: list[bytes] = []
+
+    def convert_fbx(data: bytes) -> bytes:
+        calls.append(data)
+        return glb_bytes
+
+    monkeypatch.setattr(geometry, "_convert_fbx_to_glb_with_assimp", convert_fbx)
+
+    source_bytes = b"fbx placeholder bytes"
+    metrics = geometry._compute_metrics_worker(source_bytes, "fbx")
+
+    assert calls == [source_bytes]
+    assert metrics["triangle_count"] > 0
+    assert metrics["volume_cm3"] > 0
+    assert metrics["surface_area_cm2"] > 0
+    assert metrics["body_count"] >= 1
+    assert metrics.get("mesh_stl_bytes")
+    assert metrics.get("cad_glb_bytes") == glb_bytes
+
+    report = _analyze_single_process(metrics["mesh_stl_bytes"], "FDM")
+
+    assert "error_type" not in report
+    assert report["reportType"] == "FDM"
+    assert isinstance(report["issues"], list)

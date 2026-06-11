@@ -56,6 +56,7 @@ RUN apt-get update \
     gmsh \
     libosmesa6 \
     xvfb \
+    assimp-utils \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 

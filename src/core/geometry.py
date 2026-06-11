@@ -1418,12 +1418,12 @@ def _adaptive_cascadio_tolerance(file_bytes_len: int) -> float:
     """
     file_size_mb = file_bytes_len / (1024 * 1024)
     if file_size_mb < 1.0:
-        return 0.02
+        return 0.01
     if file_size_mb < 10.0:
-        return 0.05
+        return 0.025
     if file_size_mb < 50.0:
-        return 0.1
-    return 0.2
+        return 0.06
+    return 0.12
 
 
 def _load_cad_with_cascadio_isolated(
@@ -1662,6 +1662,63 @@ def _scale_meshes_to_mm_if_meter_scale(meshes: list[trimesh.Trimesh]) -> bool:
     return False
 
 
+def _convert_fbx_to_glb_with_assimp(data: bytes) -> bytes:
+    """Converts FBX bytes to GLB using the assimp CLI (assimp-utils package).
+
+    trimesh has no FBX loader, so FBX uploads are normalised to GLB up front and
+    then follow the standard GLB pipeline (metrics, viewer artifact, DFM).
+    Raises ValueError with a CAD_LOAD_ERROR code when assimp is unavailable or
+    the conversion fails, matching the other load-error paths.
+    """
+    import subprocess  # noqa: PLC0415 — worker subprocess-local import
+
+    assimp_binary = shutil.which("assimp")
+    if not assimp_binary:
+        raise ValueError(
+            "CAD_LOAD_ERROR: fbx (assimp converter is not installed on this host)"
+        )
+
+    fbx_path: str | None = None
+    glb_path: str | None = None
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".fbx", delete=False) as fbx_tmp:
+            fbx_tmp.write(data)
+            fbx_path = fbx_tmp.name
+        glb_path = f"{fbx_path}.glb"
+
+        completed = subprocess.run(  # noqa: S603 — fixed binary, temp-file args
+            [assimp_binary, "export", fbx_path, glb_path],
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+        )
+        if completed.returncode != 0 or not Path(glb_path).exists():
+            detail = (completed.stderr or completed.stdout or "").strip()[:300]
+            raise ValueError(f"CAD_LOAD_ERROR: fbx (assimp export failed: {detail})")
+
+        glb_bytes = Path(glb_path).read_bytes()
+        if not glb_bytes:
+            raise ValueError("CAD_LOAD_ERROR: fbx (assimp produced an empty GLB)")
+
+        logger.info(
+            "FBX converted to GLB via assimp",
+            extra={
+                "event": "fbx_assimp_converted",
+                "fbx_bytes": len(data),
+                "glb_bytes": len(glb_bytes),
+            },
+        )
+        return glb_bytes
+    except subprocess.TimeoutExpired as exc:
+        raise ValueError("CAD_LOAD_ERROR: fbx (assimp export timed out)") from exc
+    finally:
+        for path in (fbx_path, glb_path):
+            if path:
+                with contextlib.suppress(OSError):
+                    Path(path).unlink(missing_ok=True)
+
+
 def _compute_metrics_worker(
     data: bytes,
     file_extension: str,
@@ -1678,6 +1735,13 @@ def _compute_metrics_worker(
     try:
         file_stream.seek(0)
         ext = file_extension.strip(".").lower()
+
+        # FBX has no trimesh loader — convert it to GLB with assimp first, then
+        # continue down the standard GLB path (viewer artifact, metrics, DFM).
+        if ext == "fbx":
+            data = _convert_fbx_to_glb_with_assimp(data)
+            file_stream = io.BytesIO(data)
+            ext = "glb"
 
         mesh_list: list[trimesh.Trimesh] = []
         cad_glb_bytes: bytes | None = None
@@ -2421,6 +2485,24 @@ def _normalize_source_extension(file_ext: str) -> str:
     return normalized_ext
 
 
+def _repair_viewer_mesh(mesh: trimesh.Trimesh) -> None:
+    """Stitches tessellation cracks and fixes face orientation in place.
+
+    OpenCascade tessellates CAD faces independently, leaving duplicated border
+    vertices (hairline cracks) and occasionally inconsistent winding. Inverted
+    faces are backface-culled by the viewer — a fully inverted body shows up as
+    "invisible model, shadow only". Welding uses 1 µm precision (digits in the
+    source unit; cascadio GLBs are meters at this point).
+    """
+    with contextlib.suppress(Exception):
+        mesh.merge_vertices(digits_vertex=6)
+    with contextlib.suppress(Exception):
+        trimesh.repair.fix_winding(mesh)  # type: ignore[no-untyped-call]
+    with contextlib.suppress(Exception):
+        if mesh.is_watertight and float(mesh.volume) < 0:
+            mesh.invert()  # type: ignore[no-untyped-call]
+
+
 def _export_loaded_glb_for_viewer(scene_data: Any, file_ext: str = "") -> bytes | None:
     """Transform a loaded Phase 1 GLB object into viewer-ready GLB bytes."""
     # Z-up -> Y-up pre-rotation.
@@ -2432,6 +2514,13 @@ def _export_loaded_glb_for_viewer(scene_data: Any, file_ext: str = "") -> bytes 
     try:
         if hasattr(scene_data, "copy"):
             scene_data = scene_data.copy()
+
+        if isinstance(scene_data, trimesh.Scene):
+            for geometry in scene_data.geometry.values():
+                if isinstance(geometry, trimesh.Trimesh):
+                    _repair_viewer_mesh(geometry)
+        elif isinstance(scene_data, trimesh.Trimesh):
+            _repair_viewer_mesh(scene_data)
 
         # STEP/IGES: cascadio outputs GLB in meters (glTF spec) -> scale to mm.
         # STL/OBJ/3MF/GLB: Phase 1 has already normalized units for viewer use.

@@ -466,15 +466,15 @@ class TestTessellationSettings:
 
         # Adaptive helper picks one of the documented buckets.
         for size_mb, expected in [
-            (0.5, 0.02),
-            (5.0, 0.05),
-            (25.0, 0.1),
-            (100.0, 0.2),
+            (0.5, 0.01),
+            (5.0, 0.025),
+            (25.0, 0.06),
+            (100.0, 0.12),
         ]:
             got = geometry._adaptive_cascadio_tolerance(int(size_mb * 1024 * 1024))
-            assert got == expected, (
-                f"adaptive tol for {size_mb} MB: got {got}, expected {expected}"
-            )
+            assert (
+                got == expected
+            ), f"adaptive tol for {size_mb} MB: got {got}, expected {expected}"
 
     def test_gmsh_tessellation_settings(self):
         """Verify gmsh fallback uses coarser mesh settings for performance."""
