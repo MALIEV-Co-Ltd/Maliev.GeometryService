@@ -1,7 +1,7 @@
 import trimesh
 
 from src.core.cnc_analyzers import _compute_z_slice_profile, detect_axial_symmetry
-from src.core.geometry import _analyze_single_process
+from src.core.geometry import _aggregate_dfm_reports, _analyze_single_process
 
 
 def test_z_axis_cylinder_is_turnable_from_path2d_sections():
@@ -81,3 +81,41 @@ def test_cnc_turn_report_exposes_axis_point():
     assert report["primaryAxis"] == "Z"
     assert report["axisVector"] == [0.0, 0.0, 1.0]
     assert report["axisPoint"] == [10.0, -6.0, 0.0]
+
+
+def test_multibody_turning_aggregation_uses_best_axis_metadata():
+    """Assembly turning metadata should not blindly inherit body 0's axis."""
+    per_body_reports = {
+        0: {
+            "CNC_TURN": {
+                "reportType": "CNC_TURN",
+                "issues": [],
+                "isTurnable": True,
+                "primaryAxis": "Z",
+                "axisVector": [0.0, 0.0, 1.0],
+                "axisPoint": [0.0, 0.0, 0.0],
+                "symmetryDeviation": 0.12,
+                "lengthDiameterRatio": 0.4,
+            }
+        },
+        1: {
+            "CNC_TURN": {
+                "reportType": "CNC_TURN",
+                "issues": [],
+                "isTurnable": True,
+                "primaryAxis": "X",
+                "axisVector": [1.0, 0.0, 0.0],
+                "axisPoint": [18.0, 0.0, 0.0],
+                "symmetryDeviation": 0.01,
+                "lengthDiameterRatio": 2.4,
+            }
+        },
+    }
+
+    report = _aggregate_dfm_reports(per_body_reports)["CNC_TURN"]
+
+    assert report["isTurnable"]
+    assert report["primaryAxis"] == "X"
+    assert report["axisVector"] == [1.0, 0.0, 0.0]
+    assert report["axisPoint"] == [18.0, 0.0, 0.0]
+    assert report["symmetryDeviation"] == 0.12

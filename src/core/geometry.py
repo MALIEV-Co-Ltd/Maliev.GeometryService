@@ -4257,9 +4257,18 @@ def _aggregate_dfm_reports(
             (r.get("symmetryDeviation", 0.0) for r in cnc_turn_reports),
             default=0.0,
         )
-        base_turn["primaryAxis"] = base_turn.get("primaryAxis", "Z")
-        base_turn["axisVector"] = base_turn.get("axisVector", [0.0, 0.0, 1.0])
-        base_turn["axisPoint"] = base_turn.get("axisPoint", [])
+        best_axis_report = min(
+            (
+                r
+                for r in cnc_turn_reports
+                if r.get("isTurnable") and r.get("primaryAxis")
+            ),
+            key=lambda r: float(r.get("symmetryDeviation", 1.0) or 1.0),
+            default=base_turn,
+        )
+        base_turn["primaryAxis"] = best_axis_report.get("primaryAxis", "Z")
+        base_turn["axisVector"] = best_axis_report.get("axisVector", [0.0, 0.0, 1.0])
+        base_turn["axisPoint"] = best_axis_report.get("axisPoint", [])
 
         aggregated["CNC_TURN"] = base_turn
 
