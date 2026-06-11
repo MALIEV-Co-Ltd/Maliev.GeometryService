@@ -143,7 +143,7 @@ def test_client_runtime_manifest_is_public_and_not_cached():
         "directBrowserViewerExtensions": [".3mf", ".glb", ".gltf", ".obj", ".stl"],
         "browserViewableUploads": {
             "viewerSource": "original_upload",
-            "serverEagerMetrics": False,
+            "serverEagerMetrics": True,
             "serverGlbExport": False,
             "serverPreviewImages": False,
         },

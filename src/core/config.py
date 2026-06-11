@@ -29,7 +29,6 @@ class Settings(BaseSettings):
     GEOMETRY_FILE_INGEST_CONCURRENCY: int = 2
     GEOMETRY_ARTIFACT_CONCURRENCY: int = 2
     GEOMETRY_RABBITMQ_PREFETCH: int | None = None
-    GEOMETRY_BROWSER_PRIMARY_SKIP_EAGER_ANALYSIS: bool = True
 
     # Phase-2 concurrency cap. 2 vCPU / 4 GB targets set this to 1 so a
     # second concurrent DFM request waits instead of doubling the working
