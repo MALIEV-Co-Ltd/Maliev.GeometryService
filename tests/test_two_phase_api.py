@@ -203,7 +203,9 @@ class TestProcessAnalysisEndpoint:
         print(f"FDM issues found: {len(dfm_report['issues'])}")
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("process_code", ["FDM", "SLA", "CNC_MILL", "CNC_TURN"])
+    @pytest.mark.parametrize(
+        "process_code", ["FDM", "SLA", "SLS", "MJF", "CNC_MILL", "CNC_TURN"]
+    )
     async def test_multiple_processes_sequentially(
         self, client, sample_stl_file, process_code
     ):
@@ -233,7 +235,9 @@ class TestProcessAnalysisEndpoint:
 
     @pytest.mark.asyncio
     async def test_process_analysis_requires_quality_check_first(
-        self, client, sample_stl_file  # noqa: ARG002
+        self,
+        client,
+        sample_stl_file,  # noqa: ARG002
     ):
         """Test that process analysis fails without quality check."""
         # Try to run process analysis without quality check
@@ -556,7 +560,9 @@ class TestCacheMissRecovery:
 
     @pytest.mark.asyncio
     async def test_analyze_for_process_returns_422_for_corrupted_cad(
-        self, client, test_assets_dir  # noqa: ARG002
+        self,
+        client,
+        test_assets_dir,  # noqa: ARG002
     ):
         """When cache-miss recovery downloads bytes that can't be tessellated,
         the endpoint must return 422 (not a phantom 200 with an empty DFM report)."""
