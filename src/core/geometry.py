@@ -2500,7 +2500,7 @@ def _repair_viewer_mesh(mesh: trimesh.Trimesh) -> None:
         trimesh.repair.fix_winding(mesh)  # type: ignore[no-untyped-call]
     with contextlib.suppress(Exception):
         if mesh.is_watertight and float(mesh.volume) < 0:
-            mesh.invert()  # type: ignore[no-untyped-call]
+            mesh.invert()
 
 
 def _export_loaded_glb_for_viewer(scene_data: Any, file_ext: str = "") -> bytes | None:

@@ -10,6 +10,7 @@ import pytest
 import respx
 
 from src.consumers.upload_consumer import (
+    _SUPPORTED_GEOMETRY_UPLOAD_EXTENSIONS,
     ArtifactProcessingJob,
     UploadConsumer,
     _browser_viewer_source_extension,
@@ -161,6 +162,21 @@ def test_rabbitmq_prefetch_defaults_to_ingest_concurrency(
     )
 
     assert consumer._rabbitmq_prefetch_count() == 2
+
+
+def test_supported_geometry_upload_extensions_match_quote_engine_contract() -> None:
+    assert {
+        "3mf",
+        "fbx",
+        "glb",
+        "gltf",
+        "igs",
+        "iges",
+        "obj",
+        "step",
+        "stl",
+        "stp",
+    } == _SUPPORTED_GEOMETRY_UPLOAD_EXTENSIONS
 
 
 @pytest.mark.asyncio

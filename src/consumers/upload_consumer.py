@@ -111,8 +111,20 @@ _PREVIEW_BUDGET_S = (
     60  # 7-view preview generation (reduced for faster failure detection)
 )
 _PHASE2_HARD_DEADLINE_S = 300
-_BROWSER_VIEWER_SOURCE_EXTENSIONS = frozenset(
-    {".3mf", ".glb", ".gltf", ".obj", ".stl"}
+_BROWSER_VIEWER_SOURCE_EXTENSIONS = frozenset({".3mf", ".glb", ".gltf", ".obj", ".stl"})
+_SUPPORTED_GEOMETRY_UPLOAD_EXTENSIONS = frozenset(
+    {
+        "3mf",
+        "fbx",
+        "glb",
+        "gltf",
+        "igs",
+        "iges",
+        "obj",
+        "step",
+        "stl",
+        "stp",
+    }
 )
 _BROWSER_PRIMARY_EXECUTION_POLICY_KEY = "geometry.executionPolicy"
 _BROWSER_PRIMARY_EXECUTION_POLICY_VALUES = frozenset(
@@ -555,19 +567,7 @@ class UploadConsumer:
                     span.set_attribute("file_id", str(file_id))
 
                     file_ext = Path(inner_msg.storage_path).suffix.lower()
-                    supported_exts = [
-                        "igs",
-                        "iges",
-                        "step",
-                        "stp",
-                        "stl",
-                        "obj",
-                        "3mf",
-                        "gltf",
-                        "glb",
-                    ]
-
-                    if file_ext.strip(".") not in supported_exts:
+                    if file_ext.strip(".") not in _SUPPORTED_GEOMETRY_UPLOAD_EXTENSIONS:
                         logger.debug(
                             f"Skipping file {file_id}: extension {file_ext} "
                             "not supported by geometry service"
@@ -600,9 +600,7 @@ class UploadConsumer:
                             execution_mode="browser_primary",
                             reason="browser_primary_upload",
                         )
-                        _record_browser_primary_upload_work_avoided(
-                            file_ext=file_ext
-                        )
+                        _record_browser_primary_upload_work_avoided(file_ext=file_ext)
                         await self._publish_browser_primary_file_analyzed_event(
                             file_id=str(file_id),
                             storage_path=inner_msg.storage_path,
@@ -1238,7 +1236,8 @@ class UploadConsumer:
                     )
                     logger.info(
                         "Skipping server thumbnail and preview generation "
-                        "for server-exported viewer GLB (client renders previews locally)",
+                        "for server-exported viewer GLB "
+                        "(client renders previews locally)",
                         extra={
                             "event": "glb_viewer_secondary_artifacts_skipped",
                             "file_id": job.file_id,
