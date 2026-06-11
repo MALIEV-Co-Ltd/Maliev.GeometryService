@@ -522,18 +522,20 @@ class TestManifoldCheckPerBody:
             proc.executor.shutdown(wait=False)
             proc.dfm_executor.shutdown(wait=False)
 
-    def test_vertex_merge_digits_setting(self):
-        """Verify vertex merge uses digits_vertex=3 for more tolerant welding."""
+    def test_cascadio_vertex_merge_preserves_submillimeter_features(self):
+        """Verify CAD welding preserves holes and slots smaller than 1 mm."""
         import inspect
 
         from src.core import geometry
 
         # merge_vertices is called in _load_cad_with_cascadio_isolated after
-        # the subprocess produces the GLB (not inside the subprocess itself)
+        # the subprocess produces the GLB. At that point cascadio GLB geometry is
+        # still meter-scale, so digits_vertex=6 gives 0.001 mm effective precision
+        # after apply_scale(1000). digits_vertex=3 would weld at 1 mm and collapse
+        # small CAD details into broken triangles.
         source = inspect.getsource(geometry._load_cad_with_cascadio_isolated)
-        assert (
-            "digits_vertex=3" in source
-        ), "merge_vertices should use digits_vertex=3 (0.001mm precision, more tolerant)"  # noqa: E501
+        assert "digits_vertex=6" in source
+        assert "digits_vertex=3" not in source
 
 
 class TestOverhangDetectionBuildPlateBand:

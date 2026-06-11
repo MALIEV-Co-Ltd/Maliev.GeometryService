@@ -1546,7 +1546,11 @@ def _load_cad_with_cascadio_isolated(
             body_count = len(meshes)
 
             for mesh in meshes:
-                mesh.merge_vertices(digits_vertex=3)
+                # Cascadio GLB coordinates are meters here. digits_vertex=6 is
+                # 1 micrometer in meters, i.e. 0.001 mm after apply_scale(1000).
+                # Coarser welding collapses small holes/slots and creates bad
+                # triangles in the viewer and DFM STL exports.
+                mesh.merge_vertices(digits_vertex=6)
                 trimesh.repair.fix_winding(mesh)  # type: ignore[no-untyped-call]
                 mesh.apply_scale(1000.0)
 
@@ -1559,7 +1563,9 @@ def _load_cad_with_cascadio_isolated(
             mesh = loaded
             if len(mesh.vertices) == 0:
                 raise ValueError("cascadio produced empty mesh")
-            mesh.merge_vertices(digits_vertex=3)
+            # Cascadio GLB coordinates are meters here. Keep effective weld
+            # tolerance at 0.001 mm after scaling to preserve small CAD details.
+            mesh.merge_vertices(digits_vertex=6)
             trimesh.repair.fix_winding(mesh)  # type: ignore[no-untyped-call]
             mesh.apply_scale(1000.0)  # type: ignore[no-untyped-call]
 
