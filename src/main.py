@@ -157,7 +157,7 @@ _PUBLIC_PATHS = {
 _CLIENT_RUNTIME_PREFIX = "/geometry/client-runtime/"
 _ResponseT = TypeVar("_ResponseT", bound=Response)
 _CLIENT_RUNTIME_MANIFEST_VERSION = 1
-_CLIENT_RUNTIME_VERSION = "1.1.1"
+_CLIENT_RUNTIME_VERSION = "1.2.0"
 _CLIENT_RUNTIME_ALGORITHM_VERSION = "browser-first-dfm-v1"
 _CLIENT_RUNTIME_WORKER_BASENAME = "client-geometry-runtime.worker.js"
 _CLIENT_RUNTIME_DIR = Path(__file__).resolve().parent / "client_runtime"

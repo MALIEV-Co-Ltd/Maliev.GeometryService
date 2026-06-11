@@ -709,7 +709,7 @@ def test_client_runtime_worker_extracts_mesh_buffers_from_compressed_3mf() -> No
 
     assert posted["ok"] is True
     result = posted["result"]
-    assert result["runtimeVersion"] == "1.1.1"
+    assert result["runtimeVersion"] == "1.2.0"
     assert result["operation"] == "extract_mesh"
     assert result["sourceFormat"] == "3mf"
     assert result["meshBuffers"]["positions"][0:3] == [-25, -25, 0]
@@ -758,9 +758,15 @@ def test_client_runtime_worker_analyzes_large_viewer_meshes() -> None:
         for (let t = 0; t < triangleCount; t += 1) {{
           const x = (t % 300) * 2;
           const y = Math.floor(t / 300) * 2;
-          positions[t * 9 + 0] = x;     positions[t * 9 + 1] = y;     positions[t * 9 + 2] = 0;
-          positions[t * 9 + 3] = x + 1; positions[t * 9 + 4] = y;     positions[t * 9 + 5] = 0;
-          positions[t * 9 + 6] = x;     positions[t * 9 + 7] = y + 1; positions[t * 9 + 8] = 0;
+          positions[t * 9 + 0] = x;
+          positions[t * 9 + 1] = y;
+          positions[t * 9 + 2] = 0;
+          positions[t * 9 + 3] = x + 1;
+          positions[t * 9 + 4] = y;
+          positions[t * 9 + 5] = 0;
+          positions[t * 9 + 6] = x;
+          positions[t * 9 + 7] = y + 1;
+          positions[t * 9 + 8] = 0;
           indices[t * 3 + 0] = t * 3;
           indices[t * 3 + 1] = t * 3 + 1;
           indices[t * 3 + 2] = t * 3 + 2;
@@ -801,3 +807,149 @@ def test_client_runtime_worker_analyzes_large_viewer_meshes() -> None:
     assert posted["ok"] is True, f"worker failed on large mesh: {posted['error']}"
     assert posted["faceCount"] == 60000
     assert posted["authority"] == "local_primary"
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="Node.js is required")
+def test_client_runtime_worker_welds_vertices_and_counts_bodies() -> None:
+    """Viewer meshes duplicate vertices per face. The worker must weld them by
+    position before topology analysis: an unwelded but watertight tetrahedron is
+    manifold (zero bogus non-manifold edges), and two disjoint tetrahedra report
+    bodyCount=2 with a multi_body issue via the metrics-only operation."""
+    script = textwrap.dedent(
+        f"""
+        const fs = require('node:fs');
+        const vm = require('node:vm');
+
+        let posted = null;
+        const context = {{
+          console, TextDecoder, TextEncoder, Uint8Array, DataView, Map, Math,
+          Number, Infinity, Set, Array,
+          crypto: globalThis.crypto,
+          self: {{ crypto: globalThis.crypto, postMessage: m => {{ posted = m; }} }}
+        }};
+        vm.createContext(context);
+        const workerPath = {json.dumps(str(WORKER_PATH))};
+        vm.runInContext(fs.readFileSync(workerPath, 'utf8'), context);
+
+        // Watertight tetrahedron with EVERY face using its own duplicated
+        // vertices (12 positions for 4 shared corners), offset by dx.
+        function tetraPositions(dx) {{
+          const v0 = [dx + 0, 0, 0];
+          const v1 = [dx + 10, 0, 0];
+          const v2 = [dx + 0, 10, 0];
+          const v3 = [dx + 0, 0, 10];
+          const faces = [
+            [v0, v2, v1],
+            [v0, v1, v3],
+            [v0, v3, v2],
+            [v1, v2, v3],
+          ];
+          return faces.flat(2);
+        }}
+        const positions = [...tetraPositions(0), ...tetraPositions(100)];
+        const indices = Array.from({{ length: positions.length / 3 }}, (_, i) => i);
+
+        const event = {{
+          data: {{
+            id: 'weld-smoke',
+            operation: 'compute_metrics',
+            input: {{ meshBuffers: {{ positions, indices }} }}
+          }}
+        }};
+
+        Promise.resolve(context.self.onmessage(event)).then(() => {{
+          console.log(JSON.stringify(posted));
+        }});
+        """
+    )
+
+    completed = subprocess.run(
+        ["node", "-e", script],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=20,
+    )
+    posted = json.loads(completed.stdout)
+
+    assert posted["ok"] is True, posted.get("error")
+    result = posted["result"]
+    assert result["operation"] == "compute_metrics"
+    assert result["processCode"] is None
+    metrics = result["metrics"]
+    assert metrics["isManifold"] is True
+    assert metrics["nonManifoldEdgeCount"] == 0
+    assert metrics["openEdgeCount"] == 0
+    assert metrics["bodyCount"] == 2
+    assert "weldedIndices" not in metrics
+    categories = [issue["category"] for issue in result["issues"]]
+    assert "multi_body" in categories
+    assert "mesh_integrity" not in categories
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="Node.js is required")
+def test_client_runtime_worker_overhang_uses_45_degree_rule_and_regions() -> None:
+    """Overhang detection: faces steeper than 45° downward are flagged (with a
+    region count in the description); shallower downward faces and upward faces
+    are not."""
+    script = textwrap.dedent(
+        f"""
+        const fs = require('node:fs');
+        const vm = require('node:vm');
+
+        let posted = null;
+        const context = {{
+          console, TextDecoder, TextEncoder, Uint8Array, DataView, Map, Math,
+          Number, Infinity, Set, Array,
+          crypto: globalThis.crypto,
+          self: {{ crypto: globalThis.crypto, postMessage: m => {{ posted = m; }} }}
+        }};
+        vm.createContext(context);
+        const workerPath = {json.dumps(str(WORKER_PATH))};
+        vm.runInContext(fs.readFileSync(workerPath, 'utf8'), context);
+
+        const positions = [
+          // face 0: build plate at z=0 (excluded from overhang checks)
+          0, 0, 0,   10, 0, 0,   0, 10, 0,
+          // face 1: steep downward face, normal ≈ (0, 0.5, -0.866) — 60° from
+          // horizontal normal direction → steeper than the 45° limit → flagged
+          0, 0, 5,   0, 1, 5.577,   10, 0, 5,
+          // face 2: shallow downward face, normal ≈ (0, 0.8, -0.6) — inside the
+          // 45° self-supporting limit → NOT flagged
+          20, 0, 5,  20, 1, 6.333,  30, 0, 5,
+          // face 3: upward face, normal (0, 0, 1) → NOT flagged
+          40, 0, 5,  50, 0, 5,  40, 1, 5,
+        ];
+        const indices = Array.from({{ length: positions.length / 3 }}, (_, i) => i);
+
+        const event = {{
+          data: {{
+            id: 'overhang-45',
+            processCode: 'FDM',
+            input: {{ meshBuffers: {{ positions, indices }} }}
+          }}
+        }};
+
+        Promise.resolve(context.self.onmessage(event)).then(() => {{
+          console.log(JSON.stringify(posted));
+        }});
+        """
+    )
+
+    completed = subprocess.run(
+        ["node", "-e", script],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=20,
+    )
+    posted = json.loads(completed.stdout)
+
+    assert posted["ok"] is True, posted.get("error")
+    overhang = next(
+        issue for issue in posted["result"]["issues"] if issue["category"] == "overhang"
+    )
+    assert overhang["faceIndices"] == [1]
+    assert overhang["value"] == 1  # one connected overhang region
+    assert "1 overhang region" in overhang["description"]
+    assert "45" in overhang["description"]

@@ -117,7 +117,7 @@ def test_client_runtime_manifest_is_public_and_not_cached():
 
     body = response.json()
     assert body["manifestVersion"] == 1
-    assert body["runtimeVersion"] == "1.1.1"
+    assert body["runtimeVersion"] == "1.2.0"
     assert body["algorithmVersion"] == "browser-first-dfm-v1"
     assert body["runtimeKind"] == "browser-first-geometry"
     assert body["executionMode"] == "primary_interactive"
