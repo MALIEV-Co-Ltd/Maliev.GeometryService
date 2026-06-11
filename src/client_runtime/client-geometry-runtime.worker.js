@@ -155,6 +155,7 @@ async function extractMesh(input, runtimeKernel = null) {
 function meshFromBuffers(buffers) {
   const positions = [];
   const indices = [];
+  const sourceGroups = [];
 
   const sources = Array.isArray(buffers) ? buffers : [buffers];
   for (const source of sources) {
@@ -178,9 +179,13 @@ function meshFromBuffers(buffers) {
         indices.push(baseVertex + index);
       }
     }
+    sourceGroups.push({
+      startVertex: baseVertex,
+      endVertex: positions.length / 3
+    });
   }
 
-  return { positions, indices };
+  return { positions, indices, sourceGroups };
 }
 
 async function meshFromFile(fileBytes, fileName) {
@@ -682,12 +687,14 @@ function glbScalarReader(view, componentType) {
 // tessellation) duplicate vertices per face — counting edges on raw indices
 // makes every edge look like a boundary and reports thousands of bogus
 // "non-manifold" edges on perfectly valid parts.
-function buildWeldedIndexMap(positions) {
+function buildWeldedIndexMap(positions, sourceGroups = null) {
   const canonicalByKey = new Map();
   const vertexCount = positions.length / 3;
   const weldedIndex = new Array(vertexCount);
+  const groupByVertex = buildSourceGroupLookup(vertexCount, sourceGroups);
   for (let vertex = 0; vertex < vertexCount; vertex += 1) {
-    const key = `${Math.round(positions[vertex * 3] * 1000)}:` +
+    const key = `${groupByVertex[vertex]}:` +
+      `${Math.round(positions[vertex * 3] * 1000)}:` +
       `${Math.round(positions[vertex * 3 + 1] * 1000)}:` +
       `${Math.round(positions[vertex * 3 + 2] * 1000)}`;
     let canonical = canonicalByKey.get(key);
@@ -698,6 +705,21 @@ function buildWeldedIndexMap(positions) {
     weldedIndex[vertex] = canonical;
   }
   return weldedIndex;
+}
+
+function buildSourceGroupLookup(vertexCount, sourceGroups) {
+  const groupByVertex = new Array(vertexCount).fill(0);
+  if (!Array.isArray(sourceGroups) || sourceGroups.length <= 1) return groupByVertex;
+
+  for (let groupIndex = 0; groupIndex < sourceGroups.length; groupIndex += 1) {
+    const group = sourceGroups[groupIndex] || {};
+    const start = Math.max(0, Math.trunc(Number(group.startVertex) || 0));
+    const end = Math.min(vertexCount, Math.trunc(Number(group.endVertex) || 0));
+    for (let vertex = start; vertex < end; vertex += 1) {
+      groupByVertex[vertex] = groupIndex;
+    }
+  }
+  return groupByVertex;
 }
 
 function createUnionFind() {
@@ -739,7 +761,7 @@ function computeMetrics(mesh, runtimeKernel = null) {
     }
   }
 
-  const weldedIndex = buildWeldedIndexMap(positions);
+  const weldedIndex = buildWeldedIndexMap(positions, mesh.sourceGroups);
   const bodies = createUnionFind();
 
   let area = 0;

@@ -888,6 +888,80 @@ def test_client_runtime_worker_welds_vertices_and_counts_bodies() -> None:
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="Node.js is required")
+def test_client_runtime_worker_keeps_touching_source_bodies_topologically_separate() -> None:
+    """Separate CAD/viewer bodies may touch or share coincident faces. The
+    worker must not weld across source mesh-buffer boundaries; otherwise a valid
+    multi-body CAD file is collapsed into one non-manifold topology graph."""
+    script = textwrap.dedent(
+        f"""
+        const fs = require('node:fs');
+        const vm = require('node:vm');
+
+        let posted = null;
+        const context = {{
+          console, TextDecoder, TextEncoder, Uint8Array, DataView, Map, Math,
+          Number, Infinity, Set, Array,
+          crypto: globalThis.crypto,
+          self: {{ crypto: globalThis.crypto, postMessage: m => {{ posted = m; }} }}
+        }};
+        vm.createContext(context);
+        const workerPath = {json.dumps(str(WORKER_PATH))};
+        vm.runInContext(fs.readFileSync(workerPath, 'utf8'), context);
+
+        function cubeMesh(x0) {{
+          const x1 = x0 + 10;
+          return {{
+            positions: [
+              x0, 0, 0,  x1, 0, 0,  x1, 10, 0,  x0, 10, 0,
+              x0, 0, 10, x1, 0, 10, x1, 10, 10, x0, 10, 10
+            ],
+            indices: [
+              0, 2, 1, 0, 3, 2,
+              4, 5, 6, 4, 6, 7,
+              0, 1, 5, 0, 5, 4,
+              1, 2, 6, 1, 6, 5,
+              2, 3, 7, 2, 7, 6,
+              3, 0, 4, 3, 4, 7
+            ]
+          }};
+        }}
+
+        const event = {{
+          data: {{
+            id: 'touching-source-bodies',
+            operation: 'compute_metrics',
+            input: {{ meshBuffers: [cubeMesh(0), cubeMesh(10)] }}
+          }}
+        }};
+
+        Promise.resolve(context.self.onmessage(event)).then(() => {{
+          console.log(JSON.stringify(posted));
+        }});
+        """
+    )
+
+    completed = subprocess.run(
+        ["node", "-e", script],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=20,
+    )
+    posted = json.loads(completed.stdout)
+
+    assert posted["ok"] is True, posted.get("error")
+    result = posted["result"]
+    metrics = result["metrics"]
+    assert metrics["isManifold"] is True
+    assert metrics["nonManifoldEdgeCount"] == 0
+    assert metrics["openEdgeCount"] == 0
+    assert metrics["bodyCount"] == 2
+    categories = [issue["category"] for issue in result["issues"]]
+    assert "multi_body" in categories
+    assert "mesh_integrity" not in categories
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="Node.js is required")
 def test_client_runtime_worker_overhang_uses_45_degree_rule_and_regions() -> None:
     """Overhang detection: faces steeper than 45° downward are flagged (with a
     region count in the description); shallower downward faces and upward faces
