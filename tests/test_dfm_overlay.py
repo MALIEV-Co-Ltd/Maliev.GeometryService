@@ -303,6 +303,36 @@ def test_generate_overlays_worker_no_multi_body_key_for_single_body():
     ), "Single-body mesh should not produce a multi_body overlay"
 
 
+def test_generate_overlays_worker_produces_cnc_turn_face_overlay():
+    """CNC turning issues with face indices must get toggleable GLB overlays."""
+    from src.core.geometry import _generate_overlays_worker
+
+    mesh = trimesh.creation.cylinder(radius=10.0, height=24.0, sections=64)
+    stl_bytes = mesh.export(file_type="stl")
+    face_indices = [0, 1, 2, 3]
+    reports = {
+        "CNC_TURN": {
+            "issues": [
+                {
+                    "category": "tool_access",
+                    "faceIndices": face_indices,
+                    "severity": "warning",
+                    "title": "Limited tool access",
+                    "description": "test",
+                    "value": len(face_indices),
+                    "threshold": 0,
+                    "centroid": [0, 0, 0],
+                }
+            ],
+        }
+    }
+
+    result = _generate_overlays_worker(stl_bytes, reports)
+
+    assert "CNC_TURN__tool_access" in result
+    assert len(result["CNC_TURN__tool_access"]) > 0
+
+
 # ---------------------------------------------------------------------------
 # Support tower base ray-cast
 # ---------------------------------------------------------------------------

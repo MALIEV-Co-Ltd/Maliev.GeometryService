@@ -4543,10 +4543,6 @@ def _generate_overlays_worker(
                 )
                 continue
 
-            # Skip CNC turning (overlays not yet supported)
-            if process_code == "CNC_TURN":
-                continue
-
             # Skip if report is two-phase deferred (no actual analysis done yet)
             if report.get("twoPhaseDeferred", False):
                 continue
