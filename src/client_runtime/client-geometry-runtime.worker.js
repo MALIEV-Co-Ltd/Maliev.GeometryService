@@ -745,6 +745,70 @@ function createUnionFind() {
   return { find, union, parent };
 }
 
+// Re-orients triangle normals so adjacent faces agree on winding within each
+// connected surface (mirrors GeometryService's trimesh.repair.fix_winding).
+// A handful of inconsistently wound faces — most likely right at a
+// tessellation seam, e.g. where an open cavity's rim meets the outer wall —
+// report their normals on the wrong side of the overhang threshold, which
+// looks like the whole check is backwards even though the threshold itself
+// is fine. Mutates triangles[].normal in place.
+function repairTriangleWinding(triangles, weldedTriangles) {
+  const edgeFaces = new Map();
+  for (let face = 0; face < weldedTriangles.length; face += 1) {
+    const [a, b, c] = weldedTriangles[face];
+    for (const [from, to] of [[a, b], [b, c], [c, a]]) {
+      if (from === to) continue;
+      const key = from < to ? `${from}:${to}` : `${to}:${from}`;
+      const dir = from < to ? 1 : -1;
+      let entries = edgeFaces.get(key);
+      if (!entries) { entries = []; edgeFaces.set(key, entries); }
+      entries.push({ face, dir });
+    }
+  }
+
+  const adjacency = new Map();
+  for (const entries of edgeFaces.values()) {
+    for (let i = 0; i < entries.length; i += 1) {
+      for (let j = 0; j < entries.length; j += 1) {
+        if (i === j) continue;
+        const from = entries[i];
+        const to = entries[j];
+        let list = adjacency.get(from.face);
+        if (!list) { list = []; adjacency.set(from.face, list); }
+        list.push({ neighbor: to.face, sameDirection: from.dir === to.dir });
+      }
+    }
+  }
+
+  const flipped = new Set();
+  const visited = new Set();
+  for (let start = 0; start < weldedTriangles.length; start += 1) {
+    if (visited.has(start)) continue;
+    visited.add(start);
+    const queue = [start];
+    while (queue.length > 0) {
+      const current = queue.pop();
+      const currentFlipped = flipped.has(current);
+      for (const { neighbor, sameDirection } of adjacency.get(current) ?? []) {
+        if (visited.has(neighbor)) continue;
+        visited.add(neighbor);
+        // Properly wound adjacent triangles traverse a shared edge in
+        // OPPOSITE directions. Traversing it in the same direction means
+        // exactly one side of the pair is wound backwards.
+        if (sameDirection ? !currentFlipped : currentFlipped) flipped.add(neighbor);
+        queue.push(neighbor);
+      }
+    }
+  }
+
+  for (const face of flipped) {
+    const normal = triangles[face].normal;
+    normal[0] = -normal[0];
+    normal[1] = -normal[1];
+    normal[2] = -normal[2];
+  }
+}
+
 function computeMetrics(mesh, runtimeKernel = null) {
   const { positions, indices } = mesh;
   if (positions.length === 0 || indices.length === 0) {
@@ -822,6 +886,8 @@ function computeMetrics(mesh, runtimeKernel = null) {
       touchesBuildPlate
     });
   }
+
+  repairTriangleWinding(triangles, weldedTriangles);
 
   let openEdgeCount = 0;
   let nonManifoldEdgeCount = 0;

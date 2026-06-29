@@ -1027,3 +1027,78 @@ def test_client_runtime_worker_overhang_uses_45_degree_rule_and_regions() -> Non
     assert overhang["value"] == 1  # one connected overhang region
     assert "1 overhang region" in overhang["description"]
     assert "45" in overhang["description"]
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="Node.js is required")
+def test_client_runtime_worker_repairs_inconsistent_seam_winding() -> None:
+    """A steep downward-facing quad split into two triangles, one of which is
+    deliberately wound backwards (as can happen at a tessellation seam, e.g.
+    where an open cavity's rim meets the outer wall). Without a winding
+    repair pass, the backwards triangle's raw cross-product normal points
+    the wrong way and is silently skipped, even though it is part of the
+    same overhang surface as its correctly-wound neighbour. The repair must
+    detect the disagreement across their shared edge and flip it back."""
+    script = textwrap.dedent(
+        f"""
+        const fs = require('node:fs');
+        const vm = require('node:vm');
+
+        let posted = null;
+        const context = {{
+          console, TextDecoder, TextEncoder, Uint8Array, DataView, Map, Math,
+          Number, Infinity, Set, Array,
+          crypto: globalThis.crypto,
+          self: {{ crypto: globalThis.crypto, postMessage: m => {{ posted = m; }} }}
+        }};
+        vm.createContext(context);
+        const workerPath = {json.dumps(str(WORKER_PATH))};
+        vm.runInContext(fs.readFileSync(workerPath, 'utf8'), context);
+
+        const positions = [
+          // face 0: build plate at z=0 (excluded from overhang checks)
+          0, 0, 0,   10, 0, 0,   0, 10, 0,
+          // quad corners of a single steep (60° from horizontal) surface,
+          // split along the corner00-corner11 diagonal:
+          0, 0, 5,      // corner00 (index 3)
+          0, 1, 5.577,  // corner01 (index 4)
+          10, 1, 5.577, // corner11 (index 5)
+          10, 0, 5,     // corner10 (index 6)
+        ];
+        const indices = [
+          0, 1, 2,
+          3, 4, 5, // face 1: correctly wound — normal ~= (0, 0.5, -0.866)
+          3, 6, 5, // face 2: SAME physical surface, vertices reversed —
+                   // raw normal ~= (0, -0.5, 0.866) without the repair pass
+        ];
+
+        const event = {{
+          data: {{
+            id: 'seam-winding',
+            processCode: 'FDM',
+            input: {{ meshBuffers: {{ positions, indices }} }}
+          }}
+        }};
+
+        Promise.resolve(context.self.onmessage(event)).then(() => {{
+          console.log(JSON.stringify(posted));
+        }});
+        """
+    )
+
+    completed = subprocess.run(
+        ["node", "-e", script],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=20,
+    )
+    posted = json.loads(completed.stdout)
+
+    assert posted["ok"] is True, posted.get("error")
+    overhang = next(
+        issue for issue in posted["result"]["issues"] if issue["category"] == "overhang"
+    )
+    # Both triangles of the single physical surface must be flagged, not just
+    # the one that happened to be wound correctly in the source mesh.
+    assert overhang["faceIndices"] == [1, 2]
+    assert overhang["value"] == 1  # one connected overhang region
