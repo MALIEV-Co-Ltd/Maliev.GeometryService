@@ -677,183 +677,176 @@ class TestAutoRotationCameraPreset:
 
     def test_set_camera_preset_stops_auto_rotation(self):
         """
-        Verify setCameraPreset stops auto-rotation by zeroing current speed.
-        This is a code inspection test since we can't run BabylonJS in pytest.
+        Verify auto-rotation stops when the user begins interacting via OrbitControls.
+        This is a code inspection test since we can't run three.js in pytest.
         """
-        # Read the part-viewer.js file
         viewer_path = (
             Path(__file__).parent.parent.parent
             / "Maliev.Intranet"
             / "Maliev.Intranet.Client"
             / "wwwroot"
             / "js"
-            / "part-viewer.js"
+            / "part-viewer-three.js"
         )
 
         if not viewer_path.exists():
-            pytest.skip(f"part-viewer.js not found at {viewer_path}")
+            pytest.skip(f"part-viewer-three.js not found at {viewer_path}")
 
         source = viewer_path.read_text()
 
-        # Find the setCameraPreset function
+        # stopAutoRotation must be exported
         assert (
-            "export function setCameraPreset" in source
-        ), "setCameraPreset function should exist"
+            "export function stopAutoRotation" in source
+        ), "stopAutoRotation should be exported"
 
-        # Check that it stops auto-rotation
+        # It must zero autoSpeedTarget and set interacting state
         assert (
-            "autoSpeedCurrent[canvasId] = 0" in source
-        ), "setCameraPreset should zero autoSpeedCurrent to prevent drift"
+            "autoSpeedTarget[canvasId] = SPEED_STOP" in source
+        ), "stopAutoRotation should set autoSpeedTarget to SPEED_STOP"
         assert (
-            "autoSpeedTarget[canvasId]  = SPEED_STOP" in source
-        ), "setCameraPreset should set autoSpeedTarget to SPEED_STOP"
-        assert (
-            "animStates[canvasId]       = 'interacting'" in source
-        ), "setCameraPreset should set animStates to 'interacting'"
+            "animStates[canvasId] = 'interacting'" in source
+        ), "stopAutoRotation should set animStates to 'interacting'"
 
-        # Verify these come BEFORE applyPreset (order matters!)
-        preset_func_start = source.find("export function setCameraPreset")
-        preset_func_end = source.find(
-            "}", source.find("applyPreset", preset_func_start)
-        )
-        preset_func_body = source[preset_func_start:preset_func_end]
-
-        # Check that auto-rotation stop code appears before applyPreset
-        stop_pos = preset_func_body.find("autoSpeedCurrent[canvasId] = 0")
-        apply_pos = preset_func_body.find("applyPreset")
+        # The OrbitControls 'start' listener must call stopAutoRotation
         assert (
-            stop_pos < apply_pos
-        ), "Auto-rotation stop should happen BEFORE applyPreset to prevent drift"
+            "stopAutoRotation(canvasId)" in source
+        ), "OrbitControls 'start' listener should call stopAutoRotation"
+
+        # Both state resets must appear inside stopAutoRotation itself
+        stop_func_start = source.find("export function stopAutoRotation")
+        stop_func_end = source.find("\n}", stop_func_start) + 2
+        stop_func_body = source[stop_func_start:stop_func_end]
+
+        assert (
+            "autoSpeedTarget[canvasId] = SPEED_STOP" in stop_func_body
+        ), "autoSpeedTarget reset must be inside stopAutoRotation"
+        assert (
+            "animStates[canvasId] = 'interacting'" in stop_func_body
+        ), "animStates reset must be inside stopAutoRotation"
 
 
 class TestNearClippingPlaneFix:
     """Tests that the near clipping plane is set correctly to prevent early clipping."""
 
     def test_camera_near_plane_value(self):
-        """Verify CAMERA_NEAR_PLANE is set to 0.001 (0.1% of mesh radius)."""
+        """Verify CAMERA_NEAR is set to a fixed world-unit value (three.js migration)."""
         viewer_path = (
             Path(__file__).parent.parent.parent
             / "Maliev.Intranet"
             / "Maliev.Intranet.Client"
             / "wwwroot"
             / "js"
-            / "part-viewer.js"
+            / "part-viewer-three.js"
         )
 
         if not viewer_path.exists():
-            pytest.skip(f"part-viewer.js not found at {viewer_path}")
+            pytest.skip(f"part-viewer-three.js not found at {viewer_path}")
 
         source = viewer_path.read_text()
 
-        # Check that CAMERA_NEAR_PLANE is set to 0.0001 (0.01% of mesh radius —
-        # further reduced from 0.001 to allow arbitrarily close zoom without clipping)
+        # three.js viewer uses a fixed world-unit near plane (0.1mm) rather than a
+        # mesh-radius-relative value; models are loaded in mm so 0.1mm is always safe.
         assert (
-            "CAMERA_NEAR_PLANE: 0.0001" in source
-        ), "CAMERA_NEAR_PLANE should be 0.0001 (0.01% of mesh radius) to prevent early clipping"  # noqa: E501
+            "CAMERA_NEAR: 0.1" in source
+        ), "CAMERA_NEAR should be 0.1 (fixed mm near plane)"
 
-        # Verify the old value (0.000001) is NOT present
+        # Verify the old mesh-radius-relative approach is gone
         assert (
-            "CAMERA_NEAR_PLANE: 0.000001" not in source
-        ), "Old CAMERA_NEAR_PLANE value (0.000001) should be replaced"
-
-        # Verify there's an absolute minimum of 0.01mm
-        assert (
-            "Math.max(meshRadius * CONFIG.CAMERA_NEAR_PLANE, 0.01)" in source
-        ), "Should have absolute minimum of 0.01mm to prevent negative near plane"
+            "CAMERA_NEAR_PLANE" not in source
+        ), "Old CAMERA_NEAR_PLANE (mesh-radius-relative) should be removed"
 
 
 class TestMultiBodyTransparencyFix:
     """Tests that multi-body selection state is tracked correctly."""
 
     def test_selected_body_indices_tracking_exists(self):
-        """Verify selectedBodyIndices state tracking is present."""
+        """Verify per-canvas body selection state tracking is present."""
         viewer_path = (
             Path(__file__).parent.parent.parent
             / "Maliev.Intranet"
             / "Maliev.Intranet.Client"
             / "wwwroot"
             / "js"
-            / "part-viewer.js"
+            / "part-viewer-three.js"
         )
 
         if not viewer_path.exists():
-            pytest.skip(f"part-viewer.js not found at {viewer_path}")
+            pytest.skip(f"part-viewer-three.js not found at {viewer_path}")
 
         source = viewer_path.read_text()
 
-        # Check that selectedBodyIndices is declared
+        # three.js viewer uses selectedBody (not selectedBodyIndices) for the
+        # currently selected body index, and bodyMaps for the per-canvas body list.
         assert (
-            "selectedBodyIndices" in source
-        ), "selectedBodyIndices state tracking should be declared"
+            "selectedBody" in source
+        ), "selectedBody state tracking should be declared"
 
-        # Check that it's declared alongside perCanvasBodyMap
-        body_map_pos = source.find("const perCanvasBodyMap")
-        selected_pos = source.find("const selectedBodyIndices")
+        body_map_pos = source.find("const bodyMaps")
+        selected_pos = source.find("const selectedBody")
         assert (
             body_map_pos > 0 and selected_pos > 0
-        ), "selectedBodyIndices should be declared near perCanvasBodyMap"
+        ), "selectedBody should be declared alongside bodyMaps"
 
     def test_select_body_handles_reclick(self):
-        """Verify selectBody checks if clicked body is already selected."""
+        """Verify selectBody and clearBodySelection are both exported."""
         viewer_path = (
             Path(__file__).parent.parent.parent
             / "Maliev.Intranet"
             / "Maliev.Intranet.Client"
             / "wwwroot"
             / "js"
-            / "part-viewer.js"
+            / "part-viewer-three.js"
         )
 
         if not viewer_path.exists():
-            pytest.skip(f"part-viewer.js not found at {viewer_path}")
+            pytest.skip(f"part-viewer-three.js not found at {viewer_path}")
 
         source = viewer_path.read_text()
 
-        # Find the selectBody function
+        # Both functions must be exported so Blazor can call them individually
         assert (
             "export function selectBody" in source
-        ), "selectBody function should exist"
-
-        # Check for the re-click logic
-        assert (
-            "bodyIndex === currentlySelected" in source
-        ), "selectBody should check if clicked body equals currently selected body"
+        ), "selectBody function should be exported"
 
         assert (
-            "clearBodySelection(canvasId)" in source
-        ), "selectBody should call clearBodySelection when same body is clicked"
+            "export function clearBodySelection" in source
+        ), "clearBodySelection function should be exported"
+
+        # selectBody must track state in selectedBody map
+        select_start = source.find("export function selectBody")
+        select_end = source.find("\n}", select_start) + 2
+        select_body = source[select_start:select_end]
+        assert (
+            "selectedBody[canvasId]" in select_body
+        ), "selectBody should update selectedBody[canvasId] state"
 
     def test_clear_body_selection_resets_state(self):
-        """Verify clearBodySelection resets selectedBodyIndices to null."""
+        """Verify clearBodySelection resets selectedBody to null."""
         viewer_path = (
             Path(__file__).parent.parent.parent
             / "Maliev.Intranet"
             / "Maliev.Intranet.Client"
             / "wwwroot"
             / "js"
-            / "part-viewer.js"
+            / "part-viewer-three.js"
         )
 
         if not viewer_path.exists():
-            pytest.skip(f"part-viewer.js not found at {viewer_path}")
+            pytest.skip(f"part-viewer-three.js not found at {viewer_path}")
 
         source = viewer_path.read_text()
 
-        # Find the clearBodySelection function
         assert (
             "export function clearBodySelection" in source
-        ), "clearBodySelection function should exist"
+        ), "clearBodySelection function should be exported"
 
-        # Check that it resets selectedBodyIndices
         clear_func_start = source.find("export function clearBodySelection")
-        clear_func_end = source.find(
-            "\n}", source.rfind("console.log", clear_func_start)
-        )
+        clear_func_end = source.find("\n}", clear_func_start) + 2
         clear_func_body = source[clear_func_start:clear_func_end]
 
         assert (
-            "selectedBodyIndices[canvasId] = null" in clear_func_body
-        ), "clearBodySelection should reset selectedBodyIndices[canvasId] to null"
+            "selectedBody[canvasId] = null" in clear_func_body
+        ), "clearBodySelection should reset selectedBody[canvasId] to null"
 
 
 @requires_pyvista

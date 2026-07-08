@@ -2,7 +2,7 @@
 Overlay GLB generator for DFM visualization.
 
 Generates small GLB files that highlight specific face regions on the 3D model.
-These overlays are loaded on-demand in the BabylonJS viewer when a user clicks
+These overlays are loaded on-demand in the three.js viewer when a user clicks
 a DFM issue in the overlay panel.
 
 Coordinate conventions match _export_glb_worker in geometry.py:
