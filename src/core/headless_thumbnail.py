@@ -189,7 +189,8 @@ def _render_with_pyvista(
         plotter = pv.Plotter(
             off_screen=True, notebook=False, window_size=[size, size], lighting=None
         )
-        plotter.set_background([255, 255, 255])  # White base; masked out by transparent_background screenshot
+        # White base; masked out by transparent_background screenshot.
+        plotter.set_background([255, 255, 255])
         plotter.enable_anti_aliasing("msaa")
 
         center = np.array([0.0, 0.0, 0.0])
