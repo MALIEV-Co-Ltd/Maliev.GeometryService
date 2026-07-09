@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import base64
 import json
+import re
 import shutil
 import struct
 import subprocess
+import tempfile
 import textwrap
 from pathlib import Path
 
@@ -18,6 +20,22 @@ WORKER_PATH = (
     / "client_runtime"
     / "client-geometry-runtime.worker.js"
 )
+def _worker_source_version() -> str:
+    """The version the worker source declares — tests must never pin a literal.
+
+    Services always pull the LATEST runtime from GeometryService; asserting a
+    hardcoded version here would re-introduce the pinning this architecture
+    forbids.
+    """
+    source = WORKER_PATH.read_text(encoding="utf-8")
+    match = re.search(
+        r'MALIEV_BROWSER_GEOMETRY_RUNTIME_VERSION = "([^"]+)"', source
+    )
+    assert match, "worker source must declare MALIEV_BROWSER_GEOMETRY_RUNTIME_VERSION"
+    return match.group(1)
+
+
+
 KERNEL_WASM_BASE64 = (
     "AGFzbQEAAAABEANgAAF/YAF/AX9gAn9/AX8DBAMAAQIHQwMPcnVudGltZV92ZXJzaW9u"
     "AAAbdHJpYW5nbGVfY291bnRfZnJvbV9pbmRpY2VzAAEPaXNfd2l0aGluX2xpbWl0AAIK"
@@ -709,7 +727,7 @@ def test_client_runtime_worker_extracts_mesh_buffers_from_compressed_3mf() -> No
 
     assert posted["ok"] is True
     result = posted["result"]
-    assert result["runtimeVersion"] == "1.3.0"
+    assert result["runtimeVersion"] == _worker_source_version()
     assert result["operation"] == "extract_mesh"
     assert result["sourceFormat"] == "3mf"
     assert result["meshBuffers"]["positions"][0:3] == [-25, -25, 0]
@@ -1102,3 +1120,215 @@ def test_client_runtime_worker_repairs_inconsistent_seam_winding() -> None:
     # the one that happened to be wound correctly in the source mesh.
     assert overhang["faceIndices"] == [1, 2]
     assert overhang["value"] == 1  # one connected overhang region
+
+
+# ---------------------------------------------------------------------------
+# v2 DFM engine: full client-side process screening
+# ---------------------------------------------------------------------------
+
+_MESH_BUILDER_JS = """
+function pushTri(pos, idx, a, b, c) {
+  const base = pos.length / 3;
+  pos.push(...a, ...b, ...c);
+  idx.push(base, base + 1, base + 2);
+}
+function quad(pos, idx, a, b, c, d) {
+  pushTri(pos, idx, a, b, c);
+  pushTri(pos, idx, a, c, d);
+}
+function box(pos, idx, cx, cy, cz, sx, sy, sz) {
+  // Outward-wound faces (CAD/STL convention): bottom -Z, top +Z, etc.
+  const x0 = cx - sx / 2, x1 = cx + sx / 2;
+  const y0 = cy - sy / 2, y1 = cy + sy / 2;
+  const z0 = cz - sz / 2, z1 = cz + sz / 2;
+  quad(pos, idx, [x0,y0,z0],[x0,y1,z0],[x1,y1,z0],[x1,y0,z0]);
+  quad(pos, idx, [x0,y0,z1],[x1,y0,z1],[x1,y1,z1],[x0,y1,z1]);
+  quad(pos, idx, [x0,y0,z0],[x0,y0,z1],[x0,y1,z1],[x0,y1,z0]);
+  quad(pos, idx, [x1,y0,z0],[x1,y1,z0],[x1,y1,z1],[x1,y0,z1]);
+  quad(pos, idx, [x0,y0,z0],[x1,y0,z0],[x1,y0,z1],[x0,y0,z1]);
+  quad(pos, idx, [x0,y1,z0],[x0,y1,z1],[x1,y1,z1],[x1,y1,z0]);
+}
+function cylinder(pos, idx, cx, cy, z0, z1, r, seg) {
+  seg = seg || 48;
+  for (let s = 0; s < seg; s += 1) {
+    const a0 = (s / seg) * 2 * Math.PI;
+    const a1 = ((s + 1) / seg) * 2 * Math.PI;
+    const p0 = [cx + r * Math.cos(a0), cy + r * Math.sin(a0)];
+    const p1 = [cx + r * Math.cos(a1), cy + r * Math.sin(a1)];
+    quad(pos, idx,
+      [p0[0],p0[1],z0], [p1[0],p1[1],z0], [p1[0],p1[1],z1], [p0[0],p0[1],z1]);
+    pushTri(pos, idx, [cx,cy,z1], [p0[0],p0[1],z1], [p1[0],p1[1],z1]);
+    pushTri(pos, idx, [cx,cy,z0], [p1[0],p1[1],z0], [p0[0],p0[1],z0]);
+  }
+}
+"""
+
+
+def _run_worker_dfm(build_js: str, process_code: str) -> dict:
+    """Run the worker's analyze() on a JS-built mesh; return the posted result."""
+    mesh_script = (
+        _MESH_BUILDER_JS
+        + chr(10)
+        + "const pos = []; const idx = [];"
+        + chr(10)
+        + build_js
+        + chr(10)
+        + "({ positions: pos, indices: idx })"
+    )
+    script = textwrap.dedent(
+        f"""
+        const fs = require('node:fs');
+        const vm = require('node:vm');
+
+        let posted = null;
+        const context = {{
+          console, TextDecoder, TextEncoder, Uint8Array, Uint32Array,
+          Float64Array, DataView, Map, Set, Math, Number, Infinity, JSON,
+          Array, Promise, Float32Array,
+          crypto: globalThis.crypto,
+          self: {{
+            crypto: globalThis.crypto,
+            postMessage: message => {{ posted = message; }}
+          }}
+        }};
+        vm.createContext(context);
+        const workerPath = {json.dumps(str(WORKER_PATH))};
+        vm.runInContext(fs.readFileSync(workerPath, 'utf8'), context);
+
+        const mesh = vm.runInContext(
+          {json.dumps(mesh_script)},
+          vm.createContext({{ Math }})
+        );
+
+        const event = {{
+          data: {{
+            id: 'dfm-v2',
+            processCode: {json.dumps(process_code)},
+            input: {{ meshBuffers: mesh }}
+          }}
+        }};
+        Promise.resolve(context.self.onmessage(event)).then(() => {{
+          if (!posted) {{ console.error('no result'); process.exit(1); }}
+          console.log(JSON.stringify(posted));
+        }});
+        """
+    )
+    # Node 24's `-e` string evaluator mis-parses large embedded sources on
+    # Windows; run from a real .cjs file instead.
+    with tempfile.NamedTemporaryFile(
+        "w", suffix=".cjs", delete=False, encoding="utf-8"
+    ) as handle:
+        handle.write(script)
+        script_path = handle.name
+    try:
+        completed = subprocess.run(
+            ["node", script_path],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    finally:
+        Path(script_path).unlink(missing_ok=True)
+    posted = json.loads(completed.stdout)
+    assert posted["ok"] is True, posted
+    return posted["result"]
+
+
+def _categories(result: dict) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for issue in result["issues"]:
+        counts[issue["category"]] = counts.get(issue["category"], 0) + 1
+    return counts
+
+
+def _issue(result: dict, category: str) -> dict:
+    return next(issue for issue in result["issues"] if issue["category"] == category)
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="Node.js is required")
+def test_dfm_v2_every_issue_carries_overlay_faces() -> None:
+    result = _run_worker_dfm(
+        "cylinder(pos, idx, 0, 0, 0, 10, 3); cylinder(pos, idx, 0, 0, 10, 14, 12);",
+        "FDM",
+    )
+    for issue in result["issues"]:
+        assert isinstance(issue["faceIndices"], list), issue["category"]
+    hints = {hint["category"] for hint in result["localOverlayHints"]}
+    assert "overhang" in hints
+    overhang = _issue(result, "overhang")
+    assert len(overhang["faceIndices"]) > 0  # exact-region GLB overlay support
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="Node.js is required")
+def test_dfm_v2_warpage_on_large_thin_plate_only() -> None:
+    plate = _run_worker_dfm("box(pos, idx, 0, 0, 1, 120, 90, 2);", "FDM")
+    assert "warpage" in _categories(plate)
+    assert len(_issue(plate, "warpage")["faceIndices"]) > 0
+
+    cube = _run_worker_dfm("box(pos, idx, 0, 0, 12.5, 25, 25, 25);", "FDM")
+    for absent in ("warpage", "overhang", "thin_wall", "unsupported_wall"):
+        assert absent not in _categories(cube), absent
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="Node.js is required")
+def test_dfm_v2_thin_fin_fires_thin_and_unsupported_wall() -> None:
+    build = "box(pos, idx, 0, 0, 2.5, 40, 40, 5); box(pos, idx, 0, 0, 11, 30, 0.6, 12);"
+    result = _run_worker_dfm(build, "FDM")
+    cats = _categories(result)
+    assert "thin_wall" in cats
+    assert "unsupported_wall" in cats
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="Node.js is required")
+def test_dfm_v2_thin_pin_below_process_minimum() -> None:
+    build = "cylinder(pos, idx, 0, 0, 0, 4, 10); cylinder(pos, idx, 0, 0, 4, 9, 0.3);"
+    result = _run_worker_dfm(build, "SLS")
+    assert "pin" in _categories(result)
+    pin = _issue(result, "pin")
+    assert pin["threshold"] == 0.8  # SLS pin minimum from the rules table
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="Node.js is required")
+def test_dfm_v2_turning_symmetry_and_slenderness() -> None:
+    turnable = _run_worker_dfm("cylinder(pos, idx, 0, 0, 0, 60, 8, 64);", "CNC_TURN")
+    assert "not_turnable" not in _categories(turnable)
+
+    box_result = _run_worker_dfm("box(pos, idx, 0, 0, 10, 40, 20, 20);", "CNC_TURN")
+    assert "not_turnable" in _categories(box_result)
+
+    shaft = _run_worker_dfm("cylinder(pos, idx, 0, 0, 0, 100, 5, 64);", "CNC_TURN")
+    assert "ld_ratio" in _categories(shaft)
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="Node.js is required")
+def test_dfm_v2_sheet_metal_uniformity() -> None:
+    sheet = _run_worker_dfm("box(pos, idx, 0, 0, 1, 80, 60, 2);", "SHEET_METAL")
+    assert "sheet_uniformity" not in _categories(sheet)
+
+    cube = _run_worker_dfm("box(pos, idx, 0, 0, 12.5, 25, 25, 25);", "SHEET_METAL")
+    assert "sheet_uniformity" in _categories(cube)
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="Node.js is required")
+def test_dfm_v2_silicone_thin_wall() -> None:
+    build = "box(pos, idx, 0, 0, 2.5, 40, 40, 5); box(pos, idx, 0, 0, 10, 30, 0.4, 10);"
+    result = _run_worker_dfm(build, "SILICONE_CASTING")
+    assert "thin_wall" in _categories(result)
+    assert _issue(result, "thin_wall")["threshold"] == 0.5
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="Node.js is required")
+def test_dfm_v2_powder_clearance_between_bodies() -> None:
+    build = "box(pos, idx, 0, 0, 5, 20, 20, 10); box(pos, idx, 0, 0, 15.2, 20, 20, 10);"
+    result = _run_worker_dfm(build, "SLS")
+    cats = _categories(result)
+    assert "multi_body" in cats
+    assert "clearance" in cats  # 0.2 mm gap < 0.3 mm SLS moving-part clearance
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="Node.js is required")
+def test_dfm_v2_powder_bed_skips_overhangs() -> None:
+    build = "cylinder(pos, idx, 0, 0, 0, 10, 3); cylinder(pos, idx, 0, 0, 10, 14, 12);"
+    result = _run_worker_dfm(build, "SLS")
+    assert "overhang" not in _categories(result)
