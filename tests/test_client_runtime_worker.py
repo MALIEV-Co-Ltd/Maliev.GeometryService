@@ -709,7 +709,7 @@ def test_client_runtime_worker_extracts_mesh_buffers_from_compressed_3mf() -> No
 
     assert posted["ok"] is True
     result = posted["result"]
-    assert result["runtimeVersion"] == "1.2.0"
+    assert result["runtimeVersion"] == "1.3.0"
     assert result["operation"] == "extract_mesh"
     assert result["sourceFormat"] == "3mf"
     assert result["meshBuffers"]["positions"][0:3] == [-25, -25, 0]

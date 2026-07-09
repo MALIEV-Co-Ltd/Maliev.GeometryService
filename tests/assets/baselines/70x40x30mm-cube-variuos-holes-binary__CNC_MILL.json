@@ -1,5 +1,5 @@
 {
-  "analysis_time_seconds": 0.0498,
+  "analysis_time_seconds": 0.0497,
   "cavityDepthIssues": 15.0,
   "chatterRiskCount": 0,
   "drillHoleCount": 0,
@@ -88,7 +88,7 @@
         -9.7993,
         -15.0
       ],
-      "description": "21 cavity/cavities exceed the 4.0:1 depth/width limit. Worst: 15.0:1.",
+      "description": "22 cavity/cavities exceed the 4.0:1 depth/width limit. Worst: 15.0:1.",
       "faceIndices": [
         0,
         1,
@@ -248,14 +248,38 @@
         246,
         257,
         258,
-        259
+        259,
+        931,
+        930,
+        929,
+        928,
+        927,
+        926,
+        925,
+        924,
+        923,
+        922,
+        921,
+        920,
+        919,
+        918,
+        917,
+        916,
+        915,
+        914,
+        913,
+        912,
+        911,
+        910,
+        909,
+        908
       ],
       "metadata": {
         "maxDepthRatio": 15.0
       },
       "severity": "error",
       "threshold": 4.0,
-      "title": "Deep Cavities (21)",
+      "title": "Deep Cavities (22)",
       "value": 15.0
     }
   ],

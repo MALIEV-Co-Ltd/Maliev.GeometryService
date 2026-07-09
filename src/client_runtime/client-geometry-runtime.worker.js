@@ -1,4 +1,4 @@
-const MALIEV_BROWSER_GEOMETRY_RUNTIME_VERSION = "1.2.0";
+const MALIEV_BROWSER_GEOMETRY_RUNTIME_VERSION = "1.3.0";
 const MALIEV_BROWSER_GEOMETRY_ALGORITHM_VERSION = "browser-first-dfm-v1";
 const MALIEV_BROWSER_GEOMETRY_EXECUTION_MODE = "primary_interactive";
 
@@ -979,6 +979,17 @@ function buildIntegrityIssues(metrics) {
       `The model contains ${metrics.bodyCount.toLocaleString()} separate bodies. Each body is manufactured as its own part.`,
       metrics.bodyCount,
       1));
+  }
+  const boundingBox = metrics.boundingBox || { x: 0, y: 0, z: 0 };
+  const maxExtentMm = Math.max(boundingBox.x, boundingBox.y, boundingBox.z);
+  if (maxExtentMm > 0 && maxExtentMm < 1.0) {
+    issues.push(issue(
+      "part_size",
+      "warning",
+      "Sub-millimeter part",
+      `The largest dimension is ${maxExtentMm.toFixed(3)} mm. This usually means the file was exported in the wrong units (meters or inches instead of millimeters) — verify the source units before quoting.`,
+      maxExtentMm,
+      1.0));
   }
   return issues;
 }

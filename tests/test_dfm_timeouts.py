@@ -53,10 +53,17 @@ class TestDFMTimeouts:
         # Simple geometry should complete in < 10 seconds
         timeout_seconds = 10
 
-        with monitor_resources() as monitor:
+        # Time the analysis call itself.  Deriving duration from the resource
+        # monitor's snapshot timestamps measured the INSTRUMENT, not the
+        # analysis: each snapshot enumerates open handles and the whole temp
+        # directory (seconds per snapshot on Windows), which inflated a
+        # ~0.1 s analysis into a spurious >10 s "timeout".
+        with monitor_resources():
+            start = time.time()
             result = compute_dfm_analysis_for_stl(
                 stl_bytes, timeout_seconds=timeout_seconds
             )
+            duration = time.time() - start
 
         # Verify result
         assert result is not None, "DFM analysis returned None"
@@ -64,7 +71,6 @@ class TestDFMTimeouts:
         assert len(result["reports"]) > 0, "No DFM reports generated"
 
         # Verify it completed within timeout
-        duration = monitor.snapshots[-1].timestamp - monitor.snapshots[0].timestamp
         assert (
             duration < timeout_seconds
         ), f"Analysis took {duration}s, exceeds {timeout_seconds}s timeout"

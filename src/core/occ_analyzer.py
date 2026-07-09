@@ -226,8 +226,27 @@ def analyze_step_brep(
                     float(axis_pos.Z()),
                 ]
 
-                # Hole: inward-facing cylinder (concave = reversed normal)
-                feat_type = "hole" if is_reversed else "fillet"
+                # Angular extent of the cylindrical patch: for a cylinder the
+                # U parameter is the angle, so LastU-FirstU is the swept arc.
+                # A full drilled hole / free-standing pin sweeps ~2π; an edge
+                # fillet sweeps a fraction of it.
+                try:
+                    angular_span_rad = abs(
+                        float(adaptor.LastUParameter())
+                        - float(adaptor.FirstUParameter())
+                    )
+                except Exception:
+                    angular_span_rad = 0.0
+
+                # Hole: inward-facing cylinder (concave = reversed normal).
+                # Convex full cylinders are protruding bosses/pins — calling
+                # them "fillet" hid every pin from downstream DFM checks.
+                if is_reversed:
+                    feat_type = "hole"
+                elif angular_span_rad >= 5.0:
+                    feat_type = "boss"
+                else:
+                    feat_type = "fillet"
 
                 # True axial depth: traverse the face's bounding circular edges,
                 # project their centres onto the cylinder axis, and take the
@@ -275,6 +294,7 @@ def analyze_step_brep(
                     "axis": ax,
                     "axis_origin": axis_origin,
                     "concave": is_reversed,
+                    "angular_span_rad": angular_span_rad,
                 }
                 if depth_mm is not None:
                     params["depth_mm"] = float(depth_mm)

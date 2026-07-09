@@ -2749,6 +2749,139 @@ def _quick_quality_check(
         }
 
 
+def _occ_holes_and_pins(
+    occ_features: list[Any],
+    occ_face_tag_to_tri: dict[int, list[int]] | None,
+) -> tuple[list[Any] | None, list[Any] | None]:
+    """Derive analytic hole and pin lists from OCC B-Rep cylinder features.
+
+    STEP/IGES inputs carry exact cylinder geometry, which beats any mesh
+    reconstruction.  A through-hole is often split into several coaxial
+    partial faces, so coaxial same-radius patches are merged and their
+    angular spans summed; only near-full cylinders count (a partial concave
+    patch is an internal fillet, not a hole).
+
+    Returns (holes, pins) as (HoleFeature list, CylindricalFeature list), or
+    (None, None) when no OCC features are available (mesh-only input) so the
+    caller falls back to mesh detection.
+    """
+    from src.core.dfm_models import HoleFeature
+    from src.core.mesh_analyzers import (
+        FULL_CYLINDER_COVERAGE_RAD,
+        CylindricalFeature,
+    )
+
+    if not occ_features:
+        return None, None
+
+    holes_raw: list[dict[str, Any]] = []
+    boss_raw: list[dict[str, Any]] = []
+    for feat in occ_features:
+        feat_type = getattr(feat, "feature_type", "")
+        params = getattr(feat, "parameters", None) or {}
+        if "radius_mm" not in params or "axis" not in params:
+            continue
+        span = float(params.get("angular_span_rad") or 0.0)
+        if span <= 0.0:
+            # Legacy features without span: holes were always full cylinders
+            # under the old classification; convex patches stay conservative.
+            span = 2.0 * math.pi if feat_type == "hole" else math.pi / 2.0
+        record = {
+            "d": 2.0 * float(params["radius_mm"]),
+            "axis": [float(a) for a in params["axis"]],
+            "origin": [
+                float(a)
+                for a in (
+                    params.get("axis_origin") or getattr(feat, "centroid", [0, 0, 0])
+                )
+            ],
+            "depth": float(params.get("depth_mm") or 0.0),
+            "span": span,
+            "tris": (
+                list(occ_face_tag_to_tri.get(getattr(feat, "face_tag", -1), []))
+                if occ_face_tag_to_tri
+                else []
+            ),
+            "centroid": [float(c) for c in getattr(feat, "centroid", [0.0, 0.0, 0.0])],
+        }
+        if feat_type == "hole":
+            holes_raw.append(record)
+        elif feat_type in ("boss", "fillet") and not params.get("concave", False):
+            boss_raw.append(record)
+
+    def merge_coaxial(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        groups: list[dict[str, Any]] = []
+        for rec in records:
+            axis = np.asarray(rec["axis"], dtype=float)
+            norm = float(np.linalg.norm(axis))
+            if norm < 1e-9:
+                continue
+            axis = axis / norm
+            if axis[int(np.argmax(np.abs(axis)))] < 0:
+                axis = -axis  # canonical sign
+            origin = np.asarray(rec["origin"], dtype=float)
+            placed = False
+            for grp in groups:
+                if abs(float(np.dot(axis, grp["axis"]))) < 0.999:
+                    continue
+                if abs(rec["d"] - grp["d"]) > max(0.02, 0.01 * grp["d"]):
+                    continue
+                offset = origin - grp["origin"]
+                radial = offset - float(np.dot(offset, grp["axis"])) * grp["axis"]
+                if float(np.linalg.norm(radial)) > max(0.05, 0.02 * grp["d"]):
+                    continue
+                grp["span"] += rec["span"]
+                grp["depth"] = max(grp["depth"], rec["depth"])
+                grp["tris"].extend(rec["tris"])
+                placed = True
+                break
+            if not placed:
+                groups.append(
+                    {
+                        "axis": axis,
+                        "origin": origin,
+                        "d": rec["d"],
+                        "span": rec["span"],
+                        "depth": rec["depth"],
+                        "tris": list(rec["tris"]),
+                        "centroid": rec["centroid"],
+                    }
+                )
+        return groups
+
+    holes: list[Any] = []
+    for grp in merge_coaxial(holes_raw):
+        if grp["span"] < FULL_CYLINDER_COVERAGE_RAD:
+            continue  # partial concave cylinder = internal fillet, not a hole
+        holes.append(
+            HoleFeature(
+                center=[float(c) for c in grp["centroid"]],
+                axis=[float(a) for a in grp["axis"]],
+                diameter_mm=float(grp["d"]),
+                depth_mm=float(grp["depth"]),
+                face_indices=[int(t) for t in grp["tris"][:400]],
+            )
+        )
+
+    pins: list[Any] = []
+    for grp in merge_coaxial(boss_raw):
+        if grp["span"] < FULL_CYLINDER_COVERAGE_RAD:
+            continue
+        pins.append(
+            CylindricalFeature(
+                center=[float(c) for c in grp["centroid"]],
+                axis=[float(a) for a in grp["axis"]],
+                diameter_mm=float(grp["d"]),
+                depth_mm=float(grp["depth"]),
+                coverage_rad=float(grp["span"]),
+                concave=False,
+                face_indices=[int(t) for t in grp["tris"][:400]],
+            )
+        )
+
+    return holes, pins
+
+
 def _analyze_single_process(
     stl_bytes: bytes,
     process_code: str,
@@ -2803,7 +2936,6 @@ def _analyze_single_process(
             detect_connecting_clearance,  # noqa: F401
             detect_embossed_engraved,  # noqa: F401
             detect_escape_hole_risk,  # noqa: F401
-            detect_holes_mesh,
             detect_hollow_regions,
             detect_small_features,  # noqa: F401
             detect_small_features_occ,  # noqa: F401
@@ -2894,35 +3026,74 @@ def _analyze_single_process(
 
         # ── Pre-compute shared data (if not provided) ────────────────────────
         # T1d: mesh_precompute_cache avoids re-running detect_hollow_regions and
-        # detect_holes_mesh for each FDM/SLA/CNC click on the same body.
+        # detect_cylindrical_features for each FDM/SLA/CNC click on the same body.
+        from src.core.dfm_models import HoleFeature
+        from src.core.mesh_analyzers import (
+            FULL_CYLINDER_COVERAGE_RAD as _FULL_CYL,
+        )
+        from src.core.mesh_analyzers import (
+            detect_cylindrical_features as _detect_cyls,
+        )
+
+        all_cylinders: list[Any] = []
         if shared_precomputed:
             hollow_centroids = shared_precomputed.get("hollow_centroids", [])
             all_holes = shared_precomputed.get("all_holes", [])
+            all_cylinders = shared_precomputed.get("all_cylinders", [])
         else:
             _mkey = _mesh_cache_key(stl_bytes)
             _mcached = _mesh_precompute_cache.get(_mkey)
             if (
                 _mcached is not None
                 and _time.time() - _mcached["cached_at"] < _OCC_CACHE_TTL
+                and _mcached.get("all_cylinders") is not None
             ):
                 hollow_centroids = _mcached["hollow_centroids"]
                 all_holes = _mcached["all_holes"]
+                all_cylinders = _mcached["all_cylinders"]
                 logger.debug("Mesh precompute cache HIT key=%s", _mkey)
             else:
                 hollow_centroids, _ = detect_hollow_regions(mesh)
                 # T2e: compute at 0.1 mm (smallest threshold) so this list
                 # covers both the 1.0 mm hole filter AND thin-pin detection.
-                all_holes = detect_holes_mesh(mesh, min_diameter_mm=0.1)
+                all_cylinders = _detect_cyls(mesh, min_diameter_mm=0.1)
+                all_holes = [
+                    HoleFeature(
+                        center=c.center,
+                        axis=c.axis,
+                        diameter_mm=c.diameter_mm,
+                        depth_mm=c.depth_mm,
+                        face_indices=c.face_indices,
+                    )
+                    for c in all_cylinders
+                    if c.concave and c.coverage_rad >= _FULL_CYL
+                ]
                 if len(_mesh_precompute_cache) >= _MESH_PRECOMPUTE_CACHE_MAX:
                     del _mesh_precompute_cache[next(iter(_mesh_precompute_cache))]
                 _mesh_precompute_cache[_mkey] = {
                     "hollow_centroids": hollow_centroids,
                     "all_holes": all_holes,
+                    "all_cylinders": all_cylinders,
                     "cached_at": _time.time(),
                 }
                 logger.debug(
                     "Mesh precompute cache MISS — computed+cached key=%s", _mkey
                 )
+
+        # Analytic OCC cylinders (STEP/IGES) beat mesh reconstruction: exact
+        # diameters, axes, and depths straight from the B-Rep.
+        occ_holes, occ_pins = _occ_holes_and_pins(occ_features, occ_face_tag_to_tri)
+        if occ_holes is not None:
+            all_holes = occ_holes
+        pin_candidates: list[Any] = (
+            occ_pins
+            if occ_pins is not None
+            else [
+                c
+                for c in all_cylinders
+                if not c.concave and c.coverage_rad >= _FULL_CYL
+            ]
+        )
 
         issues: list[dict[str, Any]] = []
         cnc_turning_summary: dict[str, Any] | None = None
@@ -2939,6 +3110,7 @@ def _analyze_single_process(
                     occ_face_tag_to_tri,
                     all_holes,
                     support_mm3,
+                    pin_candidates=pin_candidates,
                 )
             )
 
@@ -3120,6 +3292,7 @@ def _analyze_printing_process(
     all_holes: list[Any],
     support_mm3: float,  # noqa: ARG001
     bodies: list[Any] | None = None,
+    pin_candidates: list[Any] | None = None,
 ) -> list[dict[str, Any]]:
     """Analyze mesh for a specific 3D printing process.
 
@@ -3132,6 +3305,8 @@ def _analyze_printing_process(
         all_holes: Pre-computed hole detections at 0.1 mm threshold.
         support_mm3: Pre-computed support volume estimate
         bodies: Optional pre-split body list to avoid repeated mesh.split() calls.
+        pin_candidates: Pre-computed convex full-cylinder features (pins/bosses)
+                        from OCC B-Rep or mesh cylinder detection.
 
     Returns:
         List of DFM issue dicts
@@ -3410,12 +3585,25 @@ def _analyze_printing_process(
     if small_issue is not None:
         issues.append(small_issue)
 
-    # Thin pins / columns — pass all_holes so detect_thin_pins skips its own
-    # detect_holes_mesh call (T2e: holes already computed at 0.1 mm threshold).
+    # Thin pins / columns — convex full cylinders below the process minimum.
+    # Candidates come from OCC B-Rep bosses (STEP/IGES) or mesh cylinder
+    # detection; detect_thin_pins is the fallback when neither was provided.
     try:
-        pin_count, pin_centroids, pin_face_idx = detect_thin_pins(
-            mesh, rules.pin_diameter_mm, precomputed_holes=all_holes
-        )
+        if pin_candidates is not None:
+            pins = [
+                c
+                for c in pin_candidates
+                if c.diameter_mm < rules.pin_diameter_mm
+                # A stub shorter than its diameter is a bump, not a fragile pin.
+                and c.depth_mm >= 0.6 * c.diameter_mm
+            ]
+            pin_count = len(pins)
+            pin_centroids = [p.center for p in pins]
+            pin_face_idx = [f for p in pins for f in p.face_indices]
+        else:
+            pin_count, pin_centroids, pin_face_idx = detect_thin_pins(
+                mesh, rules.pin_diameter_mm
+            )
     except Exception as _e:
         logger.warning("Thin pin detection failed: %s", _e)
         pin_count, pin_centroids, pin_face_idx = 0, [], []
@@ -3563,10 +3751,19 @@ def _analyze_cnc_milling(
             }
         )
 
-    # Deep cavities
+    # Deep cavities — prismatic pockets from mesh cavity detection PLUS deep
+    # narrow drilled holes: a Ø1 mm hole 20 mm deep is a 20:1 cavity for the
+    # endmill/drill exactly like a milled slot would be.
     cavities = detect_cavities(mesh)
     dc_count, dc_centroids, dc_face_idx = detect_deep_narrow_cavities(cavities)
-    if dc_count > 0:
+    hole_cavities: list[tuple[Any, float]] = []
+    for h in all_holes or []:
+        if h.diameter_mm > 0 and h.depth_mm > 0:
+            ratio = h.depth_mm / h.diameter_mm
+            if ratio > MILLING_RULES.cavity_depth_ratio:
+                hole_cavities.append((h, ratio))
+    combined_count = dc_count + len(hole_cavities)
+    if combined_count > 0:
         max_dr = max(
             (
                 c.depth_ratio
@@ -3575,13 +3772,18 @@ def _analyze_cnc_milling(
             ),
             default=float(MILLING_RULES.cavity_depth_ratio),
         )
+        if hole_cavities:
+            max_dr = max(max_dr, max(ratio for _, ratio in hole_cavities))
+            for h, _ in hole_cavities:
+                dc_face_idx = list(dc_face_idx) + list(h.face_indices)
+            dc_centroids = list(dc_centroids) + [h.center for h, _ in hole_cavities]
         issues.append(
             {
                 "category": "cavity_depth",
                 "severity": "error" if max_dr > 8.0 else "warning",
-                "title": f"Deep Cavities ({dc_count})",
+                "title": f"Deep Cavities ({combined_count})",
                 "description": (
-                    f"{dc_count} cavity/cavities exceed the {MILLING_RULES.cavity_depth_ratio}:1"  # noqa: E501
+                    f"{combined_count} cavity/cavities exceed the {MILLING_RULES.cavity_depth_ratio}:1"  # noqa: E501
                     f" depth/width limit. Worst: {max_dr:.1f}:1."
                 ),
                 "value": float(max_dr),
