@@ -7,7 +7,35 @@ on:
       - staging
       - main
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
+  real-browser-worker-smoke:
+    name: Real browser worker smoke
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          persist-credentials: false
+
+      - name: Run real Chrome Web Worker smoke
+        env:
+          MALIEV_BROWSER_PATH: /usr/bin/google-chrome
+        run: |
+          set -euo pipefail
+          test -x "${MALIEV_BROWSER_PATH}"
+          "${MALIEV_BROWSER_PATH}" --version
+          node --version
+          node --test tests/client-runtime-browser-smoke.test.mjs
+
   prep:
     runs-on: ubuntu-latest
     outputs:

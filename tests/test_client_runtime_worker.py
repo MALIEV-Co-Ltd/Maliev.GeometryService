@@ -906,7 +906,8 @@ def test_client_runtime_worker_welds_vertices_and_counts_bodies() -> None:
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="Node.js is required")
-def test_client_runtime_worker_keeps_touching_source_bodies_topologically_separate() -> None:
+def test_client_runtime_worker_keeps_touching_source_bodies_topologically_separate(
+) -> None:
     """Separate CAD/viewer bodies may touch or share coincident faces. The
     worker must not weld across source mesh-buffer boundaries; otherwise a valid
     multi-body CAD file is collapsed into one non-manifold topology graph."""

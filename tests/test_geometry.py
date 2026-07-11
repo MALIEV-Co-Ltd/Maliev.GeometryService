@@ -729,7 +729,7 @@ class TestNearClippingPlaneFix:
     """Tests that the near clipping plane is set correctly to prevent early clipping."""
 
     def test_camera_near_plane_value(self):
-        """Verify CAMERA_NEAR is set to a fixed world-unit value (three.js migration)."""
+        """Verify CAMERA_NEAR uses fixed world units after the three.js migration."""
         viewer_path = (
             Path(__file__).parent.parent.parent
             / "Maliev.Intranet"

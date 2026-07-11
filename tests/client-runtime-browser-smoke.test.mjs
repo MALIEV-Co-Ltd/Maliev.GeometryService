@@ -60,17 +60,28 @@ async function removeDirectory(path) {
   }
 }
 
-async function waitForDevToolsPort(userDataDir) {
+async function waitForDevToolsPort(
+  userDataDir,
+  {
+    timeoutMs = 30_000,
+    fileExists = existsSync,
+    readFile = readFileSync,
+    now = Date.now,
+    wait = delay,
+  } = {},
+) {
   const activePortPath = resolve(userDataDir, 'DevToolsActivePort');
-  const deadline = Date.now() + 10_000;
-  while (Date.now() < deadline) {
-    if (existsSync(activePortPath)) {
-      const [port] = readFileSync(activePortPath, 'utf8').trim().split(/\r?\n/);
+  const deadline = now() + timeoutMs;
+  while (now() < deadline) {
+    if (fileExists(activePortPath)) {
+      const [port] = readFile(activePortPath, 'utf8').trim().split(/\r?\n/);
       return Number(port);
     }
-    await delay(50);
+    await wait(Math.min(50, deadline - now()));
   }
-  throw new Error('Timed out waiting for browser DevTools port.');
+  throw new Error(
+    `Timed out waiting for browser DevTools port after ${timeoutMs}ms.`,
+  );
 }
 
 async function waitForPageWebSocket(port, pageUrl) {
@@ -227,42 +238,439 @@ async function evaluateWhenPageIsStable(cdp) {
   const params = {
     awaitPromise: true,
     returnByValue: true,
-    expression: `new Promise(resolve => {
+    expression: `new Promise((resolve, reject) => {
       const started = Date.now();
       const tick = () => {
-        const status = document.documentElement.dataset.status;
-        if (status) {
-          resolve({
-            status,
-            text: document.getElementById('result')?.textContent || ''
-          });
-          return;
+        try {
+          if (Date.now() - started >= 8000) {
+            resolve({
+              status: 'timeout',
+              text: document.getElementById('result')?.textContent || ''
+            });
+            return;
+          }
+          const root = document.documentElement;
+          if (!root) {
+            setTimeout(tick, 50);
+            return;
+          }
+          const status = root.dataset.status;
+          if (status) {
+            resolve({
+              status,
+              text: document.getElementById('result')?.textContent || ''
+            });
+            return;
+          }
+          setTimeout(tick, 50);
+        } catch (error) {
+          reject(error);
         }
-        if (Date.now() - started > 8000) {
-          resolve({
-            status: 'timeout',
-            text: document.getElementById('result')?.textContent || ''
-          });
-          return;
-        }
-        setTimeout(tick, 50);
       };
       tick();
     })`,
   };
 
+  let lastFailure;
+
   for (let attempt = 0; attempt < 10; attempt += 1) {
+    let evaluation;
     try {
-      return await cdp.send('Runtime.evaluate', params);
+      evaluation = await cdp.send('Runtime.evaluate', params);
     } catch (error) {
       if (!String(error.message).includes('Execution context was destroyed')) {
         throw error;
       }
+      lastFailure = { kind: 'context_destroyed', error };
       await delay(100);
+      continue;
     }
+
+    const exceptionDescription = evaluation?.result?.description;
+    if (evaluation?.exceptionDetails || evaluation?.result?.subtype === 'error') {
+      throw new Error(
+        `Runtime.evaluate JavaScript exception: ${exceptionDescription ?? 'unknown'}; ` +
+          `response=${JSON.stringify(evaluation)}`,
+      );
+    }
+
+    const value = evaluation?.result?.value;
+    if (
+      value !== null &&
+      typeof value === 'object' &&
+      typeof value.status === 'string' &&
+      typeof value.text === 'string'
+    ) {
+      return evaluation;
+    }
+
+    lastFailure = { kind: 'incomplete_result', evaluation };
+    await delay(100);
   }
-  throw new Error('Browser page execution context did not stabilize.');
+
+  if (lastFailure?.kind === 'context_destroyed') {
+    const errorDetails =
+      lastFailure.error instanceof Error
+        ? (lastFailure.error.stack ??
+          `${lastFailure.error.name}: ${lastFailure.error.message}`)
+        : String(lastFailure.error);
+    throw new Error(
+      'Browser page execution context did not stabilize; last CDP protocol error: ' +
+        errorDetails,
+      { cause: lastFailure.error },
+    );
+  }
+
+  const serializedEvaluation = JSON.stringify(lastFailure?.evaluation);
+  throw new Error(
+    'Browser page execution context did not return a complete CDP result: ' +
+      (serializedEvaluation ?? '<missing Runtime.evaluate response>'),
+  );
 }
+
+function scriptedCdp(steps) {
+  let calls = 0;
+  return {
+    cdp: {
+      async send() {
+        const step = steps[Math.min(calls, steps.length - 1)];
+        calls += 1;
+        if (step instanceof Error) throw step;
+        return step;
+      },
+    },
+    calls: () => calls,
+  };
+}
+
+function passingEvaluation() {
+  return {
+    result: {
+      type: 'object',
+      value: {
+        status: 'pass',
+        text: '{"ok":true}',
+      },
+    },
+  };
+}
+
+async function capturePageEvaluationExpression() {
+  let expression;
+  const cdp = {
+    async send(method, params) {
+      assert.equal(method, 'Runtime.evaluate');
+      expression = params.expression;
+      return passingEvaluation();
+    },
+  };
+
+  await evaluateWhenPageIsStable(cdp);
+  assert.equal(typeof expression, 'string');
+  return expression;
+}
+
+test('DevTools port wait allows startup beyond ten seconds within its default bound', async () => {
+  let elapsedMs = 0;
+
+  const port = await waitForDevToolsPort('unused', {
+    fileExists: () => elapsedMs >= 10_050,
+    readFile: () => '9222\n/devtools/browser/test',
+    now: () => elapsedMs,
+    wait: async milliseconds => {
+      elapsedMs += milliseconds;
+    },
+  });
+
+  assert.equal(port, 9222);
+  assert.equal(elapsedMs, 10_050);
+  assert(elapsedMs < 30_000);
+});
+
+test('DevTools port wait remains bounded when the browser never starts', async () => {
+  let elapsedMs = 0;
+
+  await assert.rejects(
+    waitForDevToolsPort('unused', {
+      fileExists: () => false,
+      readFile: () => '',
+      now: () => elapsedMs,
+      wait: async milliseconds => {
+        elapsedMs += milliseconds;
+      },
+    }),
+    /Timed out waiting for browser DevTools port/,
+  );
+
+  assert.equal(elapsedMs, 30_000);
+});
+
+test('CDP evaluation waits for the document root before reading page status', async () => {
+  let documentRootReads = 0;
+  const document = {
+    get documentElement() {
+      documentRootReads += 1;
+      return documentRootReads === 1 ? null : { dataset: { status: 'pass' } };
+    },
+    getElementById() {
+      return { textContent: '{"ok":true}' };
+    },
+  };
+  const cdp = {
+    async send(method, params) {
+      assert.equal(method, 'Runtime.evaluate');
+      const execute = Function(
+        'document',
+        'setTimeout',
+        `return ${params.expression};`,
+      );
+      const value = await execute(document, callback => callback());
+      return { result: { type: 'object', value } };
+    },
+  };
+
+  const evaluation = await evaluateWhenPageIsStable(cdp);
+
+  assert.equal(evaluation.result.value.status, 'pass');
+  assert.equal(documentRootReads, 2);
+});
+
+test('page polling reaches its deadline while the document root remains absent', async () => {
+  const expression = await capturePageEvaluationExpression();
+  let elapsedMs = 0;
+  let documentRootReads = 0;
+  let scheduledTicks = 0;
+  const document = {
+    get documentElement() {
+      documentRootReads += 1;
+      return null;
+    },
+    getElementById() {
+      return { textContent: 'pending' };
+    },
+  };
+  const execute = Function(
+    'document',
+    'Date',
+    'setTimeout',
+    `return ${expression};`,
+  );
+
+  const value = await execute(
+    document,
+    { now: () => elapsedMs },
+    callback => {
+      scheduledTicks += 1;
+      if (scheduledTicks > 1) {
+        throw new Error('page polling continued after its eight-second deadline');
+      }
+      elapsedMs = 8_000;
+      callback();
+    },
+  );
+
+  assert.deepEqual(value, { status: 'timeout', text: 'pending' });
+  assert.equal(documentRootReads, 1);
+  assert.equal(scheduledTicks, 1);
+});
+
+test('page polling rejects an exception raised after an initially absent root', async () => {
+  const expression = await capturePageEvaluationExpression();
+  let documentRootReads = 0;
+  let scheduledTick;
+  const document = {
+    get documentElement() {
+      documentRootReads += 1;
+      if (documentRootReads === 1) return null;
+      throw new Error('post-null DOM failure');
+    },
+  };
+  const execute = Function(
+    'document',
+    'Date',
+    'setTimeout',
+    `return ${expression};`,
+  );
+  const evaluation = execute(
+    document,
+    { now: () => 0 },
+    callback => {
+      scheduledTick = callback;
+    },
+  );
+  const rejection = assert.rejects(evaluation, /post-null DOM failure/);
+
+  assert.equal(documentRootReads, 1);
+  assert.equal(typeof scheduledTick, 'function');
+  assert.doesNotThrow(() => scheduledTick());
+  await rejection;
+  assert.equal(documentRootReads, 2);
+});
+
+test('CDP evaluation retries a destroyed execution context and then succeeds', async () => {
+  const { cdp, calls } = scriptedCdp([
+    new Error('Execution context was destroyed during navigation'),
+    passingEvaluation(),
+  ]);
+
+  const evaluation = await evaluateWhenPageIsStable(cdp);
+
+  assert.equal(evaluation.result.value.status, 'pass');
+  assert.equal(calls(), 2);
+});
+
+test('CDP evaluation surfaces a non-context protocol error without retrying', async () => {
+  const protocolError = new Error('CDP socket closed with code 1006');
+  const { cdp, calls } = scriptedCdp([protocolError, passingEvaluation()]);
+
+  await assert.rejects(evaluateWhenPageIsStable(cdp), error => error === protocolError);
+  assert.equal(calls(), 1);
+});
+
+test('CDP evaluation retains the latest context error when retries are exhausted', async () => {
+  const errors = Array.from(
+    { length: 10 },
+    (_, index) =>
+      new Error(`Execution context was destroyed at transport attempt ${index + 1}`),
+  );
+  const { cdp, calls } = scriptedCdp(errors);
+
+  await assert.rejects(evaluateWhenPageIsStable(cdp), error => {
+    assert.match(error.message, /transport attempt 10/);
+    assert.doesNotMatch(error.message, /undefined/);
+    assert.equal(error.cause, errors[9]);
+    return true;
+  });
+  assert.equal(calls(), 10);
+});
+
+test('CDP evaluation replaces a stale incomplete result with the latest context error', async () => {
+  const incomplete = {
+    diagnostic: 'stale-incomplete-envelope',
+    result: {
+      type: 'object',
+      value: {},
+    },
+  };
+  const contextErrors = Array.from(
+    { length: 9 },
+    (_, index) =>
+      new Error(`Execution context was destroyed at later attempt ${index + 2}`),
+  );
+  const { cdp, calls } = scriptedCdp([incomplete, ...contextErrors]);
+
+  await assert.rejects(evaluateWhenPageIsStable(cdp), error => {
+    assert.match(error.message, /later attempt 10/);
+    assert.doesNotMatch(error.message, /stale-incomplete-envelope/);
+    assert.equal(error.cause, contextErrors[8]);
+    return true;
+  });
+  assert.equal(calls(), 10);
+});
+
+test('CDP evaluation retains the complete final incomplete envelope on exhaustion', async () => {
+  const incompleteResults = Array.from({ length: 10 }, (_, index) => ({
+    transportAttempt: index + 1,
+    diagnostic: {
+      kind: 'incomplete_result',
+      details: [`envelope-${index + 1}`],
+    },
+    result: {
+      type: 'object',
+      value: {},
+    },
+  }));
+  const { cdp, calls } = scriptedCdp(incompleteResults);
+
+  await assert.rejects(evaluateWhenPageIsStable(cdp), error => {
+    assert.match(error.message, /"transportAttempt":10/);
+    assert.match(error.message, /"details":\["envelope-10"\]/);
+    assert.doesNotMatch(error.message, /"transportAttempt":9/);
+    return true;
+  });
+  assert.equal(calls(), 10);
+});
+
+test('CDP evaluation retries a missing serialized transport result', async () => {
+  let calls = 0;
+  const cdp = {
+    async send() {
+      calls += 1;
+      if (calls === 1) {
+        return {
+          result: {
+            type: 'object',
+            value: {},
+          },
+        };
+      }
+      return {
+        result: {
+          type: 'object',
+          value: {
+            status: 'pass',
+            text: '{"ok":true}',
+          },
+        },
+      };
+    },
+  };
+
+  const evaluation = await evaluateWhenPageIsStable(cdp);
+
+  assert.equal(evaluation.result.value.status, 'pass');
+  assert.equal(calls, 2);
+});
+
+test('CDP evaluation surfaces JavaScript exception details without retrying', async () => {
+  let calls = 0;
+  const cdp = {
+    async send() {
+      calls += 1;
+      return {
+        result: {
+          type: 'object',
+          subtype: 'error',
+          description:
+            'Error: Execution context was destroyed by the evaluated page script',
+        },
+        exceptionDetails: {
+          text: 'Uncaught',
+          exceptionId: 1,
+        },
+      };
+    },
+  };
+
+  await assert.rejects(
+    evaluateWhenPageIsStable(cdp),
+    /Execution context was destroyed by the evaluated page script.*exceptionDetails/,
+  );
+  assert.equal(calls, 1);
+});
+
+test('CDP evaluation returns a semantic DFM failure without retrying', async () => {
+  let calls = 0;
+  const cdp = {
+    async send() {
+      calls += 1;
+      return {
+        result: {
+          type: 'object',
+          value: {
+            status: 'fail',
+            text: '{"ok":false,"error":"worker assertion failed"}',
+          },
+        },
+      };
+    },
+  };
+
+  const evaluation = await evaluateWhenPageIsStable(cdp);
+
+  assert.equal(evaluation.result.value.status, 'fail');
+  assert.equal(calls, 1);
+});
 
 test('browser runtime executes in a real Web Worker and returns local-primary DFM', async t => {
   const browserPath = findBrowser();
