@@ -251,7 +251,7 @@ async function evaluateWhenPageIsStable(cdp) {
     })`,
   };
 
-  let lastInvalidResult;
+  let lastFailure;
 
   for (let attempt = 0; attempt < 10; attempt += 1) {
     let evaluation;
@@ -261,6 +261,7 @@ async function evaluateWhenPageIsStable(cdp) {
       if (!String(error.message).includes('Execution context was destroyed')) {
         throw error;
       }
+      lastFailure = { kind: 'context_destroyed', error };
       await delay(100);
       continue;
     }
@@ -283,14 +284,140 @@ async function evaluateWhenPageIsStable(cdp) {
       return evaluation;
     }
 
-    lastInvalidResult = evaluation;
+    lastFailure = { kind: 'incomplete_result', evaluation };
     await delay(100);
   }
+
+  if (lastFailure?.kind === 'context_destroyed') {
+    const errorDetails =
+      lastFailure.error instanceof Error
+        ? (lastFailure.error.stack ??
+          `${lastFailure.error.name}: ${lastFailure.error.message}`)
+        : String(lastFailure.error);
+    throw new Error(
+      'Browser page execution context did not stabilize; last CDP protocol error: ' +
+        errorDetails,
+      { cause: lastFailure.error },
+    );
+  }
+
+  const serializedEvaluation = JSON.stringify(lastFailure?.evaluation);
   throw new Error(
     'Browser page execution context did not return a complete CDP result: ' +
-      JSON.stringify(lastInvalidResult),
+      (serializedEvaluation ?? '<missing Runtime.evaluate response>'),
   );
 }
+
+function scriptedCdp(steps) {
+  let calls = 0;
+  return {
+    cdp: {
+      async send() {
+        const step = steps[Math.min(calls, steps.length - 1)];
+        calls += 1;
+        if (step instanceof Error) throw step;
+        return step;
+      },
+    },
+    calls: () => calls,
+  };
+}
+
+function passingEvaluation() {
+  return {
+    result: {
+      type: 'object',
+      value: {
+        status: 'pass',
+        text: '{"ok":true}',
+      },
+    },
+  };
+}
+
+test('CDP evaluation retries a destroyed execution context and then succeeds', async () => {
+  const { cdp, calls } = scriptedCdp([
+    new Error('Execution context was destroyed during navigation'),
+    passingEvaluation(),
+  ]);
+
+  const evaluation = await evaluateWhenPageIsStable(cdp);
+
+  assert.equal(evaluation.result.value.status, 'pass');
+  assert.equal(calls(), 2);
+});
+
+test('CDP evaluation surfaces a non-context protocol error without retrying', async () => {
+  const protocolError = new Error('CDP socket closed with code 1006');
+  const { cdp, calls } = scriptedCdp([protocolError, passingEvaluation()]);
+
+  await assert.rejects(evaluateWhenPageIsStable(cdp), error => error === protocolError);
+  assert.equal(calls(), 1);
+});
+
+test('CDP evaluation retains the latest context error when retries are exhausted', async () => {
+  const errors = Array.from(
+    { length: 10 },
+    (_, index) =>
+      new Error(`Execution context was destroyed at transport attempt ${index + 1}`),
+  );
+  const { cdp, calls } = scriptedCdp(errors);
+
+  await assert.rejects(evaluateWhenPageIsStable(cdp), error => {
+    assert.match(error.message, /transport attempt 10/);
+    assert.doesNotMatch(error.message, /undefined/);
+    assert.equal(error.cause, errors[9]);
+    return true;
+  });
+  assert.equal(calls(), 10);
+});
+
+test('CDP evaluation replaces a stale incomplete result with the latest context error', async () => {
+  const incomplete = {
+    diagnostic: 'stale-incomplete-envelope',
+    result: {
+      type: 'object',
+      value: {},
+    },
+  };
+  const contextErrors = Array.from(
+    { length: 9 },
+    (_, index) =>
+      new Error(`Execution context was destroyed at later attempt ${index + 2}`),
+  );
+  const { cdp, calls } = scriptedCdp([incomplete, ...contextErrors]);
+
+  await assert.rejects(evaluateWhenPageIsStable(cdp), error => {
+    assert.match(error.message, /later attempt 10/);
+    assert.doesNotMatch(error.message, /stale-incomplete-envelope/);
+    assert.equal(error.cause, contextErrors[8]);
+    return true;
+  });
+  assert.equal(calls(), 10);
+});
+
+test('CDP evaluation retains the complete final incomplete envelope on exhaustion', async () => {
+  const incompleteResults = Array.from({ length: 10 }, (_, index) => ({
+    transportAttempt: index + 1,
+    diagnostic: {
+      kind: 'incomplete_result',
+      details: [`envelope-${index + 1}`],
+    },
+    result: {
+      type: 'object',
+      value: {},
+    },
+  }));
+  const { cdp, calls } = scriptedCdp(incompleteResults);
+
+  await assert.rejects(evaluateWhenPageIsStable(cdp), error => {
+    assert.match(error.message, /"transportAttempt":10/);
+    assert.match(error.message, /"details":\["envelope-10"\]/);
+    assert.doesNotMatch(error.message, /"transportAttempt":9/);
+    return true;
+  });
+  assert.equal(calls(), 10);
+});
 
 test('CDP evaluation retries a missing serialized transport result', async () => {
   let calls = 0;
