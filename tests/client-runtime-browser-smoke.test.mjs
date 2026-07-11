@@ -230,7 +230,12 @@ async function evaluateWhenPageIsStable(cdp) {
     expression: `new Promise(resolve => {
       const started = Date.now();
       const tick = () => {
-        const status = document.documentElement.dataset.status;
+        const root = document.documentElement;
+        if (!root) {
+          setTimeout(tick, 50);
+          return;
+        }
+        const status = root.dataset.status;
         if (status) {
           resolve({
             status,
@@ -334,6 +339,36 @@ function passingEvaluation() {
     },
   };
 }
+
+test('CDP evaluation waits for the document root before reading page status', async () => {
+  let documentRootReads = 0;
+  const document = {
+    get documentElement() {
+      documentRootReads += 1;
+      return documentRootReads === 1 ? null : { dataset: { status: 'pass' } };
+    },
+    getElementById() {
+      return { textContent: '{"ok":true}' };
+    },
+  };
+  const cdp = {
+    async send(method, params) {
+      assert.equal(method, 'Runtime.evaluate');
+      const execute = Function(
+        'document',
+        'setTimeout',
+        `return ${params.expression};`,
+      );
+      const value = await execute(document, callback => callback());
+      return { result: { type: 'object', value } };
+    },
+  };
+
+  const evaluation = await evaluateWhenPageIsStable(cdp);
+
+  assert.equal(evaluation.result.value.status, 'pass');
+  assert.equal(documentRootReads, 2);
+});
 
 test('CDP evaluation retries a destroyed execution context and then succeeds', async () => {
   const { cdp, calls } = scriptedCdp([
