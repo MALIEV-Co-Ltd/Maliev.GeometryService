@@ -251,18 +251,127 @@ async function evaluateWhenPageIsStable(cdp) {
     })`,
   };
 
+  let lastInvalidResult;
+
   for (let attempt = 0; attempt < 10; attempt += 1) {
+    let evaluation;
     try {
-      return await cdp.send('Runtime.evaluate', params);
+      evaluation = await cdp.send('Runtime.evaluate', params);
     } catch (error) {
       if (!String(error.message).includes('Execution context was destroyed')) {
         throw error;
       }
       await delay(100);
+      continue;
     }
+
+    const exceptionDescription = evaluation?.result?.description;
+    if (evaluation?.exceptionDetails || evaluation?.result?.subtype === 'error') {
+      throw new Error(
+        `Runtime.evaluate JavaScript exception: ${exceptionDescription ?? 'unknown'}; ` +
+          `response=${JSON.stringify(evaluation)}`,
+      );
+    }
+
+    const value = evaluation?.result?.value;
+    if (
+      value !== null &&
+      typeof value === 'object' &&
+      typeof value.status === 'string' &&
+      typeof value.text === 'string'
+    ) {
+      return evaluation;
+    }
+
+    lastInvalidResult = evaluation;
+    await delay(100);
   }
-  throw new Error('Browser page execution context did not stabilize.');
+  throw new Error(
+    'Browser page execution context did not return a complete CDP result: ' +
+      JSON.stringify(lastInvalidResult),
+  );
 }
+
+test('CDP evaluation retries a missing serialized transport result', async () => {
+  let calls = 0;
+  const cdp = {
+    async send() {
+      calls += 1;
+      if (calls === 1) {
+        return {
+          result: {
+            type: 'object',
+            value: {},
+          },
+        };
+      }
+      return {
+        result: {
+          type: 'object',
+          value: {
+            status: 'pass',
+            text: '{"ok":true}',
+          },
+        },
+      };
+    },
+  };
+
+  const evaluation = await evaluateWhenPageIsStable(cdp);
+
+  assert.equal(evaluation.result.value.status, 'pass');
+  assert.equal(calls, 2);
+});
+
+test('CDP evaluation surfaces JavaScript exception details without retrying', async () => {
+  let calls = 0;
+  const cdp = {
+    async send() {
+      calls += 1;
+      return {
+        result: {
+          type: 'object',
+          subtype: 'error',
+          description:
+            'Error: Execution context was destroyed by the evaluated page script',
+        },
+        exceptionDetails: {
+          text: 'Uncaught',
+          exceptionId: 1,
+        },
+      };
+    },
+  };
+
+  await assert.rejects(
+    evaluateWhenPageIsStable(cdp),
+    /Execution context was destroyed by the evaluated page script.*exceptionDetails/,
+  );
+  assert.equal(calls, 1);
+});
+
+test('CDP evaluation returns a semantic DFM failure without retrying', async () => {
+  let calls = 0;
+  const cdp = {
+    async send() {
+      calls += 1;
+      return {
+        result: {
+          type: 'object',
+          value: {
+            status: 'fail',
+            text: '{"ok":false,"error":"worker assertion failed"}',
+          },
+        },
+      };
+    },
+  };
+
+  const evaluation = await evaluateWhenPageIsStable(cdp);
+
+  assert.equal(evaluation.result.value.status, 'fail');
+  assert.equal(calls, 1);
+});
 
 test('browser runtime executes in a real Web Worker and returns local-primary DFM', async t => {
   const browserPath = findBrowser();
