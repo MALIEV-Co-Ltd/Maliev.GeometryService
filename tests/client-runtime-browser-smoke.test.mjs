@@ -238,30 +238,34 @@ async function evaluateWhenPageIsStable(cdp) {
   const params = {
     awaitPromise: true,
     returnByValue: true,
-    expression: `new Promise(resolve => {
+    expression: `new Promise((resolve, reject) => {
       const started = Date.now();
       const tick = () => {
-        const root = document.documentElement;
-        if (!root) {
+        try {
+          if (Date.now() - started >= 8000) {
+            resolve({
+              status: 'timeout',
+              text: document.getElementById('result')?.textContent || ''
+            });
+            return;
+          }
+          const root = document.documentElement;
+          if (!root) {
+            setTimeout(tick, 50);
+            return;
+          }
+          const status = root.dataset.status;
+          if (status) {
+            resolve({
+              status,
+              text: document.getElementById('result')?.textContent || ''
+            });
+            return;
+          }
           setTimeout(tick, 50);
-          return;
+        } catch (error) {
+          reject(error);
         }
-        const status = root.dataset.status;
-        if (status) {
-          resolve({
-            status,
-            text: document.getElementById('result')?.textContent || ''
-          });
-          return;
-        }
-        if (Date.now() - started > 8000) {
-          resolve({
-            status: 'timeout',
-            text: document.getElementById('result')?.textContent || ''
-          });
-          return;
-        }
-        setTimeout(tick, 50);
       };
       tick();
     })`,
@@ -351,6 +355,21 @@ function passingEvaluation() {
   };
 }
 
+async function capturePageEvaluationExpression() {
+  let expression;
+  const cdp = {
+    async send(method, params) {
+      assert.equal(method, 'Runtime.evaluate');
+      expression = params.expression;
+      return passingEvaluation();
+    },
+  };
+
+  await evaluateWhenPageIsStable(cdp);
+  assert.equal(typeof expression, 'string');
+  return expression;
+}
+
 test('DevTools port wait allows startup beyond ten seconds within its default bound', async () => {
   let elapsedMs = 0;
 
@@ -413,6 +432,78 @@ test('CDP evaluation waits for the document root before reading page status', as
   const evaluation = await evaluateWhenPageIsStable(cdp);
 
   assert.equal(evaluation.result.value.status, 'pass');
+  assert.equal(documentRootReads, 2);
+});
+
+test('page polling reaches its deadline while the document root remains absent', async () => {
+  const expression = await capturePageEvaluationExpression();
+  let elapsedMs = 0;
+  let documentRootReads = 0;
+  let scheduledTicks = 0;
+  const document = {
+    get documentElement() {
+      documentRootReads += 1;
+      return null;
+    },
+    getElementById() {
+      return { textContent: 'pending' };
+    },
+  };
+  const execute = Function(
+    'document',
+    'Date',
+    'setTimeout',
+    `return ${expression};`,
+  );
+
+  const value = await execute(
+    document,
+    { now: () => elapsedMs },
+    callback => {
+      scheduledTicks += 1;
+      if (scheduledTicks > 1) {
+        throw new Error('page polling continued after its eight-second deadline');
+      }
+      elapsedMs = 8_000;
+      callback();
+    },
+  );
+
+  assert.deepEqual(value, { status: 'timeout', text: 'pending' });
+  assert.equal(documentRootReads, 1);
+  assert.equal(scheduledTicks, 1);
+});
+
+test('page polling rejects an exception raised after an initially absent root', async () => {
+  const expression = await capturePageEvaluationExpression();
+  let documentRootReads = 0;
+  let scheduledTick;
+  const document = {
+    get documentElement() {
+      documentRootReads += 1;
+      if (documentRootReads === 1) return null;
+      throw new Error('post-null DOM failure');
+    },
+  };
+  const execute = Function(
+    'document',
+    'Date',
+    'setTimeout',
+    `return ${expression};`,
+  );
+  const evaluation = execute(
+    document,
+    { now: () => 0 },
+    callback => {
+      scheduledTick = callback;
+    },
+  );
+  const rejection = assert.rejects(evaluation, /post-null DOM failure/);
+
+  assert.equal(documentRootReads, 1);
+  assert.equal(typeof scheduledTick, 'function');
+  assert.doesNotThrow(() => scheduledTick());
+  await rejection;
   assert.equal(documentRootReads, 2);
 });
 
