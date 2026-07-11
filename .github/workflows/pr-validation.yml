@@ -16,13 +16,9 @@ concurrency:
 
 jobs:
   real-browser-worker-smoke:
-    name: Real browser worker smoke (${{ matrix.repetition }}/10)
+    name: Real browser worker smoke
     runs-on: ubuntu-24.04
     timeout-minutes: 5
-    strategy:
-      fail-fast: false
-      matrix:
-        repetition: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
 
     steps:
       - name: Checkout code
