@@ -60,17 +60,28 @@ async function removeDirectory(path) {
   }
 }
 
-async function waitForDevToolsPort(userDataDir) {
+async function waitForDevToolsPort(
+  userDataDir,
+  {
+    timeoutMs = 30_000,
+    fileExists = existsSync,
+    readFile = readFileSync,
+    now = Date.now,
+    wait = delay,
+  } = {},
+) {
   const activePortPath = resolve(userDataDir, 'DevToolsActivePort');
-  const deadline = Date.now() + 10_000;
-  while (Date.now() < deadline) {
-    if (existsSync(activePortPath)) {
-      const [port] = readFileSync(activePortPath, 'utf8').trim().split(/\r?\n/);
+  const deadline = now() + timeoutMs;
+  while (now() < deadline) {
+    if (fileExists(activePortPath)) {
+      const [port] = readFile(activePortPath, 'utf8').trim().split(/\r?\n/);
       return Number(port);
     }
-    await delay(50);
+    await wait(Math.min(50, deadline - now()));
   }
-  throw new Error('Timed out waiting for browser DevTools port.');
+  throw new Error(
+    `Timed out waiting for browser DevTools port after ${timeoutMs}ms.`,
+  );
 }
 
 async function waitForPageWebSocket(port, pageUrl) {
@@ -339,6 +350,41 @@ function passingEvaluation() {
     },
   };
 }
+
+test('DevTools port wait allows startup beyond ten seconds within its default bound', async () => {
+  let elapsedMs = 0;
+
+  const port = await waitForDevToolsPort('unused', {
+    fileExists: () => elapsedMs >= 10_050,
+    readFile: () => '9222\n/devtools/browser/test',
+    now: () => elapsedMs,
+    wait: async milliseconds => {
+      elapsedMs += milliseconds;
+    },
+  });
+
+  assert.equal(port, 9222);
+  assert.equal(elapsedMs, 10_050);
+  assert(elapsedMs < 30_000);
+});
+
+test('DevTools port wait remains bounded when the browser never starts', async () => {
+  let elapsedMs = 0;
+
+  await assert.rejects(
+    waitForDevToolsPort('unused', {
+      fileExists: () => false,
+      readFile: () => '',
+      now: () => elapsedMs,
+      wait: async milliseconds => {
+        elapsedMs += milliseconds;
+      },
+    }),
+    /Timed out waiting for browser DevTools port/,
+  );
+
+  assert.equal(elapsedMs, 30_000);
+});
 
 test('CDP evaluation waits for the document root before reading page status', async () => {
   let documentRootReads = 0;
