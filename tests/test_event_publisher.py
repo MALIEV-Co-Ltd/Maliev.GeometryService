@@ -149,6 +149,11 @@ async def test_publish_event_uses_canonical_masstransit_envelope_contract(
     message_type = (
         f"urn:message:Maliev.MessagingContracts.Contracts.Geometry:{event_name}"
     )
+    consumed_by = (
+        ["IntranetBff", "QuoteEngineBff"]
+        if event_name == "FileAnalyzedEvent"
+        else ["IntranetBff"]
+    )
     event = event_type.model_validate(
         {
             "messageId": envelope_id,
@@ -161,7 +166,7 @@ async def test_publish_event_uses_canonical_masstransit_envelope_contract(
                 "messageType": "Event",
                 "messageVersion": "1.0.0",
                 "publishedBy": "GeometryService",
-                "consumedBy": ["IntranetBff"],
+                "consumedBy": consumed_by,
                 "correlationId": correlation_id,
                 "causationId": None,
                 "occurredAtUtc": occurred_at,
@@ -214,8 +219,22 @@ async def test_publish_event_uses_canonical_masstransit_envelope_contract(
     assert inner_message["messageType"] == "Event"
     assert inner_message["messageVersion"] == "1.0.0"
     assert inner_message["publishedBy"] == "GeometryService"
-    assert inner_message["consumedBy"] == ["IntranetBff"]
+    assert inner_message["consumedBy"] == consumed_by
     assert UUID(inner_message["correlationId"]) == correlation_id
     assert inner_message["occurredAtUtc"] == "2026-07-13T10:00:00Z"
     assert inner_message["isPublic"] is False
     assert inner_message["payload"][proof_key] == proof_value
+    if event_name == "FileAnalyzedEvent":
+        assert set(inner_message["payload"]) == {
+            "fileId",
+            "metrics",
+            "processedAt",
+            "glbStoragePath",
+            "viewerStoragePath",
+            "viewerFileExtension",
+            "thumbnailStoragePath",
+            "storagePath",
+            "dfmReport",
+            "bodyCount",
+            "bodies",
+        }
