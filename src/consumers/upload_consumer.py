@@ -1440,7 +1440,7 @@ class UploadConsumer:
                 messageType=MessageTypeEnum.Event,
                 messageVersion="1.0.0",
                 publishedBy="GeometryService",
-                consumedBy=["IntranetBff"],
+                consumedBy=["IntranetBff", "QuoteEngineBff"],
                 correlationId=job.correlation_id,
                 causationId=None,
                 occurredAtUtc=now,

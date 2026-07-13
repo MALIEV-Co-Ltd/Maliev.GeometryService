@@ -981,9 +981,24 @@ async def test_schedule_artifact_job_publishes_browser_viewer_source_directly(
     consumer.publish_event.assert_awaited_once()
     completed_event = consumer.publish_event.await_args.args[0]
     payload = completed_event.message.payload
+    assert completed_event.message.consumed_by == ["IntranetBff", "QuoteEngineBff"]
     assert payload.viewer_storage_path == "projects/test/model.stl"
     assert payload.viewer_file_extension == ".stl"
     assert payload.glb_storage_path is None
+    serialized_payload = payload.model_dump(by_alias=True)
+    assert set(serialized_payload) == {
+        "fileId",
+        "metrics",
+        "processedAt",
+        "glbStoragePath",
+        "viewerStoragePath",
+        "viewerFileExtension",
+        "thumbnailStoragePath",
+        "storagePath",
+        "dfmReport",
+        "bodyCount",
+        "bodies",
+    }
 
 
 @pytest.mark.asyncio
