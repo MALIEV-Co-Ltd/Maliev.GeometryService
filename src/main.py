@@ -24,6 +24,7 @@ from starlette.responses import Response
 
 from src.consumers.upload_consumer import UploadConsumer
 from src.core.config import settings
+from src.core.event_identity import resolve_geometry_correlation_id
 from src.core.geometry import GeometryProcessor
 from src.core.observability import meter, setup_observability
 from src.infrastructure.event_publisher import publish_event
@@ -826,7 +827,7 @@ async def analyze_for_process(
         Process-specific DFM report with issues found for the selected manufacturing method
     """  # noqa: E501
     from datetime import datetime, timezone
-    from uuid import UUID, uuid4
+    from uuid import uuid4
 
     from src.core.geometry import (
         CncDfmReport,
@@ -852,6 +853,7 @@ async def analyze_for_process(
 
     storage_path: str | None = None
     download_url: str | None = None
+    resolved_storage_path = ""
     analysis_timeout_seconds = _resolve_process_dfm_timeout_seconds(timeout)
 
     # Parse request body for cache-miss recovery
@@ -986,14 +988,15 @@ async def analyze_for_process(
         elif process_code in ("CNC", "CNC_MILL", "CNC_TURN"):
             cnc_report = CncDfmReport.model_validate(result)
 
-        try:
-            file_id = UUID(upload_id)
-        except ValueError:
-            file_id = uuid4()
+        event_correlation_id = resolve_geometry_correlation_id(
+            None,
+            upload_id,
+            resolved_storage_path,
+        )
 
         dfm_event = DfmAnalysisReadyEvent(
             messageId=uuid4(),
-            correlationId=file_id,
+            correlationId=event_correlation_id,
             messageType=[
                 "urn:message:Maliev.MessagingContracts.Contracts.Geometry:DfmAnalysisReadyEvent"
             ],
@@ -1003,14 +1006,14 @@ async def analyze_for_process(
                 messageType=MessageTypeEnum.Event,
                 messageVersion="1.0.0",
                 publishedBy="GeometryService",
-                consumedBy=["IntranetBff"],
-                correlationId=file_id,
+                consumedBy=["IntranetBff", "QuoteEngineBff"],
+                correlationId=event_correlation_id,
                 causationId=None,
                 occurredAtUtc=_now,
                 isPublic=False,
                 payload=DfmAnalysisReadyPayload(
-                    fileId=str(file_id),
-                    storagePath=storage_path or file_data.get("storage_path", ""),
+                    fileId=upload_id,
+                    storagePath=resolved_storage_path,
                     fdmReport=fdm_report,
                     slaReport=sla_report,
                     cncReport=cnc_report,
@@ -1035,6 +1038,19 @@ async def analyze_for_process(
                     "message": "Upload not found. Please provide storage_path or download_url in request body.",  # noqa: E501
                 },
                 status_code=404,
+            )
+
+        if not storage_path or not storage_path.strip():
+            return build_dfm_response(
+                {
+                    "upload_id": upload_id,
+                    "status": "invalid_state",
+                    "error_type": "MissingStoragePath",
+                    "message": (
+                        "A canonical storage_path is required before DFM analysis."
+                    ),
+                },
+                status_code=422,
             )
 
         # Re-download from GCS
@@ -1177,6 +1193,22 @@ async def analyze_for_process(
     try:
         # Retrieve stored file data
         file_data = _file_analysis_cache[upload_id]
+        resolved_storage_path = str(
+            storage_path or file_data.get("storage_path") or ""
+        ).strip()
+        if not resolved_storage_path:
+            return build_dfm_response(
+                {
+                    "upload_id": upload_id,
+                    "status": "invalid_state",
+                    "error_type": "MissingStoragePath",
+                    "message": (
+                        "A canonical storage_path is required before DFM analysis."
+                    ),
+                },
+                status_code=422,
+            )
+
         stl_bytes = file_data["stl_bytes"]
         cad_bytes = file_data.get("cad_bytes")
         cad_extension = file_data.get("cad_extension")
@@ -1321,9 +1353,7 @@ async def analyze_for_process(
         try:
             import os
 
-            glb_path = (
-                f"{os.path.splitext(storage_path)[0]}.glb" if storage_path else ""  # noqa: PTH122
-            )
+            glb_path = f"{os.path.splitext(resolved_storage_path)[0]}.glb"  # noqa: PTH122
 
             # Build reports dict for overlay generation
             reports: dict[str, dict[str, Any]] = {process_code: result}
@@ -1342,7 +1372,7 @@ async def analyze_for_process(
                     generate_and_upload_overlays(
                         glb_path=glb_path,
                         reports=reports,
-                        storage_path=storage_path or "",
+                        storage_path=resolved_storage_path,
                         upload_service_url=settings.UPLOAD_SERVICE_URL,
                         token_provider=active_consumer._token_provider,
                         http_client=active_consumer._http_client,
@@ -1373,11 +1403,31 @@ async def analyze_for_process(
                 f"Published DfmAnalysisReadyEvent for {upload_id}/{process_code}",
                 extra={"upload_id": upload_id, "process_code": process_code},
             )
+        except asyncio.CancelledError:
+            raise
         except Exception as e:
             logger.warning(
                 f"Failed to publish DfmAnalysisReadyEvent for {upload_id}/{process_code}: {e}",  # noqa: E501
                 extra={"upload_id": upload_id, "process_code": process_code},
                 exc_info=True,
+            )
+            return build_dfm_response(
+                {
+                    "upload_id": upload_id,
+                    "process_code": process_code,
+                    "status": "handoff_failed",
+                    "error_type": "EventPublicationFailed",
+                    "message": (
+                        "DFM analysis completed, but the result handoff failed. "
+                        "Please retry."
+                    ),
+                    "dfm_report": result,
+                    "overlay_paths": overlay_paths or {},
+                    "cache_status": cache_status,
+                    "body_count": file_data.get("body_count"),
+                },
+                status_code=503,
+                cache_status=cache_status,
             )
 
         return build_dfm_response(

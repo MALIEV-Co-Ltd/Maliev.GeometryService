@@ -149,9 +149,15 @@ async def test_publish_event_uses_canonical_masstransit_envelope_contract(
     message_type = (
         f"urn:message:Maliev.MessagingContracts.Contracts.Geometry:{event_name}"
     )
+    quote_engine_events = {
+        "FileAnalyzedEvent",
+        "FileMetricsReadyEvent",
+        "FileAnalysisFailedEvent",
+        "DfmAnalysisReadyEvent",
+    }
     consumed_by = (
         ["IntranetBff", "QuoteEngineBff"]
-        if event_name == "FileAnalyzedEvent"
+        if event_name in quote_engine_events
         else ["IntranetBff"]
     )
     event = event_type.model_validate(
@@ -224,6 +230,8 @@ async def test_publish_event_uses_canonical_masstransit_envelope_contract(
     assert inner_message["occurredAtUtc"] == "2026-07-13T10:00:00Z"
     assert inner_message["isPublic"] is False
     assert inner_message["payload"][proof_key] == proof_value
+    if event_name == "DfmAnalysisReadyEvent":
+        assert inner_message["payload"]["overlayPaths"] is None
     if event_name == "FileAnalyzedEvent":
         assert set(inner_message["payload"]) == {
             "fileId",

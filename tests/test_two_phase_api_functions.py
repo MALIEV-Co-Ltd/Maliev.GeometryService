@@ -3,12 +3,13 @@
 Tests the new API functions for lazy evaluation without requiring full FastAPI setup.
 """
 
+import asyncio
 import base64
 import json
 import time
 from contextlib import suppress
 from pathlib import Path
-from uuid import uuid4
+from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
 import pytest
 
@@ -35,6 +36,21 @@ def sample_stl_file(test_assets_dir):
     if not stl_file.exists():
         pytest.skip("50x50x50mm-solid-cube-binary.stl not found")
     return stl_file
+
+
+def _successful_fdm_report() -> dict[str, object]:
+    return {
+        "reportType": "FDM",
+        "thinWallCount": 0,
+        "thinWallRegions": [],
+        "overhangFaceCount": 0,
+        "overhangAreaCm2": 0.0,
+        "overhangRegions": [],
+        "supportRequired": False,
+        "estimatedSupportVolumeCm3": 0.0,
+        "smallDetailCount": 0,
+        "issues": [],
+    }
 
 
 @pytest.fixture
@@ -111,7 +127,12 @@ class TestProcessAnalysisAPI:
 
         # Then, run FDM analysis
         start_time = time.time()
-        response = await analyze_for_process("test-upload-002", "FDM", timeout=30)
+        response = await analyze_for_process(
+            "test-upload-002",
+            "FDM",
+            {"storage_path": "projects/test/test-upload-002/part.stl"},
+            timeout=30,
+        )
         duration = time.time() - start_time
 
         print(f"\nFDM analysis API call completed in {duration:.2f}s")
@@ -130,9 +151,9 @@ class TestProcessAnalysisAPI:
         )
         assert response.headers["x-maliev-geometry-process-code"] == "FDM"
         data = json.loads(response.body.decode())
-        assert response.headers["x-maliev-geometry-cache-status"] == data[
-            "cache_status"
-        ]
+        assert (
+            response.headers["x-maliev-geometry-cache-status"] == data["cache_status"]
+        )
         assert data["status"] == "analysis_complete"
         assert data["process_code"] == "FDM"
 
@@ -203,10 +224,11 @@ class TestProcessAnalysisAPI:
         from src import main
 
         clear_cache()
-        upload_id = str(uuid4())
+        upload_id = "legacy-upload-id"
+        storage_path = f"projects/test/{upload_id}/part.stl"
         _file_analysis_cache[upload_id] = {
             "stl_bytes": sample_stl_file.read_bytes(),
-            "storage_path": f"projects/test/{upload_id}/part.stl",
+            "storage_path": storage_path,
             "body_count": 1,
         }
         published_events = []
@@ -217,8 +239,8 @@ class TestProcessAnalysisAPI:
                 "message": "Could not analyze printable features.",
             }
 
-        async def capture_event(event, _routing_key):
-            published_events.append(event)
+        async def capture_event(event, routing_key):
+            published_events.append((event, routing_key))
 
         monkeypatch.setattr(
             "src.core.geometry._analyze_single_process", failed_analysis
@@ -234,10 +256,184 @@ class TestProcessAnalysisAPI:
             assert data["dfm_report"]["issues"][0]["category"] == "system"
             assert data["dfm_report"]["issues"][0]["severity"] == "error"
             assert published_events, "Expected failure to publish a terminal DFM event"
-            payload = published_events[0].message.payload
+            event, routing_key = published_events[0]
+            assert routing_key == "maliev.geometryservice.v1.dfm.ready"
+            assert event.message.consumed_by == ["IntranetBff", "QuoteEngineBff"]
+            assert event.correlation_id == event.message.correlation_id
+            assert isinstance(event.correlation_id, UUID)
+            assert event.correlation_id == uuid5(
+                NAMESPACE_URL,
+                f"maliev.geometry:{upload_id}\n{storage_path}",
+            )
+            payload = event.message.payload
+            assert payload.file_id == upload_id
+            assert payload.storage_path == storage_path
+            assert payload.overlay_paths is None
+            serialized = event.model_dump(by_alias=True)
+            assert serialized["message"]["payload"]["overlayPaths"] is None
             assert payload.fdm_report is not None
             assert payload.fdm_report.issues[0].category == "system"
             assert payload.fdm_report.issues[0].severity == "error"
+        finally:
+            clear_cache()
+            with suppress(KeyError):
+                del _file_analysis_cache[upload_id]
+
+    @pytest.mark.anyio
+    async def test_process_analysis_without_storage_path_does_not_publish_dfm_event(
+        self,
+        monkeypatch,
+    ):
+        """DFM results without a canonical storage join key must fail closed."""
+        from src import main
+
+        clear_cache()
+        upload_id = "legacy-upload-without-storage"
+        _file_analysis_cache[upload_id] = {
+            "stl_bytes": b"fake-stl",
+            "body_count": 1,
+        }
+        published_events = []
+        analyzer_calls = []
+
+        def failed_analysis(*_args, **_kwargs):
+            analyzer_calls.append(True)
+            return {
+                "error_type": "AnalyzerFailed",
+                "message": "Could not analyze printable features.",
+            }
+
+        async def capture_event(event, routing_key):
+            published_events.append((event, routing_key))
+
+        monkeypatch.setattr(
+            "src.core.geometry._analyze_single_process",
+            failed_analysis,
+        )
+        monkeypatch.setattr(main, "publish_event", capture_event)
+
+        try:
+            response = await analyze_for_process(upload_id, "FDM", timeout=5)
+
+            assert response.status_code == 422
+            assert analyzer_calls == []
+            assert published_events == []
+        finally:
+            clear_cache()
+            with suppress(KeyError):
+                del _file_analysis_cache[upload_id]
+
+    @pytest.mark.anyio
+    async def test_missing_storage_path_fails_before_analysis_or_publication(
+        self,
+        monkeypatch,
+    ):
+        """Canonical storage identity is validated before spending DFM compute."""
+        from src import main
+
+        clear_cache()
+        upload_id = "legacy-success-without-storage"
+        _file_analysis_cache[upload_id] = {
+            "stl_bytes": b"successful-fdm-input",
+            "body_count": 1,
+        }
+        published_events = []
+        analyzer_calls = []
+
+        async def capture_event(event, routing_key):
+            published_events.append((event, routing_key))
+
+        def capture_analysis(*_args, **_kwargs):
+            analyzer_calls.append(True)
+            return _successful_fdm_report()
+
+        monkeypatch.setattr(
+            "src.core.geometry._analyze_single_process",
+            capture_analysis,
+        )
+        monkeypatch.setattr(main, "publish_event", capture_event)
+
+        try:
+            response = await analyze_for_process(upload_id, "FDM", timeout=5)
+            data = json.loads(response.body.decode())
+
+            assert response.status_code == 422
+            assert data["status"] == "invalid_state"
+            assert data["error_type"] == "MissingStoragePath"
+            assert analyzer_calls == []
+            assert published_events == []
+        finally:
+            clear_cache()
+            with suppress(KeyError):
+                del _file_analysis_cache[upload_id]
+
+    @pytest.mark.anyio
+    async def test_successful_analysis_publisher_failure_returns_handoff_failure(
+        self,
+        monkeypatch,
+    ):
+        """Broker failure must not be reported as a completed DFM workflow."""
+        from src import main
+
+        clear_cache()
+        upload_id = "legacy-success-publisher-failure"
+        storage_path = f"projects/test/{upload_id}/part.stl"
+        _file_analysis_cache[upload_id] = {
+            "stl_bytes": b"successful-fdm-input",
+            "storage_path": storage_path,
+            "body_count": 1,
+        }
+
+        async def fail_publish(_event, _routing_key):
+            raise RuntimeError("broker diagnostic must not leak")
+
+        monkeypatch.setattr(
+            "src.core.geometry._analyze_single_process",
+            lambda *_args, **_kwargs: _successful_fdm_report(),
+        )
+        monkeypatch.setattr(main, "publish_event", fail_publish)
+
+        try:
+            response = await analyze_for_process(upload_id, "FDM", timeout=5)
+            data = json.loads(response.body.decode())
+
+            assert response.status_code == 503
+            assert data["status"] == "handoff_failed"
+            assert data["error_type"] == "EventPublicationFailed"
+            assert "broker diagnostic" not in response.body.decode()
+        finally:
+            clear_cache()
+            with suppress(KeyError):
+                del _file_analysis_cache[upload_id]
+
+    @pytest.mark.anyio
+    async def test_successful_analysis_publication_cancellation_propagates(
+        self,
+        monkeypatch,
+    ):
+        """Task cancellation is control flow and must never become a 503 response."""
+        from src import main
+
+        clear_cache()
+        upload_id = "legacy-success-publication-cancelled"
+        _file_analysis_cache[upload_id] = {
+            "stl_bytes": b"successful-fdm-input",
+            "storage_path": f"projects/test/{upload_id}/part.stl",
+            "body_count": 1,
+        }
+
+        async def cancel_publish(_event, _routing_key):
+            raise asyncio.CancelledError
+
+        monkeypatch.setattr(
+            "src.core.geometry._analyze_single_process",
+            lambda *_args, **_kwargs: _successful_fdm_report(),
+        )
+        monkeypatch.setattr(main, "publish_event", cancel_publish)
+
+        try:
+            with pytest.raises(asyncio.CancelledError):
+                await analyze_for_process(upload_id, "FDM", timeout=5)
         finally:
             clear_cache()
             with suppress(KeyError):
@@ -292,7 +488,13 @@ class TestEndToEndWorkflow:
 
         # Phase 2a: User selects FDM - analyze only FDM
         start_time = time.time()
-        fdm_response = await analyze_for_process(upload_id, "FDM", timeout=30)
+        request = {"storage_path": f"projects/test/{upload_id}/part.stl"}
+        fdm_response = await analyze_for_process(
+            upload_id,
+            "FDM",
+            request,
+            timeout=30,
+        )
         fdm_duration = time.time() - start_time
 
         assert fdm_response.status_code == 200
@@ -303,7 +505,12 @@ class TestEndToEndWorkflow:
 
         # Phase 2b: User changes mind to CNC - analyze only CNC
         start_time = time.time()
-        cnc_response = await analyze_for_process(upload_id, "CNC_MILL", timeout=30)
+        cnc_response = await analyze_for_process(
+            upload_id,
+            "CNC_MILL",
+            request,
+            timeout=30,
+        )
         cnc_duration = time.time() - start_time
 
         assert cnc_response.status_code == 200

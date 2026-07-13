@@ -2,8 +2,9 @@ import asyncio
 import contextlib
 import io
 from datetime import datetime, timezone
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
-from uuid import uuid4
+from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
 import httpx
 import pytest
@@ -112,15 +113,26 @@ class _TrackedMessageProcess:
         return False
 
 
+_DEFAULT_CORRELATION = object()
+
+
 def _build_upload_message(
-    file_name: str = "test.stl", metadata: dict[str, str] | None = None
+    file_name: str = "test.stl",
+    metadata: dict[str, str] | None = None,
+    *,
+    file_id: str | None = None,
+    storage_path: str | None = None,
+    correlation_id: UUID | None | object = _DEFAULT_CORRELATION,
 ) -> MagicMock:
+    resolved_correlation_id = (
+        uuid4() if correlation_id is _DEFAULT_CORRELATION else correlation_id
+    )
     inner_msg = UploadCompletedMessage(
         uploadId=str(uuid4()),
-        fileId=str(uuid4()),
+        fileId=file_id or str(uuid4()),
         serviceId="test-service",
         fileName=file_name,
-        storagePath=f"test/{file_name}",
+        storagePath=storage_path or f"test/{file_name}",
         downloadUrl="http://signed-url",
         contentType="model/stl",
         fileSize=1024,
@@ -129,7 +141,7 @@ def _build_upload_message(
     )
     event = FileUploadedEvent(
         messageId=uuid4(),
-        correlationId=uuid4(),
+        correlationId=resolved_correlation_id,
         message=FileUploadedMessage(
             messageId=uuid4(),
             messageName="UploadCompleted",
@@ -420,8 +432,17 @@ async def test_process_message_computes_eager_metrics_for_browser_primary_upload
     consumer: UploadConsumer,
     mock_storage: AsyncMock,
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
-    message = _build_upload_message("direct.stl", _browser_primary_metadata())
+    file_id = "canonical-file-123"
+    storage_path = "test/direct.stl"
+    message = _build_upload_message(
+        "direct.stl",
+        _browser_primary_metadata(),
+        file_id=file_id,
+        storage_path=storage_path,
+        correlation_id=None,
+    )
     message.process.return_value = _TrackedMessageProcess([])
     mock_storage.download_file.return_value = io.BytesIO(b"fake-stl-content")
     consumer.publish_event = AsyncMock()
@@ -468,6 +489,50 @@ async def test_process_message_computes_eager_metrics_for_browser_primary_upload
     )
     assert metrics_event.message.payload.metrics.bounding_box.x == 10.0
     assert metrics_event.message.payload.metrics.volume_cm3 == 1.0
+    assert metrics_event.message.consumed_by == ["IntranetBff", "QuoteEngineBff"]
+
+    job = ArtifactProcessingJob(
+        file_id=file_id,
+        upload_id="upload-123",
+        storage_path=storage_path,
+        file_ext=".stl",
+        file_name="direct.stl",
+        file_size=1024,
+        correlation_id=None,
+        metrics=metrics_event.message.payload.metrics,
+        body_count=1,
+        body_infos=None,
+        temp_dir=tmp_path,
+        cad_glb_path=tmp_path / "direct.glb",
+        executor=None,
+        queued_at=0.0,
+    )
+    await consumer._publish_file_analyzed_event(job, "processed/direct.glb")
+    await consumer.publish_failure(
+        None,
+        file_id,
+        "SYSTEM_ERROR",
+        "internal diagnostic",
+        storage_path,
+    )
+
+    lifecycle_events = [call.args[0] for call in consumer.publish_event.await_args_list]
+    assert [call.args[1] for call in consumer.publish_event.await_args_list] == [
+        "maliev.geometryservice.v1.metrics.ready",
+        "maliev.geometryservice.v1.analysis.completed",
+        "maliev.geometryservice.v1.analysis.failed",
+    ]
+    correlation_ids = {event.correlation_id for event in lifecycle_events}
+    assert len(correlation_ids) == 1
+    resolved_correlation_id = correlation_ids.pop()
+    assert isinstance(resolved_correlation_id, UUID)
+    assert resolved_correlation_id == uuid5(
+        NAMESPACE_URL,
+        f"maliev.geometry:{file_id}\n{storage_path}",
+    )
+    for event in lifecycle_events:
+        assert event.message.correlation_id == resolved_correlation_id
+        assert event.message.consumed_by == ["IntranetBff", "QuoteEngineBff"]
 
     recorded = [attributes for _, attributes in export_counter.calls]
     assert {
