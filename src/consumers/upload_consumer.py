@@ -26,6 +26,7 @@ import aio_pika.abc
 import httpx
 
 from src.core.config import settings
+from src.core.event_identity import resolve_geometry_correlation_id
 from src.core.geometry import (
     BoundingBox,
     GeometryMetrics,
@@ -165,6 +166,8 @@ _SERVER_WORK_EXECUTED_COUNTER = meter.create_counter(
         "they can be compared with browser-first avoided work."
     ),
 )
+
+
 @dataclass(frozen=True)
 class ArtifactProcessingJob:
     file_id: str
@@ -820,9 +823,14 @@ class UploadConsumer:
 
                         # Publish early metrics event
                         _metrics_now = datetime.now(timezone.utc)
+                        event_correlation_id = resolve_geometry_correlation_id(
+                            correlation_id,
+                            str(file_id),
+                            inner_msg.storage_path,
+                        )
                         metrics_event = FileMetricsReadyEvent(
                             messageId=uuid4(),
-                            correlationId=correlation_id,
+                            correlationId=event_correlation_id,
                             messageType=[
                                 "urn:message:Maliev.MessagingContracts.Contracts.Geometry:FileMetricsReadyEvent"
                             ],
@@ -832,8 +840,8 @@ class UploadConsumer:
                                 messageType=MessageTypeEnum.Event,
                                 messageVersion="1.0.0",
                                 publishedBy="GeometryService",
-                                consumedBy=["IntranetBff"],
-                                correlationId=correlation_id,
+                                consumedBy=["IntranetBff", "QuoteEngineBff"],
+                                correlationId=event_correlation_id,
                                 causationId=None,
                                 occurredAtUtc=_metrics_now,
                                 isPublic=False,
@@ -1428,9 +1436,14 @@ class UploadConsumer:
             resolved_viewer_file_extension = ".glb"
 
         now = datetime.now(timezone.utc)
+        event_correlation_id = resolve_geometry_correlation_id(
+            job.correlation_id,
+            job.file_id,
+            job.storage_path,
+        )
         event = FileAnalyzedEvent(
             messageId=uuid4(),
-            correlationId=job.correlation_id,
+            correlationId=event_correlation_id,
             messageType=[
                 "urn:message:Maliev.MessagingContracts.Contracts.Geometry:FileAnalyzedEvent"
             ],
@@ -1441,7 +1454,7 @@ class UploadConsumer:
                 messageVersion="1.0.0",
                 publishedBy="GeometryService",
                 consumedBy=["IntranetBff", "QuoteEngineBff"],
-                correlationId=job.correlation_id,
+                correlationId=event_correlation_id,
                 causationId=None,
                 occurredAtUtc=now,
                 isPublic=False,
@@ -1716,9 +1729,14 @@ class UploadConsumer:
         storage_path: str,
     ) -> None:
         _now = datetime.now(timezone.utc)
+        event_correlation_id = resolve_geometry_correlation_id(
+            correlation_id,
+            file_id,
+            storage_path,
+        )
         failure_event = FileAnalysisFailedEvent(
             messageId=uuid4(),
-            correlationId=correlation_id,
+            correlationId=event_correlation_id,
             messageType=[
                 "urn:message:Maliev.MessagingContracts.Contracts.Geometry:FileAnalysisFailedEvent"
             ],
@@ -1728,8 +1746,8 @@ class UploadConsumer:
                 messageType=MessageTypeEnum.Event,
                 messageVersion="1.0.0",
                 publishedBy="GeometryService",
-                consumedBy=["IntranetBff"],
-                correlationId=correlation_id,
+                consumedBy=["IntranetBff", "QuoteEngineBff"],
+                correlationId=event_correlation_id,
                 causationId=None,
                 occurredAtUtc=_now,
                 isPublic=False,

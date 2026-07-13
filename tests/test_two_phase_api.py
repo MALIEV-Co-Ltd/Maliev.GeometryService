@@ -179,6 +179,7 @@ class TestProcessAnalysisEndpoint:
         start_time = time.time()
         dfm_response = await client.post(
             "/geometry/uploads/test-upload-003/dfm/FDM",
+            json={"storage_path": "projects/test/test-upload-003/part.stl"},
             timeout=30.0,
         )
         duration = time.time() - start_time
@@ -225,6 +226,7 @@ class TestProcessAnalysisEndpoint:
         # Process-specific analysis
         dfm_response = await client.post(
             f"/geometry/uploads/{upload_id}/dfm/{process_code}",
+            json={"storage_path": f"projects/test/{upload_id}/part.stl"},
             timeout=30.0,
         )
 
@@ -267,6 +269,7 @@ class TestProcessAnalysisEndpoint:
         # Try invalid process
         response = await client.post(
             "/geometry/uploads/test-upload-invalid-process/dfm/INVALID_PROCESS",
+            json={"storage_path": "projects/test/test-upload-invalid-process/part.stl"},
             timeout=5.0,
         )
 
@@ -291,6 +294,7 @@ class TestProcessAnalysisEndpoint:
         start_time = time.time()
         response = await client.post(
             "/geometry/uploads/test-upload-timeout/dfm/FDM?timeout=5",
+            json={"storage_path": "projects/test/test-upload-timeout/part.stl"},
             timeout=10.0,
         )
         duration = time.time() - start_time
@@ -373,6 +377,7 @@ class TestEndToEndWorkflow:
         start_time = time.time()
         fdm_response = await client.post(
             f"/geometry/uploads/{upload_id}/dfm/FDM",
+            json={"storage_path": f"projects/test/{upload_id}/part.stl"},
             timeout=30.0,
         )
         fdm_duration = time.time() - start_time
@@ -388,6 +393,7 @@ class TestEndToEndWorkflow:
         start_time = time.time()
         cnc_response = await client.post(
             f"/geometry/uploads/{upload_id}/dfm/CNC_MILL",
+            json={"storage_path": f"projects/test/{upload_id}/part.stl"},
             timeout=30.0,
         )
         cnc_duration = time.time() - start_time
@@ -435,7 +441,10 @@ class TestCacheMissRecovery:
 
             response = await client.post(
                 f"/geometry/uploads/{upload_id}/dfm/FDM",
-                json={"download_url": "https://storage.googleapis.com/signed?sig=test"},
+                json={
+                    "storage_path": f"projects/test/{upload_id}/part.stl",
+                    "download_url": "https://storage.googleapis.com/signed?sig=test",
+                },
                 timeout=10.0,
             )
 
