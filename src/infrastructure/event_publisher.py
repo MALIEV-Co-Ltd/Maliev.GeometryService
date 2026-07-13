@@ -64,7 +64,7 @@ async def publish_event(
     await _exchange.publish(
         aio_pika.Message(
             body=message_body,
-            content_type="application/json",
+            content_type="application/vnd.masstransit+json",
             delivery_mode=aio_pika.DeliveryMode.PERSISTENT,
         ),
         routing_key=routing_key,
