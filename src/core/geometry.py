@@ -14,6 +14,7 @@ import threading
 import traceback
 from collections.abc import Callable, Iterable, Iterator
 from pathlib import Path
+from types import FrameType
 from typing import Any, ParamSpec, TypedDict, TypeVar, cast
 
 _P = ParamSpec("_P")
@@ -1269,7 +1270,9 @@ def _run_gmsh_with_timeout(file_path: str, timeout_seconds: int) -> trimesh.Trim
         if mesh is None:
             raise ValueError("GMSH_TESSELLATION_FAILED: No triangles")
 
-    return cast(trimesh.Trimesh, mesh)
+    if sys.platform == "win32":
+        return cast(trimesh.Trimesh, mesh)
+    return mesh
 
 
 def _load_cad_with_cascadio(
@@ -4188,7 +4191,10 @@ def _compute_dfm_single_body(
             # Unix: use signal.SIGALRM
             import signal
 
-            def _timeout_handler(signum, frame):  # noqa: ARG001
+            def _timeout_handler(
+                _signum: int,
+                _frame: FrameType | None,
+            ) -> None:
                 raise TimeoutError(
                     f"Single-body DFM analysis timed out after {SINGLE_BODY_DFM_TIMEOUT}s"  # noqa: E501
                 )
