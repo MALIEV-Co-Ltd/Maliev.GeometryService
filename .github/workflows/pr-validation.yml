@@ -1,4 +1,4 @@
-name: PR Validation
+name: PR validation
 
 on:
   pull_request:
@@ -19,10 +19,9 @@ jobs:
     name: Real browser worker smoke
     runs-on: ubuntu-24.04
     timeout-minutes: 5
-
     steps:
-      - name: Checkout code
-        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+      - name: Checkout source
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
 
@@ -36,75 +35,5 @@ jobs:
           node --version
           node --test tests/client-runtime-browser-smoke.test.mjs
 
-  prep:
-    runs-on: ubuntu-latest
-    outputs:
-      version_format: ${{ steps.set-version.outputs.version_format }}
-    steps:
-      - id: set-version
-        run: |
-          BASE_BRANCH="${{ github.base_ref }}"
-          if [ "$BASE_BRANCH" == "main" ]; then
-            VERSION_FORMAT="1.0.*"
-          elif [ "$BASE_BRANCH" == "staging" ]; then
-            VERSION_FORMAT="1.0.*-beta*"
-          else
-            VERSION_FORMAT="1.0.*-alpha*"
-          fi
-          echo "version_format=$VERSION_FORMAT" >> $GITHUB_OUTPUT
-
-  build-and-test:
-    needs: prep
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v5
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
-      - name: Install Poetry
-        uses: snok/install-poetry@v1
-        with:
-          virtualenvs-create: true
-          virtualenvs-in-project: true
-
-      - name: Install system dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y gmsh libglu1-mesa libxcursor1 libxinerama1 libxft2 libfltk1.3 libgl1 libgl1-mesa-dri libosmesa6 xvfb
-
-      - name: Install dependencies
-        run: poetry install
-
-      - name: Lint
-        run: poetry run ruff check .
-
-      - name: Test
-        run: |
-          # Skip TestPreviewImagesOutput in CI - VTK crashes on GitHub Actions
-          # These tests are for manual visual validation only
-          xvfb-run --auto-servernum poetry run pytest \
-            -k "not TestPreviewImagesOutput and not test_preview_images"
-        working-directory: ${{ github.workspace }}
-        env:
-          PYVISTA_OFF_SCREEN: "true"
-          MESA_GL_VERSION_OVERRIDE: "3.3"
-          DISPLAY: ":99"
-
-      - name: Test Geometry (preview tests only - skip in CI due to VTK crash)
-        run: |
-          echo "Skipping TestPreviewImagesOutput in CI (requires real rendering, crashes on GitHub Actions)"
-          # Run only non-preview tests from test_geometry.py
-          xvfb-run --auto-servernum poetry run pytest tests/test_geometry.py \
-            --ignore-glob="*TestPreviewImagesOutput*" \
-            -k "not TestPreviewImagesOutput and not test_preview_images" \
-            -v
-        working-directory: ${{ github.workspace }}
-        env:
-          PYVISTA_OFF_SCREEN: "true"
-          MESA_GL_VERSION_OVERRIDE: "3.3"
-          DISPLAY: ":99"
+  validate:
+    uses: ./.github/workflows/_validate.yml
