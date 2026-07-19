@@ -1,0 +1,37 @@
+{
+  "analysis_time_seconds": 0.0036,
+  "estimatedSupportVolumeCm3": null,
+  "issues": [
+    {
+      "category": "small_feature",
+      "centroid": [
+        6.6667,
+        3.3333,
+        -10.0
+      ],
+      "description": "4 raised/recessed detail(s) below minimum size (w\u22650.6mm, h\u22652.0mm) for FDM.",
+      "faceIndices": [
+        0,
+        1,
+        4,
+        5
+      ],
+      "metadata": {
+        "minHeightMm": 2.0,
+        "minWidthMm": 0.6
+      },
+      "severity": "warning",
+      "threshold": 0.6,
+      "title": "Small Embossed/Engraved Details (4)",
+      "value": 4.0
+    }
+  ],
+  "overhangAreaCm2": 0.0,
+  "overhangFaceCount": 0,
+  "overhangRegions": [],
+  "reportType": "FDM",
+  "smallDetailCount": 4.0,
+  "supportRequired": false,
+  "thinWallCount": 0,
+  "thinWallRegions": []
+}

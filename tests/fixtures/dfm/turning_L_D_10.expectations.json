@@ -1,0 +1,14 @@
+{
+  "description": "5 mm Ø × 50 mm cylindrical shaft (L/D = 10). CNC turning's ld_ratio detector should warn. The shaft's outer cylindrical surface is also classified as a thin wall by some printing thresholds because the wall is 'unsupported' along its length — that's acceptable behaviour.",
+  "process_expectations": {
+    "CNC_TURN": {
+      "must_have": {
+        "ld_ratio": { "count_min": 1, "count_max": 1, "severity_min": "warning" }
+      }
+    },
+    "FDM":      { "must_not_have": ["thin_wall"] },
+    "SLS":      { "must_not_have": ["thin_wall"] },
+    "MJF":      { "must_not_have": ["thin_wall"] },
+    "CNC_MILL": { "must_not_have": ["thin_wall"] }
+  }
+}

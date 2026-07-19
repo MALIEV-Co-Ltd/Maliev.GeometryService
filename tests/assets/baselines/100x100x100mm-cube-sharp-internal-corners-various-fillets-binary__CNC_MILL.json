@@ -1,0 +1,55 @@
+{
+  "analysis_time_seconds": 0.026,
+  "cavityDepthIssues": 0,
+  "chatterRiskCount": 0,
+  "drillHoleCount": 0,
+  "hasDrillHoles": false,
+  "hasUndercuts": false,
+  "internalRadiusIssues": 0.6403,
+  "issues": [
+    {
+      "category": "internal_radius",
+      "centroid": [
+        -39.635,
+        39.635,
+        0.0
+      ],
+      "description": "1 internal corner(s) with radius below 1.0mm. Smallest: R0.64mm. No standard tool achieves this radius.",
+      "faceIndices": [
+        929,
+        931,
+        933,
+        965,
+        935,
+        1064,
+        1065,
+        1066,
+        1067,
+        1063,
+        1068,
+        972,
+        1069,
+        976,
+        1070,
+        977,
+        1071,
+        927
+      ],
+      "metadata": {
+        "toolDiameterMm": null
+      },
+      "severity": "warning",
+      "threshold": 1.0,
+      "title": "Small Internal Radii (1 corners)",
+      "value": 0.6403
+    }
+  ],
+  "minimumFeatureSizeMm": 1.2807,
+  "reportType": "CNC_MILL",
+  "requiresEdm": false,
+  "requiresGrinding": false,
+  "sharpCornerCount": 0,
+  "sharpCornerRegions": [],
+  "toolAccessAxes": 3,
+  "undercutRegions": []
+}

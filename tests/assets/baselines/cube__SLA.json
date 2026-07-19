@@ -1,0 +1,37 @@
+{
+  "analysis_time_seconds": 0.0041,
+  "estimatedSupportVolumeCm3": null,
+  "issues": [
+    {
+      "category": "small_feature",
+      "centroid": [
+        6.6667,
+        3.3333,
+        -10.0
+      ],
+      "description": "4 raised/recessed detail(s) below minimum size (w\u22650.4mm, h\u22650.4mm) for SLA.",
+      "faceIndices": [
+        0,
+        1,
+        4,
+        5
+      ],
+      "metadata": {
+        "minHeightMm": 0.4,
+        "minWidthMm": 0.4
+      },
+      "severity": "warning",
+      "threshold": 0.4,
+      "title": "Small Embossed/Engraved Details (4)",
+      "value": 4.0
+    }
+  ],
+  "overhangAreaCm2": 0.0,
+  "overhangFaceCount": 0,
+  "overhangRegions": [],
+  "reportType": "SLA",
+  "smallDetailCount": 4.0,
+  "supportRequired": false,
+  "thinWallCount": 0,
+  "thinWallRegions": []
+}

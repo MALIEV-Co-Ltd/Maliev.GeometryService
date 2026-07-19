@@ -1,13 +1,57 @@
+import asyncio
+import contextlib
 import io
-from datetime import UTC, datetime
-from unittest.mock import AsyncMock, MagicMock
-from uuid import uuid4
+from datetime import datetime, timezone
+from pathlib import Path
+from unittest.mock import AsyncMock, MagicMock, patch
+from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
+import httpx
 import pytest
+import respx
 
-from src.consumers.upload_consumer import UploadConsumer
+from src.consumers.upload_consumer import (
+    _SUPPORTED_GEOMETRY_UPLOAD_EXTENSIONS,
+    ArtifactProcessingJob,
+    UploadConsumer,
+    _browser_viewer_source_extension,
+)
 from src.core.geometry import BoundingBox, GeometryMetrics
-from src.core.schemas import FileUploadedEvent, UploadCompletedMessage
+from src.core.schemas import (
+    FileUploadedEvent,
+    FileUploadedMessage,
+    UploadCompletedMessage,
+)
+
+# Fake metrics dict returned by _compute_metrics_worker in the process pool
+_FAKE_METRICS_RESULT = {
+    "volume_cm3": 1.0,
+    "support_volume_cm3": 0.5,
+    "surface_area_cm2": 6.0,
+    "bounding_box": {"x": 10.0, "y": 10.0, "z": 10.0},
+    "is_manifold": True,
+    "triangle_count": 12,
+    "euler_number": 2,
+    "mesh_stl_bytes": b"fake-stl",
+    "cad_glb_bytes": b"fake-glb",
+    "dfmReports": {},
+}
+
+# Fake artifacts dict returned by _generate_artifacts_worker
+_FAKE_ARTIFACTS_RESULT = {
+    "glb_bytes": b"glb-content",
+    "thumbnail_bytes": b"thumb-content",
+    "preview_images": {
+        "front_small": b"front-png",
+        "back_small": b"back-png",
+        "left_small": b"left-png",
+        "right_small": b"right-png",
+        "top_small": b"top-png",
+        "bottom_small": b"bottom-png",
+        "thumbnail_small": b"thumb-small",
+        "thumbnail_large": b"thumb-large",
+    },
+}
 
 
 @pytest.fixture
@@ -17,7 +61,9 @@ def mock_storage():
 
 @pytest.fixture
 def mock_processor():
-    return AsyncMock()
+    mock = MagicMock()
+    mock.executor = MagicMock()
+    return mock
 
 
 @pytest.fixture
@@ -25,8 +71,1131 @@ def consumer(mock_storage, mock_processor):
     return UploadConsumer(mock_storage, mock_processor)
 
 
+class _RecordingCounter:
+    def __init__(self) -> None:
+        self.calls: list[tuple[int, dict[str, str]]] = []
+
+    def add(self, amount: int, attributes: dict[str, str] | None = None) -> None:
+        self.calls.append((amount, attributes or {}))
+
+
 @pytest.mark.asyncio
-async def test_process_message_success(consumer, mock_storage, mock_processor):
+async def test_validate_file_size_before_download_normalizes_mock_storage_url(
+    consumer, monkeypatch
+):
+    monkeypatch.setattr(
+        "src.infrastructure.storage.settings.UPLOAD_SERVICE_URL",
+        "http://aspire.dev.internal:45389",
+    )
+    original_url = "http://localhost:55333/upload/v1/mock-storage/token-123"
+    normalized_url = "http://aspire.dev.internal:45389/upload/v1/mock-storage/token-123"
+
+    with respx.mock:
+        route = respx.head(normalized_url).mock(
+            return_value=httpx.Response(200, headers={"Content-Length": "1024"})
+        )
+
+        assert await consumer.validate_file_size_before_download(original_url)
+        assert route.called
+
+    await consumer.stop()
+
+
+class _TrackedMessageProcess:
+    def __init__(self, events: list[str]):
+        self._events = events
+
+    async def __aenter__(self):
+        self._events.append("ack-enter")
+
+    async def __aexit__(self, exc_type, exc, tb):  # noqa: ANN001
+        self._events.append("ack-exit")
+        return False
+
+
+_DEFAULT_CORRELATION = object()
+
+
+def _build_upload_message(
+    file_name: str = "test.stl",
+    metadata: dict[str, str] | None = None,
+    *,
+    file_id: str | None = None,
+    storage_path: str | None = None,
+    correlation_id: UUID | None | object = _DEFAULT_CORRELATION,
+) -> MagicMock:
+    resolved_correlation_id = (
+        uuid4() if correlation_id is _DEFAULT_CORRELATION else correlation_id
+    )
+    inner_msg = UploadCompletedMessage(
+        uploadId=str(uuid4()),
+        fileId=file_id or str(uuid4()),
+        serviceId="test-service",
+        fileName=file_name,
+        storagePath=storage_path or f"test/{file_name}",
+        downloadUrl="http://signed-url",
+        contentType="model/stl",
+        fileSize=1024,
+        uploadedAt=datetime.now(timezone.utc),
+        metadata=metadata,
+    )
+    event = FileUploadedEvent(
+        messageId=uuid4(),
+        correlationId=resolved_correlation_id,
+        message=FileUploadedMessage(
+            messageId=uuid4(),
+            messageName="UploadCompleted",
+            payload=inner_msg,
+        ),
+        message_type=[
+            "urn:message:Maliev.UploadService.Api.Events:UploadCompletedEvent"
+        ],
+    )
+    message = MagicMock()
+    message.body = event.model_dump_json(by_alias=True).encode()
+    return message
+
+
+def _browser_primary_metadata() -> dict[str, str]:
+    return {
+        "geometry.executionPolicy": "browser_primary",
+        "geometry.browserRuntime": "required",
+        "geometry.serverGlbExport": "skip_for_browser_viewable",
+    }
+
+
+def test_rabbitmq_prefetch_defaults_to_ingest_concurrency(
+    consumer: UploadConsumer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    assert consumer._settings.GEOMETRY_FILE_INGEST_CONCURRENCY == 2
+    monkeypatch.setattr(
+        "src.consumers.upload_consumer.settings.GEOMETRY_RABBITMQ_PREFETCH",
+        None,
+    )
+
+    assert consumer._rabbitmq_prefetch_count() == 2
+
+
+def test_supported_geometry_upload_extensions_match_quote_engine_contract() -> None:
+    assert {
+        "3mf",
+        "fbx",
+        "glb",
+        "gltf",
+        "igs",
+        "iges",
+        "obj",
+        "step",
+        "stl",
+        "stp",
+    } == _SUPPORTED_GEOMETRY_UPLOAD_EXTENSIONS
+
+
+@pytest.mark.asyncio
+async def test_process_message_acks_after_metrics_without_waiting_for_artifacts(
+    consumer: UploadConsumer,
+    mock_storage: AsyncMock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+    message = _build_upload_message()
+    message.process.return_value = _TrackedMessageProcess(events)
+    mock_storage.download_file.return_value = io.BytesIO(b"fake-stl-content")
+    consumer.publish_event = AsyncMock()
+    consumer.validate_file_size_before_download = AsyncMock(return_value=True)
+
+    loop = asyncio.get_event_loop()
+    run_in_executor_call_count = 0
+
+    async def _never_finishes() -> None:
+        await asyncio.Event().wait()
+
+    def fake_run_in_executor(executor, fn, *args):  # noqa: ANN001, ARG001
+        nonlocal run_in_executor_call_count
+        run_in_executor_call_count += 1
+        if run_in_executor_call_count == 1:
+            future = loop.create_future()
+            future.set_result(_FAKE_METRICS_RESULT)
+            return future
+        return asyncio.ensure_future(_never_finishes())
+
+    mock_loop = MagicMock(wraps=loop)
+    mock_loop.run_in_executor = fake_run_in_executor
+
+    artifact_release = asyncio.Event()
+
+    async def fake_run_artifact_job(job):  # noqa: ANN001, ARG001
+        events.append("artifact-start")
+        await artifact_release.wait()
+        events.append("artifact-end")
+
+    monkeypatch.setattr(
+        consumer,
+        "_run_artifact_job",
+        fake_run_artifact_job,
+        raising=False,
+    )
+
+    with patch(
+        "src.consumers.upload_consumer.asyncio.get_running_loop",
+        return_value=mock_loop,
+    ):
+        task = asyncio.create_task(consumer.process_message(message))
+        done, pending = await asyncio.wait({task}, timeout=0.2)
+
+    if pending:
+        artifact_release.set()
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+    assert task in done
+    assert "ack-exit" in events
+    assert "artifact-end" not in events
+
+    artifact_release.set()
+    if hasattr(consumer, "wait_for_artifact_tasks"):
+        await consumer.wait_for_artifact_tasks()
+
+
+@pytest.mark.asyncio
+async def test_process_message_requests_no_glb_metrics_for_browser_viewable_mesh(
+    consumer: UploadConsumer,
+    mock_storage: AsyncMock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    message = _build_upload_message("direct.stl")
+    message.process.return_value = _TrackedMessageProcess([])
+    mock_storage.download_file.return_value = io.BytesIO(b"fake-stl-content")
+    consumer.publish_event = AsyncMock()
+    consumer.validate_file_size_before_download = AsyncMock(return_value=True)
+    consumer._schedule_artifact_job_from_metrics = AsyncMock()  # type: ignore[method-assign]
+    counter = _RecordingCounter()
+    monkeypatch.setattr(
+        "src.consumers.upload_consumer._PHASE1_EXPORT_COUNTER",
+        counter,
+    )
+
+    captured_args: tuple[object, ...] | None = None
+    real_loop = asyncio.get_event_loop()
+
+    def fake_run_in_executor(executor, fn, *args):  # noqa: ANN001, ARG001
+        nonlocal captured_args
+        if fn.__name__ != "_compute_metrics_worker":
+            raise AssertionError(f"Unexpected executor function: {fn.__name__}")
+        captured_args = args
+        future = real_loop.create_future()
+        future.set_result({**_FAKE_METRICS_RESULT, "cad_glb_bytes": None})
+        return future
+
+    mock_loop = MagicMock(wraps=real_loop)
+    mock_loop.run_in_executor = fake_run_in_executor
+
+    with patch(
+        "src.consumers.upload_consumer.asyncio.get_running_loop",
+        return_value=mock_loop,
+    ):
+        await consumer.process_message(message)
+
+    assert captured_args == (b"fake-stl-content", ".stl", False, False)
+    recorded = [attributes for _, attributes in counter.calls]
+    assert {
+        "artifact": "glb",
+        "status": "skipped",
+        "execution_mode": "browser_primary",
+        "reason": "browser_viewer_source",
+        "file_extension": "stl",
+        "cache_status": "cold",
+    } in recorded
+    assert {
+        "artifact": "stl",
+        "status": "skipped",
+        "execution_mode": "browser_primary",
+        "reason": "browser_viewer_source",
+        "file_extension": "stl",
+        "cache_status": "cold",
+    } in recorded
+    consumer._schedule_artifact_job_from_metrics.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_process_message_records_server_work_executed_for_server_primary_upload(
+    consumer: UploadConsumer,
+    mock_storage: AsyncMock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    message = _build_upload_message("server.step")
+    message.process.return_value = _TrackedMessageProcess([])
+    mock_storage.download_file.return_value = io.BytesIO(b"fake-step-content")
+    consumer.publish_event = AsyncMock()
+    consumer.validate_file_size_before_download = AsyncMock(return_value=True)
+    consumer._schedule_artifact_job_from_metrics = AsyncMock()  # type: ignore[method-assign]
+    executed_work_counter = _RecordingCounter()
+    monkeypatch.setattr(
+        "src.consumers.upload_consumer._SERVER_WORK_EXECUTED_COUNTER",
+        executed_work_counter,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        "src.consumers.upload_consumer.get_cached_tessellation",
+        AsyncMock(return_value=None),
+    )
+
+    captured_args: tuple[object, ...] | None = None
+    real_loop = asyncio.get_event_loop()
+
+    def fake_run_in_executor(executor, fn, *args):  # noqa: ANN001, ARG001
+        nonlocal captured_args
+        if fn.__name__ != "_compute_metrics_worker":
+            raise AssertionError(f"Unexpected executor function: {fn.__name__}")
+        captured_args = args
+        future = real_loop.create_future()
+        future.set_result(_FAKE_METRICS_RESULT)
+        return future
+
+    mock_loop = MagicMock(wraps=real_loop)
+    mock_loop.run_in_executor = fake_run_in_executor
+
+    with patch(
+        "src.consumers.upload_consumer.asyncio.get_running_loop",
+        return_value=mock_loop,
+    ):
+        await consumer.process_message(message)
+
+    assert captured_args == (b"fake-step-content", ".step", True, True)
+    recorded = [attributes for _, attributes in executed_work_counter.calls]
+    assert {
+        "operation": "eager_metrics",
+        "execution_mode": "server_primary",
+        "reason": "server_artifact_required",
+        "file_extension": "step",
+    } in recorded
+    assert {
+        "operation": "viewer_glb_export",
+        "execution_mode": "server_primary",
+        "reason": "server_artifact_required",
+        "file_extension": "step",
+    } in recorded
+    assert {
+        "operation": "mesh_stl_export",
+        "execution_mode": "server_primary",
+        "reason": "server_artifact_required",
+        "file_extension": "step",
+    } in recorded
+    consumer._schedule_artifact_job_from_metrics.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_process_message_uses_browser_viewer_source_without_browser_metadata(
+    consumer: UploadConsumer,
+    mock_storage: AsyncMock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    message = _build_upload_message("direct.stl")
+    message.process.return_value = _TrackedMessageProcess([])
+    mock_storage.download_file.return_value = io.BytesIO(b"fake-stl-content")
+    consumer.publish_event = AsyncMock()
+    consumer.validate_file_size_before_download = AsyncMock(return_value=True)
+    consumer._schedule_artifact_job_from_metrics = AsyncMock()  # type: ignore[method-assign]
+    monkeypatch.setattr(
+        "src.consumers.upload_consumer.get_cached_tessellation",
+        AsyncMock(return_value=None),
+    )
+
+    captured_args: tuple[object, ...] | None = None
+    real_loop = asyncio.get_event_loop()
+
+    def fake_run_in_executor(executor, fn, *args):  # noqa: ANN001, ARG001
+        nonlocal captured_args
+        if fn.__name__ != "_compute_metrics_worker":
+            raise AssertionError(f"Unexpected executor function: {fn.__name__}")
+        captured_args = args
+        future = real_loop.create_future()
+        future.set_result({**_FAKE_METRICS_RESULT, "cad_glb_bytes": None})
+        return future
+
+    mock_loop = MagicMock(wraps=real_loop)
+    mock_loop.run_in_executor = fake_run_in_executor
+
+    with patch(
+        "src.consumers.upload_consumer.asyncio.get_running_loop",
+        return_value=mock_loop,
+    ):
+        await consumer.process_message(message)
+
+    assert captured_args == (b"fake-stl-content", ".stl", False, False)
+    mock_storage.download_file.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_process_message_computes_eager_metrics_for_browser_primary_upload(
+    consumer: UploadConsumer,
+    mock_storage: AsyncMock,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    file_id = "canonical-file-123"
+    storage_path = "test/direct.stl"
+    message = _build_upload_message(
+        "direct.stl",
+        _browser_primary_metadata(),
+        file_id=file_id,
+        storage_path=storage_path,
+        correlation_id=None,
+    )
+    message.process.return_value = _TrackedMessageProcess([])
+    mock_storage.download_file.return_value = io.BytesIO(b"fake-stl-content")
+    consumer.publish_event = AsyncMock()
+    consumer.validate_file_size_before_download = AsyncMock(return_value=True)
+    consumer._schedule_artifact_job_from_metrics = AsyncMock()  # type: ignore[method-assign]
+    export_counter = _RecordingCounter()
+    monkeypatch.setattr(
+        "src.consumers.upload_consumer._PHASE1_EXPORT_COUNTER",
+        export_counter,
+    )
+    monkeypatch.setattr(
+        "src.consumers.upload_consumer.get_cached_tessellation",
+        AsyncMock(return_value=None),
+    )
+
+    captured_args: tuple[object, ...] | None = None
+    real_loop = asyncio.get_event_loop()
+
+    def fake_run_in_executor(executor, fn, *args):  # noqa: ANN001, ARG001
+        nonlocal captured_args
+        if fn.__name__ != "_compute_metrics_worker":
+            raise AssertionError(f"Unexpected executor function: {fn.__name__}")
+        captured_args = args
+        future = real_loop.create_future()
+        future.set_result({**_FAKE_METRICS_RESULT, "cad_glb_bytes": None})
+        return future
+
+    mock_loop = MagicMock(wraps=real_loop)
+    mock_loop.run_in_executor = fake_run_in_executor
+
+    with patch(
+        "src.consumers.upload_consumer.asyncio.get_running_loop",
+        return_value=mock_loop,
+    ):
+        await consumer.process_message(message)
+
+    consumer.validate_file_size_before_download.assert_awaited_once()
+    mock_storage.download_file.assert_awaited_once()
+    assert captured_args == (b"fake-stl-content", ".stl", False, False)
+    consumer._schedule_artifact_job_from_metrics.assert_awaited_once()
+    metrics_event = consumer.publish_event.await_args.args[0]
+    assert consumer.publish_event.await_args.args[1] == (
+        "maliev.geometryservice.v1.metrics.ready"
+    )
+    assert metrics_event.message.payload.metrics.bounding_box.x == 10.0
+    assert metrics_event.message.payload.metrics.volume_cm3 == 1.0
+    assert metrics_event.message.consumed_by == ["IntranetBff", "QuoteEngineBff"]
+
+    job = ArtifactProcessingJob(
+        file_id=file_id,
+        upload_id="upload-123",
+        storage_path=storage_path,
+        file_ext=".stl",
+        file_name="direct.stl",
+        file_size=1024,
+        correlation_id=None,
+        metrics=metrics_event.message.payload.metrics,
+        body_count=1,
+        body_infos=None,
+        temp_dir=tmp_path,
+        cad_glb_path=tmp_path / "direct.glb",
+        executor=None,
+        queued_at=0.0,
+    )
+    await consumer._publish_file_analyzed_event(job, "processed/direct.glb")
+    await consumer.publish_failure(
+        None,
+        file_id,
+        "SYSTEM_ERROR",
+        "internal diagnostic",
+        storage_path,
+    )
+
+    lifecycle_events = [call.args[0] for call in consumer.publish_event.await_args_list]
+    assert [call.args[1] for call in consumer.publish_event.await_args_list] == [
+        "maliev.geometryservice.v1.metrics.ready",
+        "maliev.geometryservice.v1.analysis.completed",
+        "maliev.geometryservice.v1.analysis.failed",
+    ]
+    correlation_ids = {event.correlation_id for event in lifecycle_events}
+    assert len(correlation_ids) == 1
+    resolved_correlation_id = correlation_ids.pop()
+    assert isinstance(resolved_correlation_id, UUID)
+    assert resolved_correlation_id == uuid5(
+        NAMESPACE_URL,
+        f"maliev.geometry:{file_id}\n{storage_path}",
+    )
+    for event in lifecycle_events:
+        assert event.message.correlation_id == resolved_correlation_id
+        assert event.message.consumed_by == ["IntranetBff", "QuoteEngineBff"]
+
+    recorded = [attributes for _, attributes in export_counter.calls]
+    assert {
+        "artifact": "glb",
+        "status": "skipped",
+        "execution_mode": "browser_primary",
+        "reason": "browser_viewer_source",
+        "file_extension": "stl",
+        "cache_status": "cold",
+    } in recorded
+    assert {
+        "artifact": "stl",
+        "status": "skipped",
+        "execution_mode": "browser_primary",
+        "reason": "browser_viewer_source",
+        "file_extension": "stl",
+        "cache_status": "cold",
+    } in recorded
+
+
+@pytest.mark.asyncio
+async def test_process_message_records_artifact_work_avoided_for_browser_primary_upload(
+    consumer: UploadConsumer,
+    mock_storage: AsyncMock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    message = _build_upload_message("direct.stl", _browser_primary_metadata())
+    message.process.return_value = _TrackedMessageProcess([])
+    mock_storage.download_file.return_value = io.BytesIO(b"fake-stl-content")
+    consumer.publish_event = AsyncMock()
+    consumer.validate_file_size_before_download = AsyncMock(return_value=True)
+    consumer._schedule_artifact_job_from_metrics = AsyncMock()  # type: ignore[method-assign]
+    avoided_work_counter = _RecordingCounter()
+    executed_work_counter = _RecordingCounter()
+    monkeypatch.setattr(
+        "src.consumers.upload_consumer._SERVER_WORK_AVOIDED_COUNTER",
+        avoided_work_counter,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        "src.consumers.upload_consumer._SERVER_WORK_EXECUTED_COUNTER",
+        executed_work_counter,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        "src.consumers.upload_consumer.get_cached_tessellation",
+        AsyncMock(return_value=None),
+    )
+
+    real_loop = asyncio.get_event_loop()
+
+    def fake_run_in_executor(executor, fn, *args):  # noqa: ANN001, ARG001
+        if fn.__name__ != "_compute_metrics_worker":
+            raise AssertionError(f"Unexpected executor function: {fn.__name__}")
+        future = real_loop.create_future()
+        future.set_result({**_FAKE_METRICS_RESULT, "cad_glb_bytes": None})
+        return future
+
+    mock_loop = MagicMock(wraps=real_loop)
+    mock_loop.run_in_executor = fake_run_in_executor
+
+    with patch(
+        "src.consumers.upload_consumer.asyncio.get_running_loop",
+        return_value=mock_loop,
+    ):
+        await consumer.process_message(message)
+
+    mock_storage.download_file.assert_awaited_once()
+    consumer._schedule_artifact_job_from_metrics.assert_awaited_once()
+
+    executed = [attributes for _, attributes in executed_work_counter.calls]
+    assert {
+        "operation": "eager_metrics",
+        "execution_mode": "browser_primary",
+        "reason": "browser_viewer_source",
+        "file_extension": "stl",
+    } in executed
+    recorded = [attributes for _, attributes in avoided_work_counter.calls]
+    assert {
+        "operation": "viewer_glb_export",
+        "execution_mode": "browser_primary",
+        "reason": "browser_viewer_source",
+        "file_extension": "stl",
+    } in recorded
+    assert {
+        "operation": "mesh_stl_export",
+        "execution_mode": "browser_primary",
+        "reason": "browser_viewer_source",
+        "file_extension": "stl",
+    } in recorded
+
+
+@pytest.mark.asyncio
+async def test_artifact_job_skips_secondary_artifacts_after_viewer_glb(
+    consumer: UploadConsumer,
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The exported viewer GLB is browser-renderable — clients generate
+    thumbnails/previews locally from it, so server previews must be skipped
+    (they would race with and overwrite the client-generated set)."""
+    counter = _RecordingCounter()
+    monkeypatch.setattr(
+        "src.consumers.upload_consumer._ARTIFACT_PIPELINE_COUNTER",
+        counter,
+    )
+    events: list[str] = []
+
+    artifact_temp_dir = tmp_path / "artifact"
+    artifact_temp_dir.mkdir()
+    job = ArtifactProcessingJob(
+        file_id=str(uuid4()),
+        upload_id=str(uuid4()),
+        storage_path="projects/test/model.step",
+        file_ext=".step",
+        file_name="model.step",
+        file_size=1024,
+        correlation_id=uuid4(),
+        metrics=MagicMock(),
+        body_count=1,
+        body_infos=None,
+        temp_dir=artifact_temp_dir,
+        cad_glb_path=artifact_temp_dir / "cad.glb",
+        executor=MagicMock(),
+        queued_at=0.0,
+    )
+
+    async def fake_publish_glb(job: ArtifactProcessingJob) -> bool:  # noqa: ARG001
+        events.append("glb")
+        return True
+
+    async def fake_publish_small_thumbnail(
+        job: ArtifactProcessingJob,  # noqa: ARG001
+    ) -> bool:
+        events.append("thumb")
+        return True
+
+    async def fake_publish_previews(job: ArtifactProcessingJob) -> bool:  # noqa: ARG001
+        events.append("previews")
+        return True
+
+    monkeypatch.setattr(consumer, "_publish_glb", fake_publish_glb)
+    monkeypatch.setattr(
+        consumer, "_publish_small_thumbnail", fake_publish_small_thumbnail
+    )
+    monkeypatch.setattr(consumer, "_publish_previews", fake_publish_previews)
+    consumer.publish_failure = AsyncMock()
+
+    await consumer._run_artifact_job(job)
+
+    assert events == ["glb"], "server previews must not run after a viewer GLB"
+    consumer.publish_failure.assert_not_called()
+    recorded = [attributes for _, attributes in counter.calls]
+    assert {
+        "operation": "viewer_glb_export",
+        "status": "scheduled",
+        "execution_mode": "server_artifact",
+        "reason": "browser_source_unavailable",
+        "file_extension": "step",
+    } in recorded
+    assert {
+        "operation": "secondary_artifacts",
+        "status": "skipped",
+        "execution_mode": "browser_primary",
+        "reason": "client_local_previews",
+        "file_extension": "step",
+    } in recorded
+
+
+@pytest.mark.asyncio
+async def test_artifact_job_records_server_work_executed_for_generated_artifacts(
+    consumer: UploadConsumer,
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    executed_work_counter = _RecordingCounter()
+    monkeypatch.setattr(
+        "src.consumers.upload_consumer._SERVER_WORK_EXECUTED_COUNTER",
+        executed_work_counter,
+        raising=False,
+    )
+    artifact_temp_dir = tmp_path / "artifact"
+    artifact_temp_dir.mkdir()
+    job = ArtifactProcessingJob(
+        file_id=str(uuid4()),
+        upload_id=str(uuid4()),
+        storage_path="projects/test/model.step",
+        file_ext=".step",
+        file_name="model.step",
+        file_size=1024,
+        correlation_id=uuid4(),
+        metrics=MagicMock(),
+        body_count=1,
+        body_infos=None,
+        temp_dir=artifact_temp_dir,
+        cad_glb_path=artifact_temp_dir / "cad.glb",
+        executor=MagicMock(),
+        queued_at=0.0,
+    )
+
+    async def fake_publish_glb(job: ArtifactProcessingJob) -> bool:  # noqa: ARG001
+        return True
+
+    async def fake_publish_small_thumbnail(
+        job: ArtifactProcessingJob,  # noqa: ARG001
+    ) -> bool:
+        return True
+
+    async def fake_publish_previews(job: ArtifactProcessingJob) -> bool:  # noqa: ARG001
+        return True
+
+    monkeypatch.setattr(consumer, "_publish_glb", fake_publish_glb)
+    monkeypatch.setattr(
+        consumer,
+        "_publish_small_thumbnail",
+        fake_publish_small_thumbnail,
+    )
+    monkeypatch.setattr(consumer, "_publish_previews", fake_publish_previews)
+
+    await consumer._run_artifact_job(job)
+
+    recorded = [attributes for _, attributes in executed_work_counter.calls]
+    assert {
+        "operation": "viewer_glb_export",
+        "execution_mode": "server_artifact",
+        "reason": "browser_source_unavailable",
+        "file_extension": "step",
+    } in recorded
+    # Preview images are generated client-side from the viewer GLB —
+    # no server preview work may be recorded.
+    assert all(
+        attributes.get("operation") != "preview_images" for attributes in recorded
+    )
+
+
+def test_browser_viewer_source_extension_allows_browser_runtime_mesh_sources() -> None:
+    assert _browser_viewer_source_extension("stl") == ".stl"
+    assert _browser_viewer_source_extension(".OBJ") == ".obj"
+    assert _browser_viewer_source_extension(".3MF") == ".3mf"
+    assert _browser_viewer_source_extension(".glb") == ".glb"
+    assert _browser_viewer_source_extension(".gltf") == ".gltf"
+    assert _browser_viewer_source_extension(".step") is None
+
+
+@pytest.mark.asyncio
+async def test_process_message_computes_metrics_for_browser_primary_gltf_upload(
+    consumer: UploadConsumer,
+    mock_storage: AsyncMock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    message = _build_upload_message("direct.gltf", _browser_primary_metadata())
+    message.process.return_value = _TrackedMessageProcess([])
+    mock_storage.download_file.return_value = io.BytesIO(b"fake-gltf-content")
+    consumer.publish_event = AsyncMock()
+    consumer.validate_file_size_before_download = AsyncMock(return_value=True)
+    consumer._schedule_artifact_job_from_metrics = AsyncMock()  # type: ignore[method-assign]
+    avoided_work_counter = _RecordingCounter()
+    monkeypatch.setattr(
+        "src.consumers.upload_consumer._SERVER_WORK_AVOIDED_COUNTER",
+        avoided_work_counter,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        "src.consumers.upload_consumer.get_cached_tessellation",
+        AsyncMock(return_value=None),
+    )
+
+    real_loop = asyncio.get_event_loop()
+
+    def fake_run_in_executor(executor, fn, *args):  # noqa: ANN001, ARG001
+        if fn.__name__ != "_compute_metrics_worker":
+            raise AssertionError(f"Unexpected executor function: {fn.__name__}")
+        future = real_loop.create_future()
+        future.set_result({**_FAKE_METRICS_RESULT, "cad_glb_bytes": None})
+        return future
+
+    mock_loop = MagicMock(wraps=real_loop)
+    mock_loop.run_in_executor = fake_run_in_executor
+
+    with patch(
+        "src.consumers.upload_consumer.asyncio.get_running_loop",
+        return_value=mock_loop,
+    ):
+        await consumer.process_message(message)
+
+    mock_storage.download_file.assert_awaited_once()
+    consumer._schedule_artifact_job_from_metrics.assert_awaited_once()
+    metrics_event = consumer.publish_event.await_args.args[0]
+    assert metrics_event.message.payload.metrics.bounding_box.x == 10.0
+
+    recorded = [attributes for _, attributes in avoided_work_counter.calls]
+    assert {
+        "operation": "viewer_glb_export",
+        "execution_mode": "browser_primary",
+        "reason": "browser_viewer_source",
+        "file_extension": "gltf",
+    } in recorded
+
+
+@pytest.mark.asyncio
+async def test_process_message_computes_metrics_for_browser_primary_3mf_upload(
+    consumer: UploadConsumer,
+    mock_storage: AsyncMock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    message = _build_upload_message("direct.3mf", _browser_primary_metadata())
+    message.process.return_value = _TrackedMessageProcess([])
+    mock_storage.download_file.return_value = io.BytesIO(b"fake-3mf-content")
+    consumer.publish_event = AsyncMock()
+    consumer.validate_file_size_before_download = AsyncMock(return_value=True)
+    consumer._schedule_artifact_job_from_metrics = AsyncMock()  # type: ignore[method-assign]
+    avoided_work_counter = _RecordingCounter()
+    monkeypatch.setattr(
+        "src.consumers.upload_consumer._SERVER_WORK_AVOIDED_COUNTER",
+        avoided_work_counter,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        "src.consumers.upload_consumer.get_cached_tessellation",
+        AsyncMock(return_value=None),
+    )
+
+    real_loop = asyncio.get_event_loop()
+
+    def fake_run_in_executor(executor, fn, *args):  # noqa: ANN001, ARG001
+        if fn.__name__ != "_compute_metrics_worker":
+            raise AssertionError(f"Unexpected executor function: {fn.__name__}")
+        future = real_loop.create_future()
+        future.set_result({**_FAKE_METRICS_RESULT, "cad_glb_bytes": None})
+        return future
+
+    mock_loop = MagicMock(wraps=real_loop)
+    mock_loop.run_in_executor = fake_run_in_executor
+
+    with patch(
+        "src.consumers.upload_consumer.asyncio.get_running_loop",
+        return_value=mock_loop,
+    ):
+        await consumer.process_message(message)
+
+    mock_storage.download_file.assert_awaited_once()
+    consumer._schedule_artifact_job_from_metrics.assert_awaited_once()
+    metrics_event = consumer.publish_event.await_args.args[0]
+    assert metrics_event.message.payload.metrics.bounding_box.x == 10.0
+
+    recorded = [attributes for _, attributes in avoided_work_counter.calls]
+    assert {
+        "operation": "viewer_glb_export",
+        "execution_mode": "browser_primary",
+        "reason": "browser_viewer_source",
+        "file_extension": "3mf",
+    } in recorded
+
+
+@pytest.mark.asyncio
+async def test_artifact_job_skips_glb_export_for_browser_loadable_mesh(
+    consumer: UploadConsumer,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    counter = _RecordingCounter()
+    monkeypatch.setattr(
+        "src.consumers.upload_consumer._ARTIFACT_PIPELINE_COUNTER",
+        counter,
+    )
+    artifact_temp_dir = tmp_path / "artifact"
+    artifact_temp_dir.mkdir()
+    job = ArtifactProcessingJob(
+        file_id=str(uuid4()),
+        upload_id=str(uuid4()),
+        storage_path="projects/test/model.stl",
+        file_ext=".stl",
+        file_name="model.stl",
+        file_size=1024,
+        correlation_id=uuid4(),
+        metrics=GeometryMetrics(
+            volumeCm3=1.0,
+            supportVolumeCm3=0.0,
+            surfaceAreaCm2=6.0,
+            boundingBox=BoundingBox(x=1.0, y=1.0, z=1.0),
+            isManifold=True,
+            triangleCount=12,
+            eulerNumber=2,
+        ),
+        body_count=1,
+        body_infos=None,
+        temp_dir=artifact_temp_dir,
+        cad_glb_path=artifact_temp_dir / "cad.glb",
+        executor=None,
+        queued_at=0.0,
+    )
+    consumer._publish_glb = AsyncMock(return_value=False)  # type: ignore[method-assign]
+    consumer._publish_small_thumbnail = AsyncMock(  # type: ignore[method-assign]
+        return_value=True
+    )
+    consumer._publish_previews = AsyncMock(return_value=True)  # type: ignore[method-assign]
+    consumer.publish_failure = AsyncMock()
+    consumer.publish_event = AsyncMock()
+
+    await consumer._run_artifact_job(job)
+
+    consumer._publish_glb.assert_not_awaited()
+    consumer._publish_small_thumbnail.assert_not_awaited()
+    consumer._publish_previews.assert_not_awaited()
+    consumer.publish_failure.assert_not_awaited()
+    consumer.publish_event.assert_awaited_once()
+    completed_event = consumer.publish_event.await_args.args[0]
+    assert completed_event.message.payload.glb_storage_path is None
+    assert completed_event.message.payload.viewer_storage_path == (
+        "projects/test/model.stl"
+    )
+    assert completed_event.message.payload.viewer_file_extension == ".stl"
+    recorded = [attributes for _, attributes in counter.calls]
+    assert {
+        "operation": "viewer_source",
+        "status": "published",
+        "execution_mode": "browser_primary",
+        "reason": "direct_source",
+        "file_extension": "stl",
+    } in recorded
+    assert {
+        "operation": "secondary_artifacts",
+        "status": "skipped",
+        "execution_mode": "browser_primary",
+        "reason": "browser_viewer_source",
+        "file_extension": "stl",
+    } in recorded
+
+
+@pytest.mark.asyncio
+async def test_schedule_artifact_job_publishes_browser_viewer_source_without_glb_bytes(
+    consumer: UploadConsumer,
+) -> None:
+    metrics_result = {**_FAKE_METRICS_RESULT, "cad_glb_bytes": None}
+    consumer.publish_event = AsyncMock()
+    consumer.publish_failure = AsyncMock()
+
+    await consumer._schedule_artifact_job_from_metrics(
+        metrics_result=metrics_result,
+        metrics=GeometryMetrics(
+            volumeCm3=1.0,
+            supportVolumeCm3=0.0,
+            surfaceAreaCm2=6.0,
+            boundingBox=BoundingBox(x=1.0, y=1.0, z=1.0),
+            isManifold=True,
+            triangleCount=12,
+            eulerNumber=2,
+        ),
+        file_id=str(uuid4()),
+        upload_id=str(uuid4()),
+        storage_path="projects/test/model.stl",
+        file_ext=".stl",
+        file_name="model.stl",
+        file_size=1024,
+        correlation_id=uuid4(),
+        body_count=1,
+        body_infos=None,
+    )
+    await consumer.wait_for_artifact_tasks()
+
+    consumer.publish_failure.assert_not_awaited()
+    consumer.publish_event.assert_awaited_once()
+    completed_event = consumer.publish_event.await_args.args[0]
+    assert completed_event.message.payload.glb_storage_path is None
+    assert completed_event.message.payload.viewer_storage_path == (
+        "projects/test/model.stl"
+    )
+    assert completed_event.message.payload.viewer_file_extension == ".stl"
+
+
+@pytest.mark.asyncio
+async def test_schedule_artifact_job_publishes_browser_viewer_source_directly(
+    consumer: UploadConsumer,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    metrics_result = {**_FAKE_METRICS_RESULT, "cad_glb_bytes": b"cached-glb"}
+    consumer.publish_event = AsyncMock()
+    consumer.publish_failure = AsyncMock()
+
+    def fail_mkdtemp(*args, **kwargs):  # noqa: ANN002, ANN003, ARG001
+        raise AssertionError("browser-viewable uploads should not stage artifacts")
+
+    monkeypatch.setattr(
+        "src.consumers.upload_consumer.tempfile.mkdtemp",
+        fail_mkdtemp,
+    )
+
+    await consumer._schedule_artifact_job_from_metrics(
+        metrics_result=metrics_result,
+        metrics=GeometryMetrics(
+            volumeCm3=1.0,
+            supportVolumeCm3=0.0,
+            surfaceAreaCm2=6.0,
+            boundingBox=BoundingBox(x=1.0, y=1.0, z=1.0),
+            isManifold=True,
+            triangleCount=12,
+            eulerNumber=2,
+        ),
+        file_id=str(uuid4()),
+        upload_id=str(uuid4()),
+        storage_path="projects/test/model.stl",
+        file_ext=".stl",
+        file_name="model.stl",
+        file_size=1024,
+        correlation_id=uuid4(),
+        body_count=1,
+        body_infos=None,
+    )
+
+    consumer.publish_failure.assert_not_awaited()
+    consumer.publish_event.assert_awaited_once()
+    completed_event = consumer.publish_event.await_args.args[0]
+    payload = completed_event.message.payload
+    assert completed_event.message.consumed_by == ["IntranetBff", "QuoteEngineBff"]
+    assert payload.viewer_storage_path == "projects/test/model.stl"
+    assert payload.viewer_file_extension == ".stl"
+    assert payload.glb_storage_path is None
+    serialized_payload = payload.model_dump(by_alias=True)
+    assert set(serialized_payload) == {
+        "fileId",
+        "metrics",
+        "processedAt",
+        "glbStoragePath",
+        "viewerStoragePath",
+        "viewerFileExtension",
+        "thumbnailStoragePath",
+        "storagePath",
+        "dfmReport",
+        "bodyCount",
+        "bodies",
+    }
+
+
+@pytest.mark.asyncio
+async def test_publish_glb_timeout_uses_source_glb_fallback(
+    consumer: UploadConsumer,
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_glb = b"source-glb"
+    artifact_temp_dir = tmp_path / "artifact"
+    artifact_temp_dir.mkdir()
+    cad_glb_path = artifact_temp_dir / "cad.glb"
+    cad_glb_path.write_bytes(source_glb)
+    job = ArtifactProcessingJob(
+        file_id=str(uuid4()),
+        upload_id=str(uuid4()),
+        storage_path="projects/test/model.step",
+        file_ext=".step",
+        file_name="model.step",
+        file_size=1024,
+        correlation_id=uuid4(),
+        metrics=GeometryMetrics(
+            volumeCm3=1.0,
+            supportVolumeCm3=0.0,
+            surfaceAreaCm2=6.0,
+            boundingBox=BoundingBox(x=1.0, y=1.0, z=1.0),
+            isManifold=True,
+            triangleCount=12,
+            eulerNumber=2,
+        ),
+        body_count=1,
+        body_infos=None,
+        temp_dir=artifact_temp_dir,
+        cad_glb_path=cad_glb_path,
+        executor=None,
+        queued_at=0.0,
+    )
+    consumer.upload_artifact = AsyncMock(return_value=True)
+    consumer.publish_event = AsyncMock()
+
+    async def timeout_wait_for(awaitable, timeout):  # noqa: ANN001, ARG001
+        awaitable.cancel()
+        raise asyncio.TimeoutError
+
+    monkeypatch.setattr(
+        "src.consumers.upload_consumer.asyncio.wait_for",
+        timeout_wait_for,
+    )
+
+    result = await consumer._publish_glb(job)
+
+    assert result is True
+    consumer.upload_artifact.assert_awaited_once_with(
+        source_glb,
+        "projects/test/model.step_viewer.glb",
+        "model/gltf-binary",
+        job.upload_id,
+    )
+    completed_event = consumer.publish_event.await_args.args[0]
+    assert consumer.publish_event.await_args.args[1] == (
+        "maliev.geometryservice.v1.analysis.completed"
+    )
+    assert completed_event.message.payload.file_id == job.file_id
+    assert completed_event.message.payload.glb_storage_path == (
+        "projects/test/model.step_viewer.glb"
+    )
+    assert completed_event.message.payload.viewer_storage_path == (
+        "projects/test/model.step_viewer.glb"
+    )
+    assert completed_event.message.payload.viewer_file_extension == ".glb"
+
+
+@pytest.mark.asyncio
+async def test_publish_previews_includes_small_thumbnail_path(
+    consumer: UploadConsumer,
+    tmp_path,
+) -> None:
+    artifact_temp_dir = tmp_path / "artifact"
+    artifact_temp_dir.mkdir()
+    cad_glb_path = artifact_temp_dir / "cad.glb"
+    cad_glb_path.write_bytes(b"source-glb")
+    job = ArtifactProcessingJob(
+        file_id=str(uuid4()),
+        upload_id=str(uuid4()),
+        storage_path="projects/test/model.step",
+        file_ext=".step",
+        file_name="model.step",
+        file_size=1024,
+        correlation_id=uuid4(),
+        metrics=MagicMock(),
+        body_count=1,
+        body_infos=None,
+        temp_dir=artifact_temp_dir,
+        cad_glb_path=cad_glb_path,
+        executor=None,
+        queued_at=0.0,
+    )
+    consumer.upload_artifact = AsyncMock(return_value=True)
+    consumer.publish_event = AsyncMock()
+    real_loop = asyncio.get_event_loop()
+
+    def fake_run_in_executor(executor, fn, *args):  # noqa: ANN001, ARG001
+        assert fn.__name__ == "_render_preview_worker"
+        future = real_loop.create_future()
+        future.set_result(_FAKE_ARTIFACTS_RESULT["preview_images"])
+        return future
+
+    mock_loop = MagicMock(wraps=real_loop)
+    mock_loop.run_in_executor = fake_run_in_executor
+
+    with patch(
+        "src.consumers.upload_consumer.asyncio.get_running_loop",
+        return_value=mock_loop,
+    ):
+        result = await consumer._publish_previews(job)
+
+    assert result is True
+    uploaded_paths = [call.args[1] for call in consumer.upload_artifact.await_args_list]
+    assert "projects/test/model.step_thumbnail_small.webp" in uploaded_paths
+
+    preview_event = consumer.publish_event.await_args.args[0]
+    preview_images = preview_event.message.payload.preview_images
+    assert preview_images.thumbnail_small == (
+        "projects/test/model.step_thumbnail_small.webp"
+    )
+    assert preview_images.thumbnail_large == (
+        "projects/test/model.step_thumbnail_large.webp"
+    )
+
+
+@pytest.mark.asyncio
+async def test_process_message_success(consumer, mock_storage, mock_processor):  # noqa: ARG001
     # Setup
     correlation_id = uuid4()
     file_id = str(uuid4())
@@ -36,19 +1205,23 @@ async def test_process_message_success(consumer, mock_storage, mock_processor):
         uploadId=upload_id,
         fileId=file_id,
         serviceId="test-service",
-        fileName="test.stl",
-        storagePath="test/test.stl",
+        fileName="test.step",
+        storagePath="test/test.step",
         downloadUrl="http://signed-url",
         contentType="model/stl",
         fileSize=1024,
-        uploadedAt=datetime.now(UTC),
+        uploadedAt=datetime.now(timezone.utc),
     )
 
     event = FileUploadedEvent(
         messageId=uuid4(),
         correlationId=correlation_id,
-        message=inner_msg,
-        messageType=[
+        message=FileUploadedMessage(
+            messageId=uuid4(),
+            messageName="UploadCompleted",
+            payload=inner_msg,
+        ),
+        message_type=[
             "urn:message:Maliev.UploadService.Api.Events:UploadCompletedEvent"
         ],
     )
@@ -57,29 +1230,201 @@ async def test_process_message_success(consumer, mock_storage, mock_processor):
     message.body = event.model_dump_json(by_alias=True).encode()
     message.process.return_value.__aenter__ = AsyncMock()
 
-    mock_storage.download_file.return_value = io.BytesIO(b"content")
-    mock_processor.analyze_async.return_value = GeometryMetrics(
-        volume_cm3=1.0,
-        support_volume_cm3=0.5,
-        surface_area_cm2=6.0,
-        bounding_box=BoundingBox(x=10, y=10, z=10),
-        is_manifold=True,
-        triangle_count=12,
-        euler_number=2,
+    mock_storage.download_file.return_value = io.BytesIO(b"fake-stl-content")
+    consumer.publish_event = AsyncMock()
+    consumer.upload_artifact = AsyncMock(return_value=True)
+    consumer.validate_file_size_before_download = AsyncMock(return_value=True)
+    consumer._token_provider.get_token = MagicMock(return_value="fake-jwt-token")
+
+    # Build a mock event loop that returns predetermined results from run_in_executor.
+    # Phase 1 returns metrics dict; Phase 2 returns artifacts dict.
+    run_in_executor_call_count = 0
+
+    real_loop = asyncio.get_event_loop()
+
+    async def _coro_phase1():
+        return _FAKE_METRICS_RESULT
+
+    def fake_run_in_executor(executor, fn, *args):  # noqa: ARG001
+        nonlocal run_in_executor_call_count
+        run_in_executor_call_count += 1
+        if fn.__name__ == "_compute_metrics_worker":
+            return asyncio.ensure_future(_coro_phase1())
+        if fn.__name__ == "_render_thumbnail_worker":
+            future = real_loop.create_future()
+            future.set_result(b"thumb-small")
+            return future
+        if fn.__name__ == "_export_glb_from_paths":
+            future = real_loop.create_future()
+            future.set_result(b"glb-content")
+            return future
+        if fn.__name__ == "_render_preview_worker":
+            future = real_loop.create_future()
+            future.set_result(_FAKE_ARTIFACTS_RESULT["preview_images"])
+            return future
+        raise AssertionError(f"Unexpected executor function: {fn.__name__}")
+
+    mock_loop = MagicMock(wraps=real_loop)
+    mock_loop.run_in_executor = fake_run_in_executor
+
+    with patch(
+        "src.consumers.upload_consumer.asyncio.get_running_loop", return_value=mock_loop
+    ):
+        await consumer.process_message(message)
+        await consumer.wait_for_artifact_tasks()
+
+    # Assert at least one publish_event call happened
+    assert consumer.publish_event.called
+
+    routing_keys = [call[0][1] for call in consumer.publish_event.call_args_list]
+
+    # metrics.ready must be published (Phase 1)
+    assert "maliev.geometryservice.v1.metrics.ready" in routing_keys
+    # dfm.ready must NOT be published during upload (lazy DFM)
+    assert "maliev.geometryservice.v1.dfm.ready" not in routing_keys
+    # analysis.completed must be published
+    assert "maliev.geometryservice.v1.analysis.completed" in routing_keys
+
+    # Verify correlation_id propagation on the analysis.completed event
+    completed_call = next(
+        c
+        for c in consumer.publish_event.call_args_list
+        if c[0][1] == "maliev.geometryservice.v1.analysis.completed"
+    )
+    success_event = completed_call[0][0]
+    assert success_event.correlation_id == correlation_id
+    assert success_event.message.payload.metrics.volume_cm3 == 1.0
+
+
+@pytest.mark.asyncio
+async def test_process_message_with_deferred_sla_report_does_not_crash(
+    consumer,
+    mock_storage,
+    mock_processor,  # noqa: ARG001
+):
+    """Regression: deferred SLA reports (twoPhaseDeferred=True) must not cause
+    pydantic ValidationError in the consumer (missing resinTrappingRisk etc.)."""
+    correlation_id = uuid4()
+    file_id = str(uuid4())
+    upload_id = str(uuid4())
+
+    inner_msg = UploadCompletedMessage(
+        uploadId=upload_id,
+        fileId=file_id,
+        serviceId="test-service",
+        fileName="test.obj",
+        storagePath="test/test.obj",
+        downloadUrl="http://signed-url",
+        contentType="model/obj",
+        fileSize=1024,
+        uploadedAt=datetime.now(timezone.utc),
+    )
+    event = FileUploadedEvent(
+        messageId=uuid4(),
+        correlationId=correlation_id,
+        message=FileUploadedMessage(
+            messageId=uuid4(),
+            messageName="UploadCompleted",
+            payload=inner_msg,
+        ),
+        message_type=[
+            "urn:message:Maliev.UploadService.Api.Events:UploadCompletedEvent"
+        ],
     )
 
+    # Deferred SLA/FDM reports — missing SLA-specific required fields — the
+    # consumer must skip them rather than calling model_validate and crashing.
+    _DEFERRED_METRICS = {  # noqa: N806
+        **_FAKE_METRICS_RESULT,
+        "dfmReports": {
+            "FDM": {
+                "reportType": "FDM",
+                "thinWallCount": 0,
+                "thinWallRegions": [],
+                "overhangFaceCount": 0,
+                "overhangAreaCm2": 0.0,
+                "overhangRegions": [],
+                "supportRequired": False,
+                "estimatedSupportVolumeCm3": None,
+                "smallDetailCount": 0,
+                "issues": [],
+                "twoPhaseDeferred": True,
+            },
+            "SLA": {
+                "reportType": "SLA",
+                "thinWallCount": 0,
+                "thinWallRegions": [],
+                "overhangFaceCount": 0,
+                "overhangAreaCm2": 0.0,
+                "overhangRegions": [],
+                "supportRequired": False,
+                "estimatedSupportVolumeCm3": None,
+                "smallDetailCount": 0,
+                "issues": [],
+                "twoPhaseDeferred": True,
+                # NOTE: SLA-specific required fields intentionally omitted here
+                # to simulate the pre-fix deferred report. Consumer must skip it.
+            },
+        },
+    }
+
+    message = MagicMock()
+    message.body = event.model_dump_json(by_alias=True).encode()
+    message.process.return_value.__aenter__ = AsyncMock()
+
+    mock_storage.download_file.return_value = io.BytesIO(b"fake-obj-content")
     consumer.publish_event = AsyncMock()
+    consumer.upload_artifact = AsyncMock(return_value=True)
+    consumer.validate_file_size_before_download = AsyncMock(return_value=True)
+    consumer._token_provider.get_token = MagicMock(return_value="fake-jwt-token")
 
-    # Execute
-    await consumer.process_message(message)
+    run_in_executor_call_count = 0
+    real_loop = asyncio.get_event_loop()
 
-    # Assert
-    assert consumer.publish_event.called
-    routing_key = consumer.publish_event.call_args[0][1]
-    assert routing_key == "maliev.geometryservice.v1.analysis.completed"
-    success_event = consumer.publish_event.call_args[0][0]
-    assert success_event.correlation_id == correlation_id
-    assert success_event.message.metrics.volume_cm3 == 1.0
+    async def _coro_phase1():
+        return _DEFERRED_METRICS
+
+    def fake_run_in_executor(executor, fn, *args):  # noqa: ARG001
+        nonlocal run_in_executor_call_count
+        run_in_executor_call_count += 1
+        if fn.__name__ == "_compute_metrics_worker":
+            return asyncio.ensure_future(_coro_phase1())
+        if fn.__name__ == "_render_thumbnail_worker":
+            future = real_loop.create_future()
+            future.set_result(b"thumb-small")
+            return future
+        if fn.__name__ == "_export_glb_from_paths":
+            future = real_loop.create_future()
+            future.set_result(b"glb-content")
+            return future
+        if fn.__name__ == "_render_preview_worker":
+            future = real_loop.create_future()
+            future.set_result(_FAKE_ARTIFACTS_RESULT["preview_images"])
+            return future
+        raise AssertionError(f"Unexpected executor function: {fn.__name__}")
+
+    mock_loop = MagicMock(wraps=real_loop)
+    mock_loop.run_in_executor = fake_run_in_executor
+
+    with patch(
+        "src.consumers.upload_consumer.asyncio.get_running_loop", return_value=mock_loop
+    ):
+        # Must not raise pydantic ValidationError
+        await consumer.process_message(message)
+        await consumer.wait_for_artifact_tasks()
+
+    # DFM event must NOT be published during upload (lazy DFM)
+    routing_keys = [call[0][1] for call in consumer.publish_event.call_args_list]
+    assert "maliev.geometryservice.v1.dfm.ready" not in routing_keys
+
+    # analysis.completed must still be published with dfm_report=None
+    completed_call = next(
+        c
+        for c in consumer.publish_event.call_args_list
+        if c[0][1] == "maliev.geometryservice.v1.analysis.completed"
+    )
+    completed_event = completed_call[0][0]
+    assert completed_event.message.payload.dfm_report is None
 
 
 @pytest.mark.asyncio
@@ -88,15 +1433,21 @@ async def test_process_message_failure(consumer, mock_storage):
     inner_msg = UploadCompletedMessage(
         uploadId=str(uuid4()),
         serviceId="test-service",
-        fileName="test.stl",
-        storagePath="test/test.stl",
+        fileName="test.step",
+        storagePath="test/test.step",
         downloadUrl="http://signed-url",
         contentType="model/stl",
         fileSize=1024,
-        uploadedAt=datetime.now(UTC),
+        uploadedAt=datetime.now(timezone.utc),
     )
     event = FileUploadedEvent(
-        messageId=uuid4(), correlationId=uuid4(), message=inner_msg
+        messageId=uuid4(),
+        correlationId=uuid4(),
+        message=FileUploadedMessage(
+            messageId=uuid4(),
+            messageName="UploadCompleted",
+            payload=inner_msg,
+        ),
     )
 
     message = MagicMock()
@@ -105,6 +1456,8 @@ async def test_process_message_failure(consumer, mock_storage):
 
     mock_storage.download_file.side_effect = Exception("Download failed")
     consumer.publish_event = AsyncMock()
+    consumer.validate_file_size_before_download = AsyncMock(return_value=True)
+    consumer._token_provider.get_token = MagicMock(return_value="fake-jwt-token")
 
     # Execute
     await consumer.process_message(message)

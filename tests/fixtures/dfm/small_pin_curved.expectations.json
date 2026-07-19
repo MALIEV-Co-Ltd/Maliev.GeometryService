@@ -1,0 +1,23 @@
+{
+  "description": "20 mm diameter disc with a 0.6 mm Ø × 4 mm pin on top. The pin diameter is below FDM (3 mm), SLS (0.8 mm), MJF (0.8 mm), and SLA (0.5 mm) pin minimums and below the small-feature threshold for all printing processes — pin and small_feature must fire.",
+  "process_expectations": {
+    "FDM": {
+      "must_have": {
+        "pin": { "count_min": 1, "count_max": 3, "severity_min": "warning" },
+        "small_feature": { "count_min": 1, "count_max": 3, "severity_min": "warning" }
+      }
+    },
+    "SLS": {
+      "must_have": {
+        "pin": { "count_min": 1, "count_max": 3, "severity_min": "warning" },
+        "small_feature": { "count_min": 1, "count_max": 3, "severity_min": "warning" }
+      }
+    },
+    "MJF": {
+      "must_have": {
+        "pin": { "count_min": 1, "count_max": 3, "severity_min": "warning" },
+        "small_feature": { "count_min": 1, "count_max": 3, "severity_min": "warning" }
+      }
+    }
+  }
+}

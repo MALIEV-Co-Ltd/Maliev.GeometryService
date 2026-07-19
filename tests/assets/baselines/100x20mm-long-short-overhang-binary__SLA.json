@@ -1,0 +1,13 @@
+{
+  "analysis_time_seconds": 0.006,
+  "estimatedSupportVolumeCm3": null,
+  "issues": [],
+  "overhangAreaCm2": 0.0,
+  "overhangFaceCount": 0,
+  "overhangRegions": [],
+  "reportType": "SLA",
+  "smallDetailCount": 0,
+  "supportRequired": false,
+  "thinWallCount": 0,
+  "thinWallRegions": []
+}

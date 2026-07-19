@@ -1,4 +1,4 @@
-name: PR Validation
+name: PR validation
 
 on:
   pull_request:
@@ -7,38 +7,33 @@ on:
       - staging
       - main
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  validate:
-    runs-on: ubuntu-latest
-
+  real-browser-worker-smoke:
+    name: Real browser worker smoke
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v7
-
-      - name: Set up Python
-        uses: actions/setup-python@v6
+      - name: Checkout source
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
-          python-version: "3.11"
+          persist-credentials: false
 
-      - name: Install Poetry
-        uses: snok/install-poetry@v1
-        with:
-          virtualenvs-create: true
-          virtualenvs-in-project: true
-
-      - name: Install system dependencies
+      - name: Run real Chrome Web Worker smoke
+        env:
+          MALIEV_BROWSER_PATH: /usr/bin/google-chrome
         run: |
-          sudo apt-get update
-          sudo apt-get install -y gmsh libglu1-mesa libxcursor1 libxinerama1 libxft2 libfltk1.3
+          set -euo pipefail
+          test -x "${MALIEV_BROWSER_PATH}"
+          "${MALIEV_BROWSER_PATH}" --version
+          node --version
+          node --test tests/client-runtime-browser-smoke.test.mjs
 
-      - name: Install dependencies
-        run: poetry install
-
-      - name: Lint with Ruff
-        run: poetry run ruff check .
-
-      - name: Type check with Mypy
-        run: poetry run mypy src
-
-      - name: Run tests
-        run: poetry run pytest
+  validate:
+    uses: ./.github/workflows/_validate.yml

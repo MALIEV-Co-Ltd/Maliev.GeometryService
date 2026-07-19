@@ -1,0 +1,15 @@
+{
+  "description": "Block with a 12 × 12 × 8 mm rectangular pocket whose internal corners are exact 90° (zero internal radius). Under coarse cascadio tessellation the CNC sharp-corner detector currently misses this; fixture is kept as a regression target for B-rep-driven sharp-corner detection in Stage 5. Asserts no spurious printing-side warnings.",
+  "process_expectations": {
+    "FDM":      { "must_not_have": ["thin_wall", "small_feature"] },
+    "SLA":      { "must_not_have": ["thin_wall", "small_feature"] },
+    "SLS":      { "must_not_have": ["thin_wall"] },
+    "MJF":      { "must_not_have": ["thin_wall"] },
+    "CNC_MILL": { "must_not_have": ["thin_wall"] },
+    "CNC_TURN": {
+      "must_have": {
+        "not_turnable": { "count_min": 1, "count_max": 1, "severity_min": "error" }
+      }
+    }
+  }
+}

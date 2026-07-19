@@ -1,0 +1,15 @@
+{
+  "description": "Wedge with a 60°-from-vertical overhang surface (normal Z = -0.866). FDM at the 45° threshold must flag this; SLA-without-support uses a different (looser) overhang model and may not fire.",
+  "process_expectations": {
+    "FDM": {
+      "must_have": {
+        "overhang": { "count_min": 1, "count_max": 3, "severity_min": "warning" }
+      }
+    },
+    "SLA": { "must_not_have": [] },
+    "SLS": { "must_not_have": [] },
+    "MJF": { "must_not_have": [] },
+    "CNC_MILL": { "must_not_have": ["thin_wall"] },
+    "CNC_TURN": { "must_not_have": [] }
+  }
+}
