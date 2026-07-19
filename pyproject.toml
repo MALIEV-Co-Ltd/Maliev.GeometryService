@@ -9,8 +9,8 @@ packages = [{include = "src"}]
 [tool.poetry.dependencies]
 python = "^3.10"
 cadquery = "^2.4"
-fastapi = "^0.115.14"
-uvicorn = {extras = ["standard"], version = "^0.34.3"}
+fastapi = ">=0.115.14,<0.140.0"
+uvicorn = {extras = ["standard"], version = ">=0.34.3,<0.52.0"}
 scalar-fastapi = "^1.5.0"
 trimesh = {extras = ["all"], version = "^4.10.1"}
 numpy = "^2.2.0"
@@ -33,7 +33,7 @@ lxml = "^6.0.2"
 pre-commit = "^4.5.1"
 boto3 = "^1.36.0"
 aioboto3 = "^13.0.0"
-pyvista = "^0.44.0"
+pyvista = ">=0.44,<0.49"
 Pillow = "^11.1.0"
 
 [tool.poetry.group.dev.dependencies]
@@ -42,11 +42,11 @@ pytest-asyncio = "^0.25.3"
 pytest-xdist = "^3.6.0"
 pytest-timeout = "^2.3.1"
 mypy = "^1.19.1"
-ruff = "^0.8.6"
+ruff = ">=0.8.6,<0.16.0"
 black = "^24.10.0"
 types-aiofiles = "^25.1.0.20251011"
 pre-commit = "^4.5.1"
-respx = "^0.22.0"
+respx = ">=0.22,<0.24"
 
 [tool.pytest.ini_options]
 # Sequential by default to prevent nested process-pool OOM.
