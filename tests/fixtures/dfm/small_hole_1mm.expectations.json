@@ -1,0 +1,25 @@
+{
+  "description": "20 mm cube with three through-holes of diameter 1.0, 1.5, 2.5 mm. Edge-based hole-depth detection should report each hole's depth as ~20 mm. The 1.0 mm hole is below FDM/SLA/SLS minimum hole diameters and below the small-feature threshold, so multiple categories fire on additive processes. CNC_MILL warns on cavity_depth (long stickout for 1 mm tools).",
+  "process_expectations": {
+    "FDM": {
+      "must_have": {
+        "hole": { "count_min": 1, "count_max": 3, "severity_min": "warning" }
+      }
+    },
+    "SLS": {
+      "must_have": {
+        "hole": { "count_min": 1, "count_max": 3, "severity_min": "warning" }
+      }
+    },
+    "MJF": {
+      "must_have": {
+        "hole": { "count_min": 1, "count_max": 3, "severity_min": "warning" }
+      }
+    },
+    "CNC_MILL": {
+      "must_have": {
+        "cavity_depth": { "count_min": 1, "count_max": 5, "severity_min": "warning" }
+      }
+    }
+  }
+}

@@ -97,7 +97,7 @@ As a CAD Engineer, I want to upload native STEP (.stp/.step) files directly with
 - **FR-001**: System MUST subscribe to file upload events from the messaging system.
 - **FR-002**: System MUST download the specified 3D file from blob storage using the provided location.
 - **FR-002.1**: System MUST delete the local temporary file immediately after analysis completion (success or failure) to prevent disk exhaustion.
-- **FR-003**: System MUST support processing of `.stl`, `.obj`, `.step`, and `.stp` file formats.
+- **FR-003**: System MUST support processing of `.stl`, `.obj`, `.step`, `.stp`, `.3mf`, `.igs`, and `.iges` file formats.
 - **FR-003.1**: System MUST reject files containing multiple disjoint bodies (e.g., assemblies) with a specific error.
 - **FR-003.2**: System MUST assume Millimeters (mm) as the base unit for all unitless file formats (STL, OBJ).
 - **FR-003.3**: System MUST reject files larger than 200 MB with a specific error code.

@@ -1,0 +1,18 @@
+{
+  "analysis_time_seconds": 0.0029,
+  "cavityDepthIssues": 0,
+  "chatterRiskCount": 0,
+  "drillHoleCount": 0,
+  "hasDrillHoles": false,
+  "hasUndercuts": false,
+  "internalRadiusIssues": 0,
+  "issues": [],
+  "minimumFeatureSizeMm": 2.0,
+  "reportType": "CNC_MILL",
+  "requiresEdm": false,
+  "requiresGrinding": false,
+  "sharpCornerCount": 0,
+  "sharpCornerRegions": [],
+  "toolAccessAxes": 3,
+  "undercutRegions": []
+}

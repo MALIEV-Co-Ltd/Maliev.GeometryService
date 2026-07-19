@@ -1,5 +1,5 @@
 [tool.poetry]
-name = "geometry-service"
+name = "maliev-geometryservice"
 version = "0.1.0"
 description = "Maliev Geometry Analysis Service"
 authors = ["Maliev Co Ltd"]
@@ -7,31 +7,57 @@ readme = "README.md"
 packages = [{include = "src"}]
 
 [tool.poetry.dependencies]
-python = "^3.11"
+python = "^3.10"
+cadquery = "^2.4"
 fastapi = "^0.115.14"
 uvicorn = {extras = ["standard"], version = "^0.34.3"}
 scalar-fastapi = "^1.5.0"
 trimesh = {extras = ["all"], version = "^4.10.1"}
-numpy = "^2.4.0"
-scipy = "^1.16.3"
+numpy = "^2.2.0"
+scipy = "^1.15.0"
 aio-pika = "^9.5.8"
 pydantic = "^2.12.5"
 pydantic-settings = "^2.12.0"
 opentelemetry-api = "^1.29.0"
 opentelemetry-sdk = "^1.29.0"
+opentelemetry-exporter-otlp = "^1.29.0"
 opentelemetry-instrumentation-fastapi = "^0.50b0"
 meshio = "*"
 aiofiles = "^25.1.0"
 httpx = "^0.28.1"
+PyJWT = {version = "^2.9.0", extras = ["crypto"]}
+pygmsh = "^7.1.17"
+cascadio = "*"
+networkx = "<3.6"
+lxml = "^6.0.2"
+pre-commit = "^4.5.1"
+boto3 = "^1.36.0"
+aioboto3 = "^13.0.0"
+pyvista = "^0.44.0"
+Pillow = "^11.1.0"
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^8.4.2"
 pytest-asyncio = "^0.25.3"
+pytest-xdist = "^3.6.0"
+pytest-timeout = "^2.3.1"
 mypy = "^1.19.1"
 ruff = "^0.8.6"
 black = "^24.10.0"
 types-aiofiles = "^25.1.0.20251011"
 pre-commit = "^4.5.1"
+respx = "^0.22.0"
+
+[tool.pytest.ini_options]
+# Sequential by default to prevent nested process-pool OOM.
+# Parallelism is opt-in: pytest -n --dist loadfile
+# Slow tests are opt-in:   pytest -m slow
+addopts = "-m 'not slow'"
+testpaths = ["tests"]
+asyncio_mode = "auto"
+markers = [
+    "slow: marks tests as slow (worker recycling, RSS soak, real cascadio) — run with pytest -m slow",
+]
 
 [build-system]
 requires = ["poetry-core"]
@@ -39,18 +65,14 @@ build-backend = "poetry.core.masonry.api"
 
 [tool.ruff]
 line-length = 88
-target-version = "py311"
+target-version = "py310"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "N", "UP", "B", "A", "C4", "SIM", "ARG", "PTH", "RET"]
 ignore = []
 
 [tool.mypy]
-python_version = "3.11"
+python_version = "3.10"
 strict = true
 ignore_missing_imports = true
 exclude = ["tests"]
-
-[tool.pytest.ini_options]
-asyncio_mode = "auto"
-testpaths = ["tests"]

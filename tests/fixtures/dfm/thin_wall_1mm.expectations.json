@@ -1,0 +1,32 @@
+{
+  "description": "Hollow tube with 0.6 mm cylindrical wall (OD 10, ID 8.8, height 20 mm). All additive processes flag the thin wall; CNC milling has no issues; turning is OK because the part is axisymmetric.",
+  "process_expectations": {
+    "FDM": {
+      "must_have": {
+        "thin_wall":        { "count_min": 1, "count_max": 3, "severity_min": "warning" },
+        "unsupported_wall": { "count_min": 1, "count_max": 3, "severity_min": "warning" }
+      }
+    },
+    "SLA": {
+      "must_have": {
+        "unsupported_wall": { "count_min": 1, "count_max": 3, "severity_min": "warning" }
+      }
+    },
+    "SLS": {
+      "must_have": {
+        "thin_wall": { "count_min": 1, "count_max": 3, "severity_min": "warning" }
+      }
+    },
+    "MJF": {
+      "must_have": {
+        "thin_wall": { "count_min": 1, "count_max": 3, "severity_min": "warning" }
+      }
+    },
+    "CNC_MILL": {
+      "must_not_have": ["thin_wall"]
+    },
+    "CNC_TURN": {
+      "must_not_have": ["not_turnable"]
+    }
+  }
+}

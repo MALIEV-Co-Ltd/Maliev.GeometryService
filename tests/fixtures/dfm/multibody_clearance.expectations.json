@@ -1,0 +1,19 @@
+{
+  "description": "Two 10 mm cubes 0.3 mm apart. Regression fixture for the silent body-drop bug: with the merged-STL fix, Phase 2 must see triangle_count >= 24 (both cubes), not 12 (body 0 only). CNC turning correctly flags the multi-body file as not turnable.",
+  "metrics_expectations": {
+    "body_count": { "min": 2, "max": 2 },
+    "triangle_count_min": 20
+  },
+  "process_expectations": {
+    "FDM":      { "must_not_have": ["thin_wall", "overhang", "small_features"] },
+    "SLA":      { "must_not_have": ["thin_wall", "overhang", "small_features"] },
+    "SLS":      { "must_not_have": ["thin_wall", "small_features"] },
+    "MJF":      { "must_not_have": ["thin_wall", "small_features"] },
+    "CNC_MILL": { "must_not_have": ["thin_wall", "internal_radius"] },
+    "CNC_TURN": {
+      "must_have": {
+        "not_turnable": { "count_min": 1, "count_max": 1, "severity_min": "error" }
+      }
+    }
+  }
+}

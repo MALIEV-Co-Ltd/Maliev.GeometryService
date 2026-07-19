@@ -1,0 +1,15 @@
+extends: default
+
+rules:
+  new-lines: disable
+  indentation:
+    indent-sequences: consistent
+  line-length:
+    max: 180
+    allow-non-breakable-words: true
+  document-start: disable
+  comments:
+    level: warning
+  truthy:
+    level: warning
+    allowed-values: ["true", "false", "on"]

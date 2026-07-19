@@ -1,0 +1,11 @@
+{
+  "description": "Wedge identical to overhang_60deg but rotated 90° around X. Default +Z build direction does NOT see this as an overhang (the slanted face is now vertical). The accompanying unit test (test_overhang_build_dir.py) calls compute_overhang_analysis with build_dir=+Y to confirm the same surface IS detected when the build direction matches the geometry orientation.",
+  "process_expectations": {
+    "FDM":      { "must_not_have": ["overhang"] },
+    "SLA":      { "must_not_have": ["overhang"] },
+    "SLS":      { "must_not_have": [] },
+    "MJF":      { "must_not_have": [] },
+    "CNC_MILL": { "must_not_have": ["thin_wall"] },
+    "CNC_TURN": { "must_not_have": [] }
+  }
+}

@@ -1,0 +1,1920 @@
+"""
+Mesh-based DFM analysis functions for all additive manufacturing processes.
+
+These functions operate on a ``trimesh.Trimesh`` object (tessellated mesh)
+and return structured findings including the affected face indices needed to
+generate overlay GLBs.
+
+All length values are in mm (matching the geometry pipeline convention).
+"""
+
+from __future__ import annotations
+
+import contextlib
+import logging
+import math
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any
+
+import numpy as np
+import numpy.typing as npt
+
+from .dfm_models import HoleFeature
+
+if TYPE_CHECKING:
+    import trimesh
+
+logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Wall analysis
+# ---------------------------------------------------------------------------
+
+
+def compute_thin_wall_analysis(
+    mesh: trimesh.Trimesh,
+    threshold_mm: float,
+    min_region_span_mm: float | None = None,
+) -> tuple[int, list[list[float]], list[int]]:
+    """Detect thin-wall regions by finding opposite-facing face pairs.
+
+    For each face, finds nearby faces whose normals point in roughly the
+    opposite direction. If two such faces are within ``threshold_mm`` of each
+    other they form a thin wall. This avoids the edge-length proxy which fires
+    heavily on fine CAD tessellations regardless of actual wall thickness.
+
+    Opposite face pairs are linked into the same cluster, so a simple thin
+    plate with two triangles per side is not discarded as two tiny clusters.
+    If ``min_region_span_mm`` is provided, compact local-detail clusters are
+    rejected and left for small-feature analysis.
+
+    Returns:
+        (thin_wall_count, centroids, face_indices)
+    """
+    import trimesh
+    from scipy.spatial import KDTree
+
+    thin_wall_count = 0
+    thin_wall_centroids: list[list[float]] = []
+    face_indices: list[int] = []
+
+    try:
+        if not isinstance(mesh, trimesh.Trimesh) or len(mesh.faces) < 4:
+            return 0, [], []
+
+        face_normals = mesh.face_normals  # (N, 3)
+        face_centroids = mesh.triangles_center  # (N, 3)
+        vertices = mesh.vertices
+
+        def global_thin_plate_fallback() -> tuple[int, list[list[float]], list[int]]:
+            """Catch broad thin plates whose opposing triangle centroids are offset."""
+            if min_region_span_mm is None:
+                return 0, [], []
+
+            extents = np.asarray(mesh.extents, dtype=float)
+            if extents.size != 3 or not np.all(np.isfinite(extents)):
+                return 0, [], []
+
+            thin_axis = int(np.argmin(extents))
+            sorted_extents = np.sort(extents)
+            if (
+                float(extents[thin_axis]) <= 0.0
+                or float(extents[thin_axis]) >= threshold_mm
+                or float(sorted_extents[-2]) < min_region_span_mm
+            ):
+                return 0, [], []
+
+            axis_face_indices = [
+                int(idx)
+                for idx, normal in enumerate(face_normals)
+                if abs(float(normal[thin_axis])) > 0.7
+            ]
+            if len(axis_face_indices) < 2:
+                return 0, [], []
+
+            centroid = np.asarray(vertices).mean(axis=0)
+            return (
+                1,
+                [[float(centroid[0]), float(centroid[1]), float(centroid[2])]],
+                axis_face_indices[:10000],
+            )
+
+        tree = KDTree(face_centroids)
+        # Centroid distance overstates true wall thickness for tilted walls: two
+        # parallel faces separated by `threshold_mm` perpendicular to the wall
+        # but tilted θ have centroids `threshold_mm / cos(θ)` apart.  Search at
+        # a widened radius (1.6× catches walls up to ~52° tilt) and verify the
+        # perpendicular gap explicitly per pair.
+        search_radius = threshold_mm * 1.6
+        pairs = tree.query_pairs(r=search_radius)
+
+        thin_face_set: set[int] = set()
+        opposite_links: list[tuple[int, int]] = []
+        for i, j in pairs:
+            dot = float(np.dot(face_normals[i], face_normals[j]))
+            if dot >= -0.7:
+                continue  # not anti-parallel enough to be opposing wall faces
+            # Perpendicular gap = projection of centroid difference onto the
+            # outward normal of face i.  This is the actual wall thickness,
+            # not the Euclidean distance between centroids.  The SIGN encodes
+            # what lies between the faces: negative = the opposing face sits
+            # behind this face's outward normal, i.e. MATERIAL between them
+            # (a wall).  Positive = the faces look at each other across AIR
+            # (a slot/groove) — that is an engraving/clearance concern, not a
+            # thin wall, and flagging it here was a false positive.
+            diff = face_centroids[j] - face_centroids[i]
+            signed_gap = float(np.dot(diff, face_normals[i]))
+            if signed_gap >= 0.0 or -signed_gap >= threshold_mm:
+                continue
+            thin_face_set.add(i)
+            thin_face_set.add(j)
+            opposite_links.append((int(i), int(j)))
+
+        if not thin_face_set:
+            return global_thin_plate_fallback()
+
+        # Build face adjacency for connected-component clustering
+        edge_to_faces: dict[tuple[int, int], list[int]] = {}
+        for fidx in thin_face_set:
+            face = mesh.faces[fidx]
+            for k in range(3):
+                key = (
+                    min(int(face[k]), int(face[(k + 1) % 3])),
+                    max(int(face[k]), int(face[(k + 1) % 3])),
+                )
+                edge_to_faces.setdefault(key, []).append(fidx)
+
+        face_adj: dict[int, set[int]] = {f: set() for f in thin_face_set}
+        for neighbors in edge_to_faces.values():
+            for a in neighbors:
+                for b in neighbors:
+                    if a != b and b in face_adj:
+                        face_adj[a].add(b)
+
+        for a, b in opposite_links:
+            if a in face_adj and b in face_adj:
+                face_adj[a].add(b)
+                face_adj[b].add(a)
+
+        visited: set[int] = set()
+        for start in thin_face_set:
+            if start in visited:
+                continue
+            cluster: list[int] = []
+            queue = [start]
+            while queue:
+                cur = queue.pop()
+                if cur in visited:
+                    continue
+                visited.add(cur)
+                cluster.append(cur)
+                for n in face_adj.get(cur, []):
+                    if n not in visited:
+                        queue.append(n)
+            if len(cluster) < 4:
+                continue
+
+            cluster_verts = np.array(
+                [vertices[v] for f in cluster for v in mesh.faces[f]]
+            )
+            if min_region_span_mm is not None:
+                extents = cluster_verts.max(axis=0) - cluster_verts.min(axis=0)
+                sorted_extents = np.sort(extents)
+                if float(sorted_extents[-2]) < min_region_span_mm:
+                    continue
+
+            centroid = cluster_verts.mean(axis=0)
+            thin_wall_centroids.append(
+                [float(centroid[0]), float(centroid[1]), float(centroid[2])]
+            )
+            face_indices.extend(cluster)
+            thin_wall_count += 1  # count regions, not individual faces
+
+    except Exception as exc:
+        logger.warning("thin wall analysis failed: %s", exc)
+
+    if thin_wall_count == 0:
+        with contextlib.suppress(Exception):
+            return global_thin_plate_fallback()
+
+    return thin_wall_count, thin_wall_centroids[:500], face_indices[:10000]
+
+
+def compute_unsupported_wall_analysis(
+    mesh: trimesh.Trimesh,
+    threshold_mm: float,
+) -> tuple[int, list[list[float]], list[int]]:
+    """Detect free-standing thin walls (connected to bulk on <2 sides).
+
+    The previous implementation looked for mesh boundary edges, which do not
+    exist on watertight solids, so it never fired on real parts.  Strategy:
+
+    1. Find thin wall faces exactly like the supported-wall check: pairs of
+       opposing faces whose perpendicular gap is below ``threshold_mm``.
+    2. Absorb narrow rim-cap faces (the wall's own edge band) into the patch.
+    3. Cluster into connected wall patches.
+    4. For each patch, look at where it attaches to the remaining (bulk)
+       geometry.  A patch with no attachment at all is free-standing (e.g. a
+       thin tube or lone plate).  Otherwise project the attachment points
+       into the wall's in-plane frame and count on how many of its sides the
+       wall is held; fewer than 2 sides ⇒ unsupported.  Closed cylindrical
+       shells count their ring attachments as a single side per axial end.
+
+    Returns:
+        (count, centroids, face_indices)
+    """
+    import trimesh
+    from scipy.spatial import KDTree
+
+    count = 0
+    centroids: list[list[float]] = []
+    face_indices: list[int] = []
+
+    try:
+        if not isinstance(mesh, trimesh.Trimesh) or len(mesh.faces) < 4:
+            return 0, [], []
+
+        normals = np.asarray(mesh.face_normals)
+        face_centroids = np.asarray(mesh.triangles_center)
+        vertices = np.asarray(mesh.vertices)
+        faces_arr = np.asarray(mesh.faces)
+
+        # 1. Opposing-face thin pairing (same core as the supported-wall check).
+        tree = KDTree(face_centroids)
+        pairs = tree.query_pairs(r=threshold_mm * 1.6)
+        thin: set[int] = set()
+        opposite_links: list[tuple[int, int]] = []
+        for i, j in pairs:
+            if float(np.dot(normals[i], normals[j])) >= -0.7:
+                continue
+            # Material-side only (see compute_thin_wall_analysis): negative
+            # signed gap = material between the faces = a wall.  Positive =
+            # slot/groove across air — bulk material, not a wall.
+            signed_gap = float(
+                np.dot(face_centroids[j] - face_centroids[i], normals[i])
+            )
+            if signed_gap >= 0.0 or -signed_gap >= threshold_mm:
+                continue
+            thin.add(int(i))
+            thin.add(int(j))
+            opposite_links.append((int(i), int(j)))
+
+        if not thin:
+            return 0, [], []
+
+        # Face adjacency over the whole mesh.
+        fa = np.asarray(mesh.face_adjacency)
+        adj_all: dict[int, set[int]] = {}
+        for a, b in fa:
+            adj_all.setdefault(int(a), set()).add(int(b))
+            adj_all.setdefault(int(b), set()).add(int(a))
+
+        # 2. Absorb the wall's own rim caps: adjacent faces whose smallest
+        # bounding extent is on the order of the wall thickness.
+        tri = vertices[faces_arr]
+        tri_ext = tri.max(axis=1) - tri.min(axis=1)
+        small_face = tri_ext.min(axis=1) < threshold_mm * 1.3
+        wall = set(thin)
+        for _ in range(3):
+            grew = False
+            for f in list(wall):
+                for g in adj_all.get(f, ()):
+                    if g not in wall and bool(small_face[g]):
+                        wall.add(g)
+                        grew = True
+            if not grew:
+                break
+
+        # 3. Cluster the wall set (edge adjacency + opposite-pair links).
+        adj_w: dict[int, set[int]] = {f: set() for f in wall}
+        for f in wall:
+            for g in adj_all.get(f, ()):
+                if g in adj_w:
+                    adj_w[f].add(g)
+        for a, b in opposite_links:
+            adj_w[a].add(b)
+            adj_w[b].add(a)
+
+        seen: set[int] = set()
+        for start in wall:
+            if start in seen:
+                continue
+            comp: list[int] = []
+            queue = [start]
+            while queue:
+                cur = queue.pop()
+                if cur in seen:
+                    continue
+                seen.add(cur)
+                comp.append(cur)
+                queue.extend(adj_w.get(cur, ()))
+            if len(comp) < 6:
+                continue
+
+            comp_set = set(comp)
+            attached_pts: list[Any] = []
+            boundary_edges = 0
+            for f in comp:
+                for g in adj_all.get(f, ()):
+                    if g not in comp_set:
+                        boundary_edges += 1
+                        attached_pts.append(face_centroids[f])
+
+            cluster_verts = vertices[np.unique(faces_arr[np.asarray(comp)].ravel())]
+            centroid = cluster_verts.mean(axis=0)
+
+            if boundary_edges == 0:
+                # Entirely thin and detached from any bulk: free-standing
+                # shell (thin tube, lone plate).
+                unsupported = True
+            else:
+                # 4. In-plane attachment sides.
+                centered = cluster_verts - centroid
+                try:
+                    _, _, vt = np.linalg.svd(centered, full_matrices=False)
+                except np.linalg.LinAlgError:
+                    continue
+                e1, e2 = vt[0], vt[1]
+                ap = np.asarray(attached_pts) - centroid
+
+                s1 = ap @ e1
+                r1 = centered @ e1
+                lo1, hi1 = float(r1.min()), float(r1.max())
+                span1 = max(hi1 - lo1, 1e-9)
+
+                s2 = ap @ e2
+                r2 = centered @ e2
+                lo2, hi2 = float(r2.min()), float(r2.max())
+                span2 = max(hi2 - lo2, 1e-9)
+
+                band = 0.18
+                min_edges = max(3, int(0.05 * boundary_edges))
+
+                # A closed cylindrical shell (thin tube wall) is periodic in
+                # the second in-plane direction: a base ring attachment spans
+                # the full e2 range but is physically ONE side.  Detect
+                # closedness from the angular coverage of the shell about e1.
+                x2 = centered @ e2
+                x3 = centered @ vt[2]
+                ang = np.arctan2(x3, x2)
+                ang_sorted = np.sort(ang)
+                if ang_sorted.size >= 3:
+                    gaps = np.diff(ang_sorted)
+                    wrap_gap = 2.0 * np.pi - float(ang_sorted[-1] - ang_sorted[0])
+                    coverage = 2.0 * np.pi - float(max(float(gaps.max()), wrap_gap))
+                else:
+                    coverage = 0.0
+                is_closed_shell = coverage > 5.24  # > 300°
+
+                sides = 0
+                if int(np.sum(s1 <= lo1 + band * span1)) >= min_edges:
+                    sides += 1
+                if int(np.sum(s1 >= hi1 - band * span1)) >= min_edges:
+                    sides += 1
+                if not is_closed_shell:
+                    if int(np.sum(s2 <= lo2 + band * span2)) >= min_edges:
+                        sides += 1
+                    if int(np.sum(s2 >= hi2 - band * span2)) >= min_edges:
+                        sides += 1
+                unsupported = sides < 2
+
+            if unsupported:
+                centroids.append(
+                    [float(centroid[0]), float(centroid[1]), float(centroid[2])]
+                )
+                face_indices.extend(int(f) for f in comp[:2000])
+                count += 1
+
+    except Exception as exc:
+        logger.warning("unsupported wall analysis failed: %s", exc)
+
+    return count, centroids[:200], face_indices[:10000]
+
+
+# ---------------------------------------------------------------------------
+# Overhang analysis
+# ---------------------------------------------------------------------------
+
+
+def compute_overhang_analysis(
+    mesh: trimesh.Trimesh,
+    threshold_deg: float,
+    min_region_span_mm: float | None = None,
+    build_dir: tuple[float, float, float] | list[float] | None = None,
+    first_layer_thickness_mm: float | None = None,
+) -> tuple[int, float, list[list[float]], list[int]]:
+    """Detect overhang regions exceeding ``threshold_deg`` from build direction.
+
+    Args:
+        mesh: input trimesh body.
+        threshold_deg: maximum self-supporting angle from the build direction.
+        min_region_span_mm: optional bridgeable-span filter; clusters whose
+            extent perpendicular to the build direction is below this are
+            ignored (they're likely bridgeable, not unsupported overhangs).
+        build_dir: build/print direction in mesh space (defaults to +Z).
+            Must be a unit-ish 3-vector.  Auto-orientation logic chooses
+            this externally.
+        first_layer_thickness_mm: faces within this much of the build-plate
+            contact plane are stripped (they're the build-plate face itself,
+            not unsupported overhangs).  Defaults to ``max(1.0, 1% of part
+            height-along-build-dir)`` for backward compatibility.
+
+    Returns:
+        (overhang_region_count, overhang_area_cm2, centroids, face_indices)
+    """
+    import trimesh
+
+    overhang_region_count = 0
+    overhang_area_cm2 = 0.0
+    overhang_centroids: list[list[float]] = []
+    face_indices: list[int] = []
+
+    try:
+        if not isinstance(mesh, trimesh.Trimesh) or len(mesh.faces) < 3:
+            return 0, 0.0, [], []
+
+        # Normalise face winding before relying on face_normals — an inconsistently
+        # wound mesh (e.g. from cascadio multi-body concatenation before merge_vertices)
+        # can have downward-facing faces reported as upward, silencing all overhangs.
+        if not mesh.is_winding_consistent:
+            mesh = mesh.copy()
+            trimesh.repair.fix_winding(mesh)  # type: ignore[no-untyped-call]
+
+        face_normals = mesh.face_normals
+        face_areas = mesh.area_faces
+        face_centroids = mesh.triangles_center
+
+        # Normalise the build direction.  Default = +Z (FDM/SLS convention).
+        if build_dir is None:
+            bd = np.array([0.0, 0.0, 1.0], dtype=float)
+        else:
+            bd = np.asarray(build_dir, dtype=float).reshape(3)
+            bd_norm = float(np.linalg.norm(bd))
+            if bd_norm < 1e-9:
+                bd = np.array([0.0, 0.0, 1.0], dtype=float)
+            else:
+                bd = bd / bd_norm
+
+        # An overhang surface has a normal component along -build_dir greater
+        # than sin(threshold). The 0.5° margin matches legacy behaviour and
+        # avoids flapping on faces sitting exactly at the threshold edge
+        # (e.g. parts engineered for the slicer's self-supporting angle).
+        effective_thresh = threshold_deg + 0.5
+        overhang_thresh = math.sin(math.radians(effective_thresh))
+
+        # Find all overhang faces
+        overhang_set: set[int] = set()
+        for i, normal in enumerate(face_normals):
+            norm = float(np.linalg.norm(normal))
+            if norm < 1e-10:
+                continue
+            n_unit = normal / norm
+            # Project unit normal onto the inverted build direction.  Positive
+            # values mean the face points "downward" relative to the build
+            # direction; values exceeding sin(threshold) are overhangs.
+            proj = float(-(n_unit[0] * bd[0] + n_unit[1] * bd[1] + n_unit[2] * bd[2]))
+            if proj > overhang_thresh:
+                overhang_set.add(i)
+
+        logger.info(
+            "overhang candidates: %d faces "
+            "(threshold %.1f°, build_dir=(%.2f,%.2f,%.2f))",
+            len(overhang_set),
+            threshold_deg,
+            bd[0],
+            bd[1],
+            bd[2],
+        )
+
+        if not overhang_set:
+            logger.info(
+                "No overhang faces detected - all faces are within the threshold angle"
+            )
+            return 0, 0.0, [], []
+
+        all_centroids = face_centroids
+        proj_vertices = mesh.vertices @ bd
+        global_min = float(proj_vertices.min())
+        part_height = float(proj_vertices.max() - global_min)
+
+        # Solid/void probe: a true overhang has printable void immediately
+        # below it. If a candidate face points downward only because tessellation
+        # wound a lower hole/floor face incorrectly, the point just below the
+        # surface lies inside solid material and must not be highlighted.
+        if overhang_set and mesh.is_watertight:
+            try:
+                probe_distance = min(max(part_height * 0.001, 0.05), 0.5)
+                sorted_faces = sorted(overhang_set)
+                probe_points = (
+                    all_centroids[sorted_faces]
+                    - np.outer(np.ones(len(sorted_faces)), bd * probe_distance)
+                )
+                supported = mesh.contains(probe_points)
+                overhang_set = {
+                    face
+                    for face, is_supported in zip(sorted_faces, supported, strict=False)
+                    if not bool(is_supported)
+                }
+                logger.info(
+                    "overhang solid-probe filter: %d face(s) remain after "
+                    "dropping supported lower surfaces",
+                    len(overhang_set),
+                )
+            except Exception as exc:
+                logger.debug("overhang solid-probe filter skipped: %s", exc)
+
+        if not overhang_set:
+            logger.info("No overhang faces remain after solid support probing")
+            return 0, 0.0, [], []
+
+        # Build-plate contact band: faces whose centroid projection along the
+        # build direction is within `band` of the global minimum (the build
+        # plate) are excluded.  Default = 1% of part height with a 1 mm floor
+        # — empirically a good trade-off across additive processes.  When
+        # first_layer_thickness_mm is supplied AND larger than the heuristic,
+        # it widens the band so first-layer faces aren't flagged.
+        legacy_band = max(1.0, part_height * 0.01)
+        if first_layer_thickness_mm is not None and first_layer_thickness_mm > 0:
+            build_plate_band = max(legacy_band, float(first_layer_thickness_mm))
+        else:
+            build_plate_band = legacy_band
+        logger.info(
+            "build-plate band: %.2f mm (part height along build_dir %.2f mm, "
+            "min %.2f mm, source=%s)",
+            build_plate_band,
+            part_height,
+            global_min,
+            "first_layer_thickness_mm"
+            if first_layer_thickness_mm
+            else "1%/1mm fallback",
+        )
+
+        proj_centroids = all_centroids @ bd
+
+        # Build face adjacency among overhang faces only
+        edge_to_faces: dict[tuple[int, int], list[int]] = {}
+        for fidx in overhang_set:
+            face = mesh.faces[fidx]
+            for k in range(3):
+                key = (
+                    min(int(face[k]), int(face[(k + 1) % 3])),
+                    max(int(face[k]), int(face[(k + 1) % 3])),
+                )
+                edge_to_faces.setdefault(key, []).append(fidx)
+
+        face_adj: dict[int, list[int]] = {f: [] for f in overhang_set}
+        for neighbors in edge_to_faces.values():
+            for a in neighbors:
+                for b in neighbors:
+                    if a != b:
+                        face_adj[a].append(b)
+
+        # BFS clustering
+        visited: set[int] = set()
+        total_clusters = 0
+        clusters_filtered_by_build_plate = 0
+        clusters_filtered_by_area = 0
+        clusters_filtered_by_span = 0
+
+        for start in overhang_set:
+            if start in visited:
+                continue
+            total_clusters += 1
+            cluster: list[int] = []
+            queue = [start]
+            while queue:
+                cur = queue.pop()
+                if cur in visited:
+                    continue
+                visited.add(cur)
+                cluster.append(cur)
+                for n in face_adj.get(cur, []):
+                    if n not in visited:
+                        queue.append(n)
+
+            # Strip faces whose centroid (projected onto the build direction)
+            # sits in the build-plate contact band — faces resting on the
+            # plate aren't unsupported overhangs.  Trim per-face rather than
+            # discarding the whole cluster: a tall overhang that connects to
+            # a build-plate-contact face must not be silenced entirely.
+            trimmed_cluster = [
+                f
+                for f in cluster
+                if float(proj_centroids[f]) > global_min + build_plate_band + 1e-6
+            ]
+
+            if not trimmed_cluster:
+                # All faces in this cluster are in the build-plate band
+                clusters_filtered_by_build_plate += 1
+                continue
+
+            cluster_verts = np.array(
+                [mesh.vertices[v] for f in trimmed_cluster for v in mesh.faces[f]]
+            )
+            if min_region_span_mm is not None:
+                # Span perpendicular to build_dir = magnitude of (vertex -
+                # vertex projected onto bd).  Take the diagonal of the bbox
+                # of the perpendicular components for a build-direction
+                # agnostic horizontal span.
+                proj_along = cluster_verts @ bd  # (N,)
+                perp_components = (
+                    cluster_verts - np.outer(proj_along, bd)
+                )  # (N, 3)
+                p_min = perp_components.min(axis=0)
+                p_max = perp_components.max(axis=0)
+                horizontal_span = float(np.linalg.norm(p_max - p_min))
+                if horizontal_span <= min_region_span_mm:
+                    clusters_filtered_by_span += 1
+                    continue
+
+            # Ignore small stray patches that don't represent significant
+            # overhang regions requiring support.  Filter by area (mm²) so
+            # that the threshold is independent of mesh resolution.
+            region_area_check = sum(float(face_areas[f]) for f in trimmed_cluster)
+            if region_area_check < 4.0:  # < 4 mm² → not a meaningful overhang
+                clusters_filtered_by_area += 1
+                continue
+
+            region_area = region_area_check
+            overhang_area_cm2 += region_area / 100.0
+
+            cluster_centroids = np.array([all_centroids[f] for f in trimmed_cluster])
+            region_centroid = cluster_centroids.mean(axis=0)
+            overhang_centroids.append(
+                [
+                    float(region_centroid[0]),
+                    float(region_centroid[1]),
+                    float(region_centroid[2]),
+                ]
+            )
+            face_indices.extend(trimmed_cluster)
+            overhang_region_count += 1
+
+        logger.info(
+            "overhang clustering: %d total cluster(s), %d filtered by build-plate band, %d filtered by bridgeable span, %d filtered by area (< 4mm²), %d final region(s), %.2f cm²",  # noqa: E501
+            total_clusters,
+            clusters_filtered_by_build_plate,
+            clusters_filtered_by_span,
+            clusters_filtered_by_area,
+            overhang_region_count,
+            overhang_area_cm2,
+        )
+
+    except Exception as exc:
+        logger.warning("overhang analysis failed: %s", exc)
+
+    return (
+        overhang_region_count,
+        overhang_area_cm2,
+        overhang_centroids[:500],
+        face_indices[:10000],
+    )
+
+
+# ---------------------------------------------------------------------------
+# Hole detection (mesh-based, approximate)
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class CylindricalFeature:
+    """A connected cylindrical surface patch detected from face normals.
+
+    ``concave`` distinguishes holes/bores (surface normals point toward the
+    axis) from pins/bosses (normals point away).  ``coverage_rad`` is the
+    angular extent of the patch about its axis — a full drilled hole or a
+    free-standing pin covers ~2π, while a corner fillet covers a fraction.
+    """
+
+    center: list[float]  # [x, y, z] mid-height point on the axis, mm
+    axis: list[float]  # unit vector along the cylinder axis
+    diameter_mm: float
+    depth_mm: float  # extent of the patch along the axis
+    coverage_rad: float  # angular coverage about the axis (0..2π)
+    concave: bool  # True = hole/bore, False = pin/boss
+    face_indices: list[int]
+
+
+# Minimum angular coverage for a cylindrical patch to count as a full
+# hole/pin rather than a corner fillet (270°).
+FULL_CYLINDER_COVERAGE_RAD = 4.7
+
+
+def detect_cylindrical_features(
+    mesh: trimesh.Trimesh,
+    min_diameter_mm: float = 0.1,
+    max_diameter_mm: float | None = None,
+) -> list[CylindricalFeature]:
+    """Detect cylindrical surface patches (holes AND pins) on a solid mesh.
+
+    Works on watertight tessellations — unlike boundary-loop approaches,
+    which only ever see open meshes.  Strategy:
+
+    1. Adjacent face pairs with non-parallel normals lie on a curved region;
+       for faces on a common cylinder the cross product of their normals is
+       (anti-)parallel to the cylinder axis.
+    2. Region-grow clusters of curved adjacency whose pairwise axes agree.
+    3. For each cluster: recover the axis (least-variance direction of the
+       face normals via SVD), fit a circle to the cluster vertices projected
+       onto the plane ⊥ axis (Kåsa fit), and accept when the radial residual
+       is small.
+    4. Classify concave (hole) vs convex (pin) from whether normals point
+       toward or away from the fitted axis, and measure angular coverage.
+    """
+    import trimesh
+
+    feats: list[CylindricalFeature] = []
+
+    try:
+        if not isinstance(mesh, trimesh.Trimesh) or len(mesh.faces) < 8:
+            return feats
+
+        fa = np.asarray(mesh.face_adjacency)
+        if fa.size == 0:
+            return feats
+
+        normals = np.asarray(mesh.face_normals)
+        cross = np.cross(normals[fa[:, 0]], normals[fa[:, 1]])
+        cnorm = np.linalg.norm(cross, axis=1)
+        curved = cnorm > 5e-3
+        if not bool(curved.any()):
+            return feats
+
+        pair_axes = cross[curved] / cnorm[curved][:, None]
+        pairs = fa[curved]
+
+        adj: dict[int, list[tuple[int, Any]]] = {}
+        for (a, b), ax in zip(pairs, pair_axes, strict=True):
+            adj.setdefault(int(a), []).append((int(b), ax))
+            adj.setdefault(int(b), []).append((int(a), ax))
+
+        vertices = np.asarray(mesh.vertices)
+        faces_arr = np.asarray(mesh.faces)
+        tri_centroids = np.asarray(mesh.triangles_center)
+
+        visited: set[int] = set()
+        for seed in adj:
+            if seed in visited:
+                continue
+
+            ref_axis = None
+            cluster: list[int] = []
+            queue = [seed]
+            local_seen: set[int] = set()
+            while queue:
+                f = queue.pop()
+                if f in local_seen or f in visited:
+                    continue
+                local_seen.add(f)
+                cluster.append(f)
+                for g, ax in adj.get(f, []):
+                    if g in local_seen:
+                        continue
+                    if ref_axis is None:
+                        ref_axis = ax
+                    if abs(float(np.dot(ax, ref_axis))) >= 0.9:
+                        queue.append(g)
+            visited |= local_seen
+
+            if len(cluster) < 6 or ref_axis is None:
+                continue
+
+            cl = np.asarray(cluster, dtype=np.intp)
+            cn = normals[cl]
+
+            # Cylinder axis = direction of least variance of the (radial)
+            # side-face normals.
+            try:
+                _, _, vt = np.linalg.svd(cn, full_matrices=False)
+            except np.linalg.LinAlgError:
+                continue
+            axis = vt[-1]
+            # All side normals of a true cylinder are ⊥ axis; cones and
+            # blended patches fail this test.
+            if float(np.max(np.abs(cn @ axis))) > 0.2:
+                continue
+
+            vidx = np.unique(faces_arr[cl].ravel())
+            pts = vertices[vidx]
+            t = pts @ axis
+            depth = float(t.max() - t.min())
+
+            tmp = (
+                np.array([1.0, 0.0, 0.0])
+                if abs(float(axis[0])) < 0.9
+                else np.array([0.0, 1.0, 0.0])
+            )
+            u = np.cross(axis, tmp)
+            u /= np.linalg.norm(u)
+            v = np.cross(axis, u)
+
+            x = pts @ u
+            y = pts @ v
+            # Kåsa algebraic circle fit.
+            a_mat = np.column_stack([2.0 * x, 2.0 * y, np.ones_like(x)])
+            b_vec = x * x + y * y
+            try:
+                sol, *_ = np.linalg.lstsq(a_mat, b_vec, rcond=None)
+            except np.linalg.LinAlgError:
+                continue
+            cx, cy, c0 = (float(sol[0]), float(sol[1]), float(sol[2]))
+            r_sq = c0 + cx * cx + cy * cy
+            if r_sq <= 0:
+                continue
+            radius = float(np.sqrt(r_sq))
+            if radius < 1e-6:
+                continue
+            radii = np.sqrt((x - cx) ** 2 + (y - cy) ** 2)
+            if float(np.std(radii)) / radius > 0.08:
+                continue
+
+            diameter = radius * 2.0
+            if diameter < min_diameter_mm:
+                continue
+            if max_diameter_mm is not None and diameter > max_diameter_mm:
+                continue
+
+            # Angular coverage from face centroids about the fitted center.
+            fc = tri_centroids[cl]
+            fx = fc @ u - cx
+            fy = fc @ v - cy
+            ang = np.sort(np.arctan2(fy, fx))
+            if ang.size < 3:
+                continue
+            gaps = np.diff(ang)
+            wrap_gap = 2.0 * np.pi - float(ang[-1] - ang[0])
+            max_gap = float(max(float(gaps.max()), wrap_gap))
+            coverage = float(2.0 * np.pi - max_gap)
+
+            # Concave when normals point toward the axis (a hole/bore).
+            nx = normals[cl] @ u
+            ny = normals[cl] @ v
+            radial_dot = fx * nx + fy * ny
+            concave = bool(float(np.median(radial_dot)) < 0.0)
+
+            mid_t = float((t.max() + t.min()) / 2.0)
+            center3d = u * cx + v * cy + axis * mid_t
+            feats.append(
+                CylindricalFeature(
+                    center=[float(center3d[0]), float(center3d[1]), float(center3d[2])],
+                    axis=[float(axis[0]), float(axis[1]), float(axis[2])],
+                    diameter_mm=float(diameter),
+                    depth_mm=depth,
+                    coverage_rad=coverage,
+                    concave=concave,
+                    face_indices=[int(f) for f in cluster[:400]],
+                )
+            )
+
+    except Exception as exc:
+        logger.warning("cylindrical feature detection failed: %s", exc)
+
+    return feats[:100]
+
+
+def detect_holes_mesh(
+    mesh: trimesh.Trimesh,
+    min_diameter_mm: float = 0.5,
+) -> list[HoleFeature]:
+    """Detect cylindrical holes (bores) on a solid mesh.
+
+    Built on :func:`detect_cylindrical_features`: a hole is a concave
+    cylindrical patch with near-full angular coverage.  The previous
+    boundary-loop implementation only ever saw open (non-watertight) meshes,
+    so it returned zero holes for every real customer part.
+    """
+    holes: list[HoleFeature] = []
+    try:
+        for c in detect_cylindrical_features(mesh, min_diameter_mm=min_diameter_mm):
+            if not c.concave or c.coverage_rad < FULL_CYLINDER_COVERAGE_RAD:
+                continue
+            holes.append(
+                HoleFeature(
+                    center=c.center,
+                    axis=c.axis,
+                    diameter_mm=c.diameter_mm,
+                    depth_mm=c.depth_mm,
+                    face_indices=c.face_indices[:50],
+                )
+            )
+    except Exception as exc:
+        logger.warning("hole detection failed: %s", exc)
+    return holes[:50]
+
+
+# ---------------------------------------------------------------------------
+# Bridge detection
+# ---------------------------------------------------------------------------
+
+
+def detect_bridges(
+    mesh: trimesh.Trimesh,
+    max_span_mm: float,
+) -> tuple[int, list[list[float]], list[int]]:
+    """Detect horizontal unsupported spans (bridges) exceeding max_span_mm.
+
+    Strategy: find downward-facing faces (normal.z < 0) with no mesh geometry
+    directly below them within the bridge distance. Faces resting on the build
+    plate are excluded because they are supported by the printer bed, not by
+    mesh geometry. Uses vertical ray casting.
+
+    Returns:
+        (bridge_count, centroids, face_indices)
+    """
+    import trimesh
+
+    bridge_count = 0
+    bridge_centroids: list[list[float]] = []
+    face_indices: list[int] = []
+
+    try:
+        if not isinstance(mesh, trimesh.Trimesh) or len(mesh.faces) < 3:
+            return 0, [], []
+
+        face_normals = mesh.face_normals
+        face_centroids_arr = mesh.triangles_center
+
+        global_min_z = float(mesh.vertices[:, 2].min())
+        part_height = float(mesh.vertices[:, 2].max()) - global_min_z
+        build_plate_band = max(1.0, part_height * 0.01)
+        build_plate_cutoff = global_min_z + build_plate_band
+
+        # Only consider downward-facing faces above the build-plate contact band.
+        # Bottom caps on parts placed on the floor have no mesh below them, but
+        # they are not bridges because the printer bed supports them.
+        downward_mask = (face_normals[:, 2] < -0.5) & (
+            face_centroids_arr[:, 2] > build_plate_cutoff + 1e-6
+        )
+
+        if not np.any(downward_mask):
+            return 0, [], []
+
+        downward_indices = np.where(downward_mask)[0]
+
+        # Cast rays downward from each candidate face centroid
+        ray_origins = face_centroids_arr[downward_indices]
+        ray_directions = np.tile([0.0, 0.0, -1.0], (len(ray_origins), 1))
+
+        try:
+            locations, ray_idx, _ = mesh.ray.intersects_location(  # type: ignore[no-untyped-call]
+                ray_origins, ray_directions, multiple_hits=False
+            )
+        except Exception:
+            return 0, [], []
+
+        # Map ray index → hit distance
+        hit_distances: dict[int, float] = {}
+        for loc, ridx in zip(locations, ray_idx, strict=False):
+            origin = ray_origins[ridx]
+            dist = float(np.linalg.norm(loc - origin))
+            if dist > 1e-3:  # ignore self-intersections
+                existing = hit_distances.get(int(ridx))
+                if existing is None or dist < existing:
+                    hit_distances[int(ridx)] = dist
+
+        bridge_face_set: set[int] = set()
+        for i, didx in enumerate(downward_indices):
+            # If no hit below OR hit is farther than max_span_mm → bridge
+            hit_distance = hit_distances.get(i)
+            is_bridge = hit_distance is None or hit_distance > max_span_mm
+            if is_bridge:
+                bridge_face_set.add(int(didx))
+
+        if not bridge_face_set:
+            return 0, [], []
+
+        # Report bridge spans as connected regions instead of raw triangle count.
+        edge_to_faces: dict[tuple[int, int], list[int]] = {}
+        for fidx in bridge_face_set:
+            face = mesh.faces[fidx]
+            for k in range(3):
+                key = (
+                    min(int(face[k]), int(face[(k + 1) % 3])),
+                    max(int(face[k]), int(face[(k + 1) % 3])),
+                )
+                edge_to_faces.setdefault(key, []).append(fidx)
+
+        face_adj: dict[int, list[int]] = {f: [] for f in bridge_face_set}
+        for neighbors in edge_to_faces.values():
+            for a in neighbors:
+                for b in neighbors:
+                    if a != b:
+                        face_adj[a].append(b)
+
+        visited: set[int] = set()
+        for start in bridge_face_set:
+            if start in visited:
+                continue
+            cluster: list[int] = []
+            queue = [start]
+            while queue:
+                cur = queue.pop()
+                if cur in visited:
+                    continue
+                visited.add(cur)
+                cluster.append(cur)
+                for nxt in face_adj.get(cur, []):
+                    if nxt not in visited:
+                        queue.append(nxt)
+
+            cluster_verts = np.array(
+                [mesh.vertices[v] for f in cluster for v in mesh.faces[f]]
+            )
+            extents = cluster_verts.max(axis=0) - cluster_verts.min(axis=0)
+            horizontal_span = max(float(extents[0]), float(extents[1]))
+            if horizontal_span <= max_span_mm:
+                continue
+
+            cluster_centroids = np.array([face_centroids_arr[f] for f in cluster])
+            centroid = cluster_centroids.mean(axis=0)
+            bridge_centroids.append(
+                [float(centroid[0]), float(centroid[1]), float(centroid[2])]
+            )
+            face_indices.extend(cluster)
+            bridge_count += 1
+
+    except Exception as exc:
+        logger.warning("bridge detection failed: %s", exc)
+
+    return bridge_count, bridge_centroids[:200], face_indices[:200]
+
+
+# ---------------------------------------------------------------------------
+# Small feature detection
+# ---------------------------------------------------------------------------
+
+
+def detect_small_features(
+    mesh: trimesh.Trimesh,
+    min_size_mm: float,
+) -> tuple[int, list[list[float]], list[int]]:
+    """Detect features smaller than min_size_mm.
+
+    Strategy: identify faces with all edge lengths shorter than min_size_mm,
+    then cluster adjacent such faces. Flag clusters whose bounding-box
+    diagonal is below min_size_mm.
+
+    Returns:
+        (count, centroids, face_indices)
+    """
+    import trimesh
+
+    count = 0
+    centroids: list[list[float]] = []
+    face_indices: list[int] = []
+
+    try:
+        if not isinstance(mesh, trimesh.Trimesh) or len(mesh.faces) < 3:
+            return 0, [], []
+
+        vertices = mesh.vertices
+
+        # Pre-compute per-face dihedral angles to neighbours (used for curvature filtering).  # noqa: E501
+        # A face sitting on a smooth curved surface has low dihedral angles to all neighbours  # noqa: E501
+        # (small angle between face normals → smooth tessellation, not a real feature).
+        try:
+            face_adj_pairs = mesh.face_adjacency  # (N, 2) face pairs sharing an edge
+            adj_angles = (
+                mesh.face_adjacency_angles
+            )  # (N,) dihedral angle per pair (radians)
+            # Build per-face max-dihedral-angle map: max angle to any adjacent face.
+            max_dihedral = np.zeros(len(mesh.faces), dtype=float)
+            for (fa, fb), angle in zip(face_adj_pairs, adj_angles, strict=False):
+                if angle > max_dihedral[fa]:
+                    max_dihedral[fa] = angle
+                if angle > max_dihedral[fb]:
+                    max_dihedral[fb] = angle
+            # Threshold: ~5° in radians.  Faces with all neighbours below this are
+            # on smooth curved surfaces (tessellation artifact, not a real sharp feature).  # noqa: E501
+            _SMOOTH_THRESHOLD = 0.09  # radians ≈ 5°  # noqa: N806
+        except Exception:
+            max_dihedral = None
+            _SMOOTH_THRESHOLD = 0.09  # noqa: N806
+
+        # Faces where all three edges are short AND at least one neighbour has a
+        # significant dihedral angle (indicating a genuine geometric boundary).
+        small_face_set: set[int] = set()
+        for fidx, face in enumerate(mesh.faces):
+            verts = [vertices[int(v)] for v in face]
+            max_edge = max(
+                float(np.linalg.norm(verts[1] - verts[0])),
+                float(np.linalg.norm(verts[2] - verts[1])),
+                float(np.linalg.norm(verts[0] - verts[2])),
+            )
+            if max_edge >= min_size_mm:
+                continue
+            # Skip triangles on smooth surfaces — they are tessellation density, not features.  # noqa: E501
+            if max_dihedral is not None and max_dihedral[fidx] < _SMOOTH_THRESHOLD:
+                continue
+            small_face_set.add(fidx)
+
+        if not small_face_set:
+            return 0, [], []
+
+        # Build face adjacency for clustering
+        face_adj: dict[int, list[int]] = {f: [] for f in small_face_set}
+        edge_to_face: dict[tuple[int, int], list[int]] = {}
+        for fidx in small_face_set:
+            face = mesh.faces[fidx]
+            for k in range(3):
+                key = (
+                    min(int(face[k]), int(face[(k + 1) % 3])),
+                    max(int(face[k]), int(face[(k + 1) % 3])),
+                )
+                edge_to_face.setdefault(key, []).append(fidx)
+
+        for neighbors in edge_to_face.values():
+            for i in range(len(neighbors)):
+                for j in range(i + 1, len(neighbors)):
+                    a, b = neighbors[i], neighbors[j]
+                    if a in face_adj and b in face_adj:
+                        face_adj[a].append(b)
+                        face_adj[b].append(a)
+
+        # BFS cluster
+        visited: set[int] = set()
+        for start in small_face_set:
+            if start in visited:
+                continue
+            cluster: list[int] = []
+            queue = [start]
+            while queue:
+                cur = queue.pop()
+                if cur in visited:
+                    continue
+                visited.add(cur)
+                cluster.append(cur)
+                queue.extend(n for n in face_adj.get(cur, []) if n not in visited)
+
+            if not cluster:
+                continue
+
+            # Reject oversized clusters — a long curved strip produces many small
+            # triangles that join into a large cluster with no real small feature.
+            if len(cluster) > 50:
+                continue
+
+            cluster_verts = np.array(
+                [vertices[v] for f in cluster for v in mesh.faces[f]]
+            )
+            extents = cluster_verts.max(axis=0) - cluster_verts.min(axis=0)
+            diag = float(np.linalg.norm(extents))
+            if diag < min_size_mm * 2:
+                # Surface-area guard: reject clusters whose area is smaller than
+                # a circular pocket of min_size_mm radius (likely just noise).
+                cluster_area = sum(
+                    float(mesh.area_faces[f])
+                    for f in cluster
+                    if f < len(mesh.area_faces)
+                )
+                min_area = math.pi * (min_size_mm / 2) ** 2 * 0.25
+                if cluster_area < min_area:
+                    continue
+                centroid = cluster_verts.mean(axis=0)
+                centroids.append(
+                    [float(centroid[0]), float(centroid[1]), float(centroid[2])]
+                )
+                face_indices.extend(cluster)
+                count += 1
+
+    except Exception as exc:
+        logger.warning("small feature detection failed: %s", exc)
+
+    return count, centroids[:100], face_indices[:500]
+
+
+def detect_small_features_sdf(
+    mesh: trimesh.Trimesh,
+    min_size_mm: float,
+    max_grid: int = 256,
+) -> tuple[int, list[list[float]], list[int]]:
+    """Find features whose maximum inscribed sphere radius is below threshold.
+
+    Voxelises the mesh, computes a Euclidean distance transform on the
+    interior, and flags connected interior regions whose local SDF stays
+    below ``min_size_mm / 2``.  This is the geometrically-correct definition
+    of "small feature" — independent of mesh tessellation density (the
+    edge-length proxy in :func:`detect_small_features` fires on fine
+    tessellation regardless of true feature size).
+
+    Gates: only runs on watertight, winding-consistent meshes.  Voxel pitch
+    is chosen so the grid stays under ``max_grid`` voxels per axis (256³ ≈
+    67 MB at float32).  Returns ``(0, [], [])`` if the mesh fails the gates,
+    or if scipy is unavailable.
+    """
+    import trimesh as _tm
+
+    if not isinstance(mesh, _tm.Trimesh):
+        return 0, [], []
+    if min_size_mm <= 0 or len(mesh.faces) < 4:
+        return 0, [], []
+    if not (mesh.is_watertight and mesh.is_winding_consistent):
+        return 0, [], []
+
+    try:
+        from scipy.ndimage import distance_transform_edt
+        from scipy.ndimage import label as ndlabel
+        from scipy.spatial import cKDTree
+    except ImportError:
+        return 0, [], []
+
+    extents = mesh.extents
+    if extents is None or np.any(extents <= 0):
+        return 0, [], []
+    bbox_diag = float(np.linalg.norm(extents))
+    pitch = max(min_size_mm / 3.0, bbox_diag / float(max_grid))
+
+    try:
+        vox = mesh.voxelized(pitch=pitch)
+    except Exception as exc:
+        logger.warning("SDF voxelisation failed: %s", exc)
+        return 0, [], []
+
+    matrix = np.asarray(vox.matrix)
+    if matrix.size == 0 or matrix.ndim != 3:
+        return 0, [], []
+    if matrix.size > max_grid**3 * 2:
+        # safety bail — should not hit thanks to pitch clamp but defensive
+        return 0, [], []
+
+    interior = matrix.astype(np.uint8)
+    sdf = distance_transform_edt(interior).astype(np.float32) * pitch
+    threshold = min_size_mm / 2.0
+    candidate = (interior > 0) & (sdf > 0) & (sdf < threshold)
+    if not candidate.any():
+        return 0, [], []
+
+    labels, n_labels = ndlabel(candidate)
+    if n_labels == 0:
+        return 0, [], []
+
+    region_centroids: list[list[float]] = []
+    bounds_min = np.asarray(vox.bounds[0], dtype=float)
+    for lbl in range(1, n_labels + 1):
+        coords = np.argwhere(labels == lbl)
+        if coords.size == 0:
+            continue
+        # Drop tiny regions: a single voxel below threshold is noise.
+        if coords.shape[0] < 2:
+            continue
+        c_vox = coords.mean(axis=0)
+        c_world = bounds_min + (c_vox + 0.5) * pitch
+        region_centroids.append(
+            [float(c_world[0]), float(c_world[1]), float(c_world[2])]
+        )
+
+    if not region_centroids:
+        return 0, [], []
+
+    # Map each region centroid to its nearest face for overlay generation.
+    try:
+        tree = cKDTree(mesh.triangles_center)
+        _, idx = tree.query(np.array(region_centroids), k=1)
+        face_indices: list[int] = [int(i) for i in np.atleast_1d(idx).tolist()]
+    except Exception:
+        face_indices = []
+
+    return len(region_centroids), region_centroids[:100], face_indices[:500]
+
+
+def detect_small_features_occ(
+    occ_features: list[Any],  # list[OccFeature]
+    min_size_mm: float,
+    mesh: trimesh.Trimesh | None = None,
+    face_tag_to_tri: dict[int, list[int]] | None = None,
+    max_overlay_faces: int = 500,
+) -> tuple[int, list[list[float]], list[int]]:
+    """Detect features smaller than min_size_mm using CAD B-Rep topology.
+
+    Uses OCC-extracted feature data instead of triangle edge lengths, so
+    tessellation density on curved surfaces does not produce false positives.
+
+    For each OCC feature the "feature size" is derived from geometry:
+    - cylinder / hole: ``2 * radius_mm``
+    - torus fillet:    ``2 * minor_radius_mm`` (minor tube radius)
+    - planar face:     ``bbox_min_mm`` (AABB short side) — avoids flagging
+                       long-thin slot walls because their sqrt(area) looks small
+    - cone:            ``2 * apex_radius_mm``
+    - freeform:        ``sqrt(area_mm2)`` last resort
+
+    Overlay face indices use the OCC face_tag → tri_indices map when provided
+    (exact topology), falling back to a spatial centroid search on the mesh.
+
+    Args:
+        occ_features:      OCC feature list from ``analyze_step_brep``.
+        min_size_mm:       Minimum acceptable feature size in mm.
+        mesh:              Cascadio-produced trimesh (Z-up, mm) for spatial fallback.
+        face_tag_to_tri:   OCC face tag → STL triangle index list (from analyze_step_brep).
+        max_overlay_faces: Cap on returned face indices.
+
+    Returns:
+        (count, centroids, face_indices)
+    """  # noqa: E501
+    count = 0
+    centroids: list[list[float]] = []
+    face_indices: list[int] = []
+
+    try:
+        import math as _math
+
+        # Pre-compute triangle centroids once for spatial fallback.
+        tri_centroids: npt.NDArray[Any] | None = None
+        if mesh is not None and hasattr(mesh, "triangles_center"):
+            with contextlib.suppress(Exception):
+                tri_centroids = np.asarray(mesh.triangles_center)
+
+        for feat in occ_features:
+            params = feat.parameters if hasattr(feat, "parameters") else {}
+            feat_type = feat.feature_type if hasattr(feat, "feature_type") else ""
+            area_mm2 = float(feat.area_mm2) if hasattr(feat, "area_mm2") else 0.0
+            centroid = feat.centroid if hasattr(feat, "centroid") else None
+
+            # Derive canonical "feature size" from CAD geometry.
+            # For cylinders and holes: radius_mm is the cylinder radius.
+            # For torus fillets: radius_mm is the minor (tube) radius, which
+            # determines printability — not the large sweep radius (major_radius_mm).
+            if "radius_mm" in params:
+                feature_size_mm = 2.0 * float(params["radius_mm"])
+            elif "apex_radius_mm" in params:
+                feature_size_mm = 2.0 * float(params["apex_radius_mm"])
+            elif feat_type == "planar_face":
+                # Use the AABB short side (bbox_min_mm) so long-thin slot walls
+                # (e.g. 40×0.5 mm) are correctly flagged by their 0.5 mm width,
+                # not by sqrt(area)=4.5 mm which would skip them.
+                bbox_min = float(getattr(feat, "bbox_min_mm", 0.0))
+                feature_size_mm = (
+                    bbox_min
+                    if bbox_min > 1e-3
+                    else (
+                        2.0 * _math.sqrt(area_mm2 / _math.pi) if area_mm2 > 0 else 0.0
+                    )
+                )
+            elif area_mm2 > 0:
+                # Last resort for freeform / unclassified surfaces.
+                feature_size_mm = 2.0 * _math.sqrt(area_mm2 / _math.pi)
+            else:
+                continue  # not enough information
+
+            if feature_size_mm <= 0 or feature_size_mm >= min_size_mm:
+                continue  # feature is large enough — not a DFM concern
+
+            if centroid is None:
+                continue
+
+            count += 1
+            centroids.append(
+                [float(centroid[0]), float(centroid[1]), float(centroid[2])]
+            )
+
+            if len(face_indices) >= max_overlay_faces:
+                continue
+
+            # Prefer topology-correct face lookup via face_tag → tri_indices map.
+            feat_tag = feat.face_tag if hasattr(feat, "face_tag") else -1
+            if face_tag_to_tri is not None and feat_tag in face_tag_to_tri:
+                tris = face_tag_to_tri[feat_tag]
+                remaining = max_overlay_faces - len(face_indices)
+                face_indices.extend(tris[:remaining])
+            elif tri_centroids is not None:
+                # Spatial fallback: search radius covers the face footprint.
+                search_r = max(
+                    _math.sqrt(area_mm2) if area_mm2 > 0 else feature_size_mm,
+                    min_size_mm * 1.5,
+                )
+                c = np.array(
+                    [float(centroid[0]), float(centroid[1]), float(centroid[2])]
+                )
+                dists = np.linalg.norm(tri_centroids - c, axis=1)
+                nearby = np.where(dists <= search_r)[0].tolist()
+                remaining = max_overlay_faces - len(face_indices)
+                face_indices.extend(nearby[:remaining])
+
+    except Exception as exc:
+        logger.warning("OCC-based small feature detection failed: %s", exc)
+
+    return count, centroids[:100], face_indices[:max_overlay_faces]
+
+
+# ---------------------------------------------------------------------------
+# Escape hole analysis (powder/resin removal)
+# ---------------------------------------------------------------------------
+
+
+def detect_escape_hole_risk(
+    mesh: trimesh.Trimesh,
+    min_hole_diameter_mm: float,
+    bodies: list[Any] | None = None,
+    precomputed_holes: list[HoleFeature] | None = None,
+) -> tuple[bool, list[list[float]], list[int]]:
+    """Flag enclosed hollow volumes that lack an adequately-sized escape hole.
+
+    Strategy:
+    1. Detect hollow regions via mesh splitting (existing approach).
+    2. For each hollow region, check if there are holes ≥ min_hole_diameter_mm
+       in the vicinity. If not, flag as risk.
+
+    Args:
+        mesh: The mesh to analyse.
+        min_hole_diameter_mm: Minimum escape hole diameter threshold.
+        bodies: Optional pre-split body list — avoids calling mesh.split() again
+                when the caller has already done so (T2c optimisation).
+        precomputed_holes: Optional pre-computed holes list — avoids calling
+                           detect_holes_mesh again (T2e optimisation).
+
+    Returns:
+        (has_risk, centroids_of_risky_regions, face_indices)
+    """
+    import trimesh
+
+    hollow_centroids: list[list[float]] = []
+    face_indices: list[int] = []
+
+    try:
+        if not isinstance(mesh, trimesh.Trimesh):
+            return False, [], []
+        if not mesh.is_watertight:
+            return False, [], []
+
+        if bodies is None:
+            split = mesh.split()
+            if isinstance(split, trimesh.Trimesh):
+                return False, [], []
+            if isinstance(split, trimesh.Scene):
+                bodies = list(split.geometry.values())
+            else:
+                return False, [], []
+
+        bodies = [b for b in bodies if isinstance(b, trimesh.Trimesh)]
+        if len(bodies) <= 1:
+            return False, [], []
+
+        if precomputed_holes is not None:
+            # Filter to only holes at or above the required diameter
+            holes = [
+                h for h in precomputed_holes if h.diameter_mm >= min_hole_diameter_mm
+            ]
+        else:
+            holes = detect_holes_mesh(mesh, min_diameter_mm=min_hole_diameter_mm)
+
+        for body in bodies:
+            if body.is_watertight:
+                centroid = body.centroid
+                # Check if a hole passes through this region
+                has_escape = any(
+                    abs(h.center[2] - float(centroid[2])) < h.depth_mm * 0.5
+                    and np.linalg.norm(np.array(h.center[:2]) - np.array(centroid[:2]))
+                    < body.extents.max()
+                    for h in holes
+                )
+                if not has_escape:
+                    hollow_centroids.append(
+                        [
+                            float(centroid[0]),
+                            float(centroid[1]),
+                            float(centroid[2]),
+                        ]
+                    )
+
+    except Exception as exc:
+        logger.warning("escape hole analysis failed: %s", exc)
+
+    return len(hollow_centroids) > 0, hollow_centroids, face_indices
+
+
+# ---------------------------------------------------------------------------
+# Hollow detection (generic — for SLA resin trapping)
+# ---------------------------------------------------------------------------
+
+
+def detect_hollow_regions(
+    mesh: trimesh.Trimesh,
+) -> tuple[list[list[float]], list[int]]:
+    """Detect enclosed hollow volumes (resin trapping risk for SLA/resin).
+
+    Returns:
+        (centroids, face_indices)
+    """
+    import trimesh
+
+    hollow_centroids: list[list[float]] = []
+    face_indices: list[int] = []
+
+    try:
+        if not isinstance(mesh, trimesh.Trimesh) or not mesh.is_watertight:
+            return [], []
+
+        split = mesh.split()
+        if isinstance(split, trimesh.Trimesh):
+            return [], []
+
+        if isinstance(split, trimesh.Scene):
+            for body in split.geometry.values():
+                if isinstance(body, trimesh.Trimesh) and body.is_watertight:
+                    c = body.centroid
+                    hollow_centroids.append([float(c[0]), float(c[1]), float(c[2])])
+
+    except Exception as exc:
+        logger.warning("hollow region detection failed: %s", exc)
+
+    return hollow_centroids[:50], face_indices
+
+
+# ---------------------------------------------------------------------------
+# Pin detection (approximate)
+# ---------------------------------------------------------------------------
+
+
+def detect_thin_pins(
+    mesh: trimesh.Trimesh,
+    min_diameter_mm: float,
+    precomputed_cylinders: list[CylindricalFeature] | None = None,
+) -> tuple[int, list[list[float]], list[int]]:
+    """Detect protruding pin/column features below the minimum diameter.
+
+    A pin is a CONVEX cylindrical patch (surface normals point away from the
+    axis) with near-full angular coverage — the exact mirror of a hole.  The
+    previous implementation filtered the hole list, which can never contain
+    pins, so this check silently never fired.
+
+    Args:
+        mesh: The mesh to analyse.
+        min_diameter_mm: Minimum pin diameter threshold for the process.
+        precomputed_cylinders: Optional pre-computed cylindrical features
+                               (computed at min_diameter ≤ 0.1 mm).
+
+    Returns:
+        (count, centroids, face_indices)
+    """
+    try:
+        cylinders = (
+            precomputed_cylinders
+            if precomputed_cylinders is not None
+            else detect_cylindrical_features(mesh, min_diameter_mm=0.05)
+        )
+        pins = [
+            c
+            for c in cylinders
+            if not c.concave
+            and c.coverage_rad >= FULL_CYLINDER_COVERAGE_RAD
+            and c.diameter_mm < min_diameter_mm
+            # A stub shorter than its own diameter is a bump, not a fragile pin.
+            and c.depth_mm >= 0.6 * c.diameter_mm
+        ]
+        count = len(pins)
+        centroids = [p.center for p in pins]
+        face_indices = [f for p in pins for f in p.face_indices]
+        return count, centroids, face_indices
+    except Exception as exc:
+        logger.warning("thin pin detection failed: %s", exc)
+        return 0, [], []
+
+
+# ---------------------------------------------------------------------------
+# Embossed / engraved detail detection (approximate)
+# ---------------------------------------------------------------------------
+
+
+def detect_embossed_engraved(
+    mesh: trimesh.Trimesh,
+    min_width_mm: float,  # noqa: ARG001
+    min_height_mm: float,
+) -> tuple[int, list[list[float]], list[int]]:
+    """Detect raised or recessed surface details below dimensional thresholds.
+
+    Strategy:
+    - Identify top-facing faces only.
+    - Compute the dominant top surface by area-weighted Z level.
+    - Flag nearby raised/recessed top faces whose height is below the
+      process detail-height threshold.
+    - Apply dihedral-angle guard to skip smooth-surface tessellation.
+    - Cluster adjacent flagged faces via BFS.
+    - Validate cluster size (bounding-box diagonal ≤ 10× emboss height).
+    - Report cluster count, not raw triangle count.
+
+    Returns:
+        (count, centroids, face_indices)
+    """
+    import trimesh
+
+    count = 0
+    centroids: list[list[float]] = []
+    face_indices: list[int] = []
+
+    try:
+        if not isinstance(mesh, trimesh.Trimesh) or len(mesh.faces) < 20:
+            return 0, [], []
+
+        face_centroids_arr = mesh.triangles_center
+        face_normals = mesh.face_normals
+        vertices = mesh.vertices
+
+        # Only inspect top-facing faces. Bottom faces are not visible/details on
+        # the printed top surface and previously caused structural undersides to
+        # be reported as small embossed/engraved regions.
+        up_mask = face_normals[:, 2] > 0.7
+
+        if not np.any(up_mask) or np.sum(up_mask) < 20:
+            return 0, [], []  # Too few upward-facing faces to fit a reference
+
+        up_centroids = face_centroids_arr[up_mask]
+        up_indices = np.where(up_mask)[0]
+
+        # Compute an area-weighted dominant top plane instead of a raw median.
+        # Complex bracket/ring parts can have many horizontal structural levels;
+        # the broadest level is the only useful reference for small decorative
+        # details on STL meshes.
+        z_tolerance = max(min_height_mm * 0.05, 0.05)
+        z_bins: dict[int, tuple[float, float]] = {}
+        for fidx, z in zip(up_indices, up_centroids[:, 2], strict=False):
+            area = (
+                float(mesh.area_faces[int(fidx)])
+                if fidx < len(mesh.area_faces)
+                else 0.0
+            )
+            key = int(round(float(z) / z_tolerance))
+            total_z, total_area = z_bins.get(key, (0.0, 0.0))
+            z_bins[key] = (total_z + float(z) * area, total_area + area)
+
+        if not z_bins:
+            return 0, [], []
+
+        _, (weighted_z, reference_area) = max(
+            z_bins.items(), key=lambda item: item[1][1]
+        )
+        if reference_area <= 0:
+            return 0, [], []
+        ref_z = weighted_z / reference_area
+
+        z_delta = np.abs(up_centroids[:, 2] - ref_z)
+        if float(np.max(z_delta)) < min_height_mm * 0.15:
+            return 0, [], []  # Insufficient height variation for detail features
+
+        # Pre-compute per-face dihedral angles to neighbors (copied from detect_small_features).  # noqa: E501
+        # A face on a smooth curved surface has low dihedral angles → tessellation artifact.  # noqa: E501
+        try:
+            face_adj_pairs = mesh.face_adjacency
+            adj_angles = mesh.face_adjacency_angles
+            max_dihedral = np.zeros(len(mesh.faces), dtype=float)
+            for (fa, fb), angle in zip(face_adj_pairs, adj_angles, strict=False):
+                if angle > max_dihedral[fa]:
+                    max_dihedral[fa] = angle
+                if angle > max_dihedral[fb]:
+                    max_dihedral[fb] = angle
+            _SMOOTH_THRESHOLD = 0.09  # radians ≈ 5°  # noqa: N806
+        except Exception:
+            max_dihedral = None
+            _SMOOTH_THRESHOLD = 0.09  # noqa: N806
+
+        # A small embossed/engraved detail has a visible height/depth change, but
+        # that change is below the process minimum. Taller stepped surfaces are
+        # structural geometry, not a "small detail may be lost" warning.
+        min_detail_height = min_height_mm * 0.15
+        emboss_mask = (z_delta >= min_detail_height) & (z_delta < min_height_mm)
+        emboss_up_indices = up_indices[emboss_mask]
+
+        if len(emboss_up_indices) == 0:
+            return 0, [], []
+
+        # Apply dihedral-angle guard: skip faces on smooth surfaces.
+        flagged_set: set[int] = set()
+        for fidx in emboss_up_indices:
+            fidx_int = int(fidx)
+            if max_dihedral is not None and max_dihedral[fidx_int] < _SMOOTH_THRESHOLD:
+                continue
+            flagged_set.add(fidx_int)
+
+        if not flagged_set:
+            return 0, [], []
+
+        # Build face adjacency for clustering (same pattern as overhang/small_features).
+        edge_to_faces: dict[tuple[int, int], list[int]] = {}
+        for fidx in flagged_set:
+            face = mesh.faces[fidx]
+            for k in range(3):
+                edge_key = (
+                    min(int(face[k]), int(face[(k + 1) % 3])),
+                    max(int(face[k]), int(face[(k + 1) % 3])),
+                )
+                edge_to_faces.setdefault(edge_key, []).append(fidx)
+
+        face_adj: dict[int, list[int]] = {f: [] for f in flagged_set}
+        for neighbors in edge_to_faces.values():
+            for i in range(len(neighbors)):
+                for j in range(i + 1, len(neighbors)):
+                    a, b = neighbors[i], neighbors[j]
+                    if a in face_adj and b in face_adj:
+                        face_adj[a].append(b)
+                        face_adj[b].append(a)
+
+        # BFS clustering
+        visited: set[int] = set()
+        clusters: list[list[int]] = []
+        for start in flagged_set:
+            if start in visited:
+                continue
+            cluster: list[int] = []
+            queue = [start]
+            while queue:
+                cur = queue.pop()
+                if cur in visited:
+                    continue
+                visited.add(cur)
+                cluster.append(cur)
+                queue.extend(n for n in face_adj.get(cur, []) if n not in visited)
+
+            if cluster:
+                clusters.append(cluster)
+
+        # Validate clusters: reject oversized clusters and merge nearby ones.
+        # A "detail" is small by definition — use tighter bounds to avoid false positives.  # noqa: E501
+        # For FDM (emboss_height=2mm): max diagonal = 6mm (3× height), appropriate for pips (~3mm diameter).  # noqa: E501
+        max_cluster_diagonal = min_height_mm * 3.0
+        min_cluster_triangles = 3  # Reject noise (single triangles or tiny pairs)
+
+        valid_clusters: list[list[int]] = []
+        for cluster in clusters:
+            # Minimum size check: reject very small clusters (likely tessellation noise)
+            if len(cluster) < min_cluster_triangles:
+                continue
+
+            cluster_verts = np.array(
+                [vertices[v] for f in cluster for v in mesh.faces[f]]
+            )
+            extents = cluster_verts.max(axis=0) - cluster_verts.min(axis=0)
+            diag = float(np.linalg.norm(extents))
+            if diag <= max_cluster_diagonal:
+                valid_clusters.append(cluster)
+
+        if not valid_clusters:
+            return 0, [], []
+
+        # Merge clusters that are very close to each other (likely same feature split by tessellation).  # noqa: E501
+        # Use iterative merging: repeatedly merge closest pairs until no clusters are within merge_distance.  # noqa: E501
+        # Use 1.45× emboss height: fine-tuned to merge split pip clusters on dice.
+        merge_distance = min_height_mm * 1.45
+        min_feature_area = (
+            math.pi * (min_height_mm / 2) ** 2 * 0.25
+        )  # Minimum area threshold
+
+        # Pre-compute centroids and areas for all valid clusters
+        cluster_info: list[tuple[npt.NDArray[Any], float, list[int]]] = []
+        for cluster in valid_clusters:
+            cluster_verts = np.array(
+                [vertices[v] for f in cluster for v in mesh.faces[f]]
+            )
+            centroid = cluster_verts.mean(axis=0)
+            area = sum(
+                float(mesh.area_faces[f]) for f in cluster if f < len(mesh.area_faces)
+            )
+            cluster_info.append((centroid, area, cluster))
+
+        # Iteratively merge closest clusters within merge_distance
+        merged = True
+        while merged:
+            merged = False
+            # Find closest pair of clusters within merge_distance
+            best_i, best_j = -1, -1
+            best_dist = float("inf")
+
+            for i in range(len(cluster_info)):
+                for j in range(i + 1, len(cluster_info)):
+                    centroid_i, _, _ = cluster_info[i]
+                    centroid_j, _, _ = cluster_info[j]
+                    dist = float(np.linalg.norm(centroid_i - centroid_j))
+                    if dist < best_dist and dist <= merge_distance:
+                        best_dist = dist
+                        best_i, best_j = i, j
+
+            if best_i >= 0:
+                # Merge clusters best_j into best_i
+                _, area_i, cluster_i = cluster_info[best_i]
+                _, area_j, cluster_j = cluster_info[best_j]
+
+                # Compute new centroid as area-weighted average
+                total_area = area_i + area_j
+                verts_i = np.array(
+                    [vertices[v] for f in cluster_i for v in mesh.faces[f]]
+                )
+                verts_j = np.array(
+                    [vertices[v] for f in cluster_j for v in mesh.faces[f]]
+                )
+                new_centroid = (
+                    verts_i.mean(axis=0) * area_i + verts_j.mean(axis=0) * area_j
+                ) / total_area
+
+                merged_cluster = cluster_i + cluster_j
+                cluster_info[best_i] = (new_centroid, total_area, merged_cluster)
+                del cluster_info[best_j]
+                merged = True
+
+        # Filter by minimum area and aspect ratio to keep only circular features (pips).
+        # Elongated clusters (edges, corners) should be rejected.
+        merged_clusters: list[list[int]] = []
+        for centroid, area, cluster in cluster_info:  # noqa: B007
+            if area < min_feature_area:
+                continue
+
+            # Compute aspect ratio: check if cluster is roughly circular
+            cluster_verts = np.array(
+                [vertices[v] for f in cluster for v in mesh.faces[f]]
+            )
+            extents = cluster_verts.max(axis=0) - cluster_verts.min(axis=0)
+            # Sort extents to find the two largest dimensions (ignoring the smallest/depth dimension)  # noqa: E501
+            sorted_extents = sorted(
+                [float(extents[0]), float(extents[1]), float(extents[2])], reverse=True
+            )
+            # Aspect ratio = largest / second_largest. For a circle, this should be close to 1.  # noqa: E501
+            # Allow up to 2.5 to account for slightly oval pips and tessellation irregularities.  # noqa: E501
+            if sorted_extents[0] > 0:
+                aspect_ratio = sorted_extents[0] / max(sorted_extents[1], 1e-9)
+                if aspect_ratio <= 2.5:
+                    merged_clusters.append(cluster)
+
+        if not merged_clusters:
+            return 0, [], []
+
+        # Emit results: one centroid per merged cluster, all cluster faces.
+        count = len(merged_clusters)
+        for cluster in merged_clusters:
+            cluster_verts = np.array(
+                [vertices[v] for f in cluster for v in mesh.faces[f]]
+            )
+            centroid = cluster_verts.mean(axis=0)
+            centroids.append(
+                [float(centroid[0]), float(centroid[1]), float(centroid[2])]
+            )
+            face_indices.extend(cluster)
+
+    except Exception as exc:
+        logger.warning("embossed/engraved detection failed: %s", exc)
+
+    return count, centroids[:100], face_indices[:1000]
+
+
+# ---------------------------------------------------------------------------
+# Connecting parts clearance (multi-body assemblies)
+# ---------------------------------------------------------------------------
+
+
+def detect_connecting_clearance(
+    mesh: trimesh.Trimesh,
+    min_clearance_mm: float,
+    bodies: list[Any] | None = None,
+) -> tuple[int, list[list[float]], list[int]]:
+    """Detect insufficient clearance between separate mesh bodies.
+
+    Requires a multi-body mesh (e.g. an assembly uploaded as a single STL).
+    Uses scipy KD-tree to find the minimum distance between body pairs.
+
+    Args:
+        mesh: The mesh to analyse.
+        min_clearance_mm: Minimum required clearance in mm.
+        bodies: Optional pre-split body list — avoids calling mesh.split() again
+                when the caller has already done so (T2d optimisation).
+
+    Returns:
+        (count_of_violations, centroids_at_violation, face_indices)
+    """
+    import trimesh
+
+    count = 0
+    centroids: list[list[float]] = []
+    face_indices: list[int] = []
+
+    try:
+        if not isinstance(mesh, trimesh.Trimesh):
+            return 0, [], []
+
+        if bodies is None:
+            split = mesh.split()
+            if isinstance(split, trimesh.Trimesh):
+                return 0, [], []
+            if not isinstance(split, trimesh.Scene):
+                return 0, [], []
+            bodies = list(split.geometry.values())
+
+        bodies = [b for b in bodies if isinstance(b, trimesh.Trimesh)]
+        if len(bodies) < 2:
+            return 0, [], []
+
+        from scipy.spatial import KDTree
+
+        for i in range(len(bodies)):
+            for j in range(i + 1, len(bodies)):
+                pts_a = bodies[i].vertices
+                pts_b = bodies[j].vertices
+                tree = KDTree(pts_b)
+                dists, _ = tree.query(pts_a, k=1)
+                min_dist = float(dists.min())
+                if min_dist < min_clearance_mm:
+                    # Find the closest point pair
+                    idx_a = int(np.argmin(dists))
+                    pt = pts_a[idx_a]
+                    centroids.append([float(pt[0]), float(pt[1]), float(pt[2])])
+                    count += 1
+
+    except Exception as exc:
+        logger.warning("connecting clearance detection failed: %s", exc)
+
+    return count, centroids, face_indices

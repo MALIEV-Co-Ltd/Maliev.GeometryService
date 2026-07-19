@@ -1,0 +1,49 @@
+name: Real Browser Worker Repeat Evidence
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches:
+      - develop
+      - staging
+      - main
+    paths:
+      - "src/client_runtime/**"
+      - "tests/client-runtime-browser-smoke.test.mjs"
+      - "tests/test_client_runtime_browser_smoke.py"
+      - ".github/workflows/real-browser-worker-repeat.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  real-browser-worker-repeat:
+    name: Real browser worker repeat evidence
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Run 10 real Chrome Web Worker repetitions
+        env:
+          MALIEV_BROWSER_PATH: /usr/bin/google-chrome
+        run: |
+          set -euo pipefail
+          test -x "${MALIEV_BROWSER_PATH}"
+          "${MALIEV_BROWSER_PATH}" --version
+          node --version
+          for repetition in $(seq 1 10); do
+            echo "::group::Real browser repetition ${repetition}/10"
+            node --test \
+              --test-name-pattern="browser runtime executes in a real Web Worker" \
+              tests/client-runtime-browser-smoke.test.mjs
+            echo "::endgroup::"
+          done
