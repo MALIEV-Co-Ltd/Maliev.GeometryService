@@ -3,7 +3,7 @@
 # production environments are identical (python:3.12-slim, OSMesa, Xvfb, gmsh).
 #
 # Stage 1: Build
-FROM python:3.12-slim AS builder
+FROM python:3.14-slim AS builder
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
@@ -30,7 +30,7 @@ COPY pyproject.toml poetry.lock* ./
 RUN poetry install --only main --no-root
 
 # Stage 2: Production
-FROM python:3.12-slim AS production
+FROM python:3.14-slim AS production
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
