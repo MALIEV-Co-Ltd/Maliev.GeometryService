@@ -555,7 +555,7 @@ class TestMultiBodyPerformance:
         import time
 
         # Create dict with 10 bodies
-        ten_body_dict = {i: b"fake_stl" for i in range(10)}
+        ten_body_dict = dict.fromkeys(range(10), b"fake_stl")
 
         with patch("src.core.geometry._analyze_single_body") as mock_analyze:
             mock_analyze.return_value = sample_dfm_report_single
