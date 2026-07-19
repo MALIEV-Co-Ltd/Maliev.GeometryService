@@ -713,7 +713,8 @@ def _render_single_view(
     )
 
     pl = pv.Plotter(off_screen=True, window_size=[size, size], lighting=None)
-    pl.set_background([255, 255, 255])
+    # PyVista 0.48's decorator typing loses the bound Plotter instance.
+    pl.set_background([255, 255, 255])  # type: ignore[arg-type]
     pl.enable_anti_aliasing("msaa")
 
     # Shaded body mesh
@@ -775,6 +776,8 @@ def _render_single_view(
     img = pl.screenshot(transparent_background=False, return_img=True)
     pl.close()
 
+    if img is None:
+        raise RuntimeError("PyVista did not return the rendered image")
     pil_img = Image.fromarray(img)
     buf = io.BytesIO()
     save_kwargs: dict[str, Any] = {"format": fmt}
@@ -4793,7 +4796,7 @@ def _generate_overlays_worker(
                 if category == "thin_wall":
                     # Uniform mid-severity gradient (exact per-face values require
                     # ray-cast thickness not yet available here).
-                    severity_per_face = {fi: 0.5 for fi in face_indices}
+                    severity_per_face = dict.fromkeys(face_indices, 0.5)
 
                 try:
                     glb = generate_overlay_glb(
