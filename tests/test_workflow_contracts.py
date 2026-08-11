@@ -20,7 +20,7 @@ def test_validation_workflows_are_pinned_and_deployment_free() -> None:
     workflow_text = "\n".join(
         path.read_text(encoding="utf-8") for path in WORKFLOWS.glob("*.yml")
     )
-    assert "actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0" in workflow_text
+    assert "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1" in workflow_text
     assert (
         "actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97" in workflow_text
     )
