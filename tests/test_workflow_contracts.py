@@ -22,7 +22,7 @@ def test_validation_workflows_are_pinned_and_deployment_free() -> None:
     )
     assert "actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0" in workflow_text
     assert (
-        "actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1" in workflow_text
+        "actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97" in workflow_text
     )
     assert (
         "snok/install-poetry@a783c322200f0519c7926aa6faa857c4e23e9263" in workflow_text
