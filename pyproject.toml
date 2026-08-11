@@ -9,8 +9,8 @@ packages = [{include = "src"}]
 [tool.poetry.dependencies]
 python = "^3.10"
 cadquery = "^2.4"
-fastapi = ">=0.115.14,<0.140.0"
-uvicorn = {extras = ["standard"], version = ">=0.34.3,<0.52.0"}
+fastapi = ">=0.115.14,<0.142.0"
+uvicorn = {extras = ["standard"], version = ">=0.34.3,<0.53.0"}
 scalar-fastapi = "^1.5.0"
 trimesh = {extras = ["all"], version = "^4.10.1"}
 numpy = "^2.2.0"
@@ -42,7 +42,7 @@ pytest-asyncio = "^1.4.0"
 pytest-xdist = "^3.6.0"
 pytest-timeout = "^2.3.1"
 mypy = "^2.3.0"
-ruff = ">=0.8.6,<0.16.0"
+ruff = ">=0.8.6,<0.17.0"
 black = "^24.10.0"
 types-aiofiles = "^25.1.0.20251011"
 pre-commit = "^4.5.1"
