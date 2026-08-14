@@ -703,48 +703,41 @@ numpy = "*"
 
 [[package]]
 name = "cascadio"
-version = "0.0.17"
+version = "0.1.1"
 description = "Convert STEP files to GLB using OpenCASCADE"
 optional = false
-python-versions = ">=3.7"
+python-versions = ">=3.9"
 groups = ["main"]
 files = [
-    {file = "cascadio-0.0.17-cp310-cp310-macosx_10_9_x86_64.whl", hash = "sha256:a7c3c813e81bbfeb4883802c403ef6f00dd70cff1fd5434e19c4ac7ee9b53b8d"},
-    {file = "cascadio-0.0.17-cp310-cp310-macosx_11_0_arm64.whl", hash = "sha256:3ee3306530b43a0564230bd7225f73dcedeefd44a5f72983e97897d0ee0a8a6c"},
-    {file = "cascadio-0.0.17-cp310-cp310-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:653971ce3090cde40a9eb8113a1df08d54ae40838bd486918fe9b944181915bf"},
-    {file = "cascadio-0.0.17-cp310-cp310-win_amd64.whl", hash = "sha256:58fd5996169a1d77987cbcdab4731a91f0b9329dda0f93687bc76087d8b6ed4c"},
-    {file = "cascadio-0.0.17-cp311-cp311-macosx_10_9_x86_64.whl", hash = "sha256:29150778be08848d6ac804ff3924ffe166cbcbfe317f0ff19b51d392f0fc79da"},
-    {file = "cascadio-0.0.17-cp311-cp311-macosx_11_0_arm64.whl", hash = "sha256:37156fdb5f0884075fed6b7cee2abce823d0f8ae9f2ca7f4120fab1e70597968"},
-    {file = "cascadio-0.0.17-cp311-cp311-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:73ee0b0892b9e5305ea83e1770d7ce89614b25de835eb71ce0026fa264f6840b"},
-    {file = "cascadio-0.0.17-cp311-cp311-win_amd64.whl", hash = "sha256:1b4d0fc3dfff1d440c475f3dd7e6944b3a5be561a7b40e8588b02da2c98729c6"},
-    {file = "cascadio-0.0.17-cp312-cp312-macosx_10_13_x86_64.whl", hash = "sha256:82753a075593c9295dce4d5952bb378719d033fc3af3de4ab0199e70f82725db"},
-    {file = "cascadio-0.0.17-cp312-cp312-macosx_11_0_arm64.whl", hash = "sha256:9e53708fc7ecd3ff1df54d8b44f1ab5dbfff823548195ed2cdc420eaae3c4911"},
-    {file = "cascadio-0.0.17-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:e5549886d0e27dd27ae57bf6d2c93b84cf2ee63734bb59d8484e478ff9d352a3"},
-    {file = "cascadio-0.0.17-cp312-cp312-win_amd64.whl", hash = "sha256:6c10ba634b512567680a1cef304f53e12fa309b1ffffc49bd74e4ff0d60f8f14"},
-    {file = "cascadio-0.0.17-cp313-cp313-macosx_10_13_x86_64.whl", hash = "sha256:b00cce90f397f162a5cf00b7a39f5717f0429897d31c4bcd2ffaf4f65fbb7be0"},
-    {file = "cascadio-0.0.17-cp313-cp313-macosx_11_0_arm64.whl", hash = "sha256:81ec2ddcfea1032bb624a34dace5770196f7fecba6138bfe351b72938e33609d"},
-    {file = "cascadio-0.0.17-cp313-cp313-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:3a70ed80484e33e73f4bccd63dc21443fb213e0fe68a07315e9d26e06b410c57"},
-    {file = "cascadio-0.0.17-cp313-cp313-win_amd64.whl", hash = "sha256:2310c4e37bb33324cfbd78af922f911b83b291c3fc267b7df27bcba0bd9dcd55"},
-    {file = "cascadio-0.0.17-cp314-cp314-macosx_10_15_x86_64.whl", hash = "sha256:bd5c7b5fdf22ea39689fc8759cba3c70431f1c57340a742b4a73a13771c48ac6"},
-    {file = "cascadio-0.0.17-cp314-cp314-macosx_11_0_arm64.whl", hash = "sha256:edabcaffa12855e23e77955f10c212db54628b437cffea7473d6bf67dce08a17"},
-    {file = "cascadio-0.0.17-cp314-cp314-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:5061c904e7bb30a07f7b5bdfa55e09d5132da27eed46a4adae72a743c97ff1fb"},
-    {file = "cascadio-0.0.17-cp314-cp314-win_amd64.whl", hash = "sha256:8f69ff5db561620a8f4250c028ec39505e0d330f4fc56a1c15fdfbf41504b307"},
-    {file = "cascadio-0.0.17-cp314-cp314t-macosx_10_15_x86_64.whl", hash = "sha256:50ecb8ea3b543fdc5bb65e332b6da1e2e5141e5fab4364dad8ea3564c864e515"},
-    {file = "cascadio-0.0.17-cp314-cp314t-macosx_11_0_arm64.whl", hash = "sha256:5b7018e61490790a82960dcf5c610ccd3f2622cde162bbc2b8ac4110c140c66b"},
-    {file = "cascadio-0.0.17-cp314-cp314t-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:1da79dc13d634edf604828ebf7d4853d33ea7f172c79e9c48d2248a14be0c49c"},
-    {file = "cascadio-0.0.17-cp314-cp314t-win_amd64.whl", hash = "sha256:70102ab76ca4ee8c1bcbc93e155869234160baa234be9c8bf65035e051b000cc"},
-    {file = "cascadio-0.0.17-cp38-cp38-macosx_10_9_x86_64.whl", hash = "sha256:1a732010b340eeec235ae680a59f450c3a89cb5f8486d4e64437cdbba4498a5b"},
-    {file = "cascadio-0.0.17-cp38-cp38-macosx_11_0_arm64.whl", hash = "sha256:457c5bb6fdb752b42ebd4c9013e7da01e64ae67e7b1648825f256a9dde079628"},
-    {file = "cascadio-0.0.17-cp38-cp38-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:25a690eab2f66a6375c173e975424042d7152c6d57014cef9105e71a1799ea40"},
-    {file = "cascadio-0.0.17-cp38-cp38-win_amd64.whl", hash = "sha256:4132950b7c3680d9828fb8645672c6c1dbd308ba00b97af82cdc7c0685432164"},
-    {file = "cascadio-0.0.17-cp39-cp39-macosx_10_9_x86_64.whl", hash = "sha256:9fd315d237c35fefa02b261bcf44354e84a741faf70cede9c4ac6b41d1e94dda"},
-    {file = "cascadio-0.0.17-cp39-cp39-macosx_11_0_arm64.whl", hash = "sha256:88d87547e6d734f880060323cb0a170d3e528d58bdc835ce48246e8942ebfb99"},
-    {file = "cascadio-0.0.17-cp39-cp39-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:dcfd8b4fa5901d1a6669a4db6ca49afedcb0502622105d828c3f233549bfa389"},
-    {file = "cascadio-0.0.17-cp39-cp39-win_amd64.whl", hash = "sha256:c3c51d75c48ed7033b0f3f3876faf2ba041ca75630e26b0e02d8932c96a95232"},
+    {file = "cascadio-0.1.1-cp310-cp310-macosx_11_0_arm64.whl", hash = "sha256:fa89a2edde4a419c62fec84815e33503315a04c712347974f0a85352b9e471e6"},
+    {file = "cascadio-0.1.1-cp310-cp310-macosx_11_0_x86_64.whl", hash = "sha256:31c9fe09cda86b275e941b26f899e5dd25c72a637e72f18edb2810a409bd0c22"},
+    {file = "cascadio-0.1.1-cp310-cp310-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:48eba1180fa8ad22a5396a556415f6eb14ba4194ded385f27e6394550105eefb"},
+    {file = "cascadio-0.1.1-cp310-cp310-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:f3d2835dc6c4719acc33bdae12330c0a87dc8c01808bd7757d914be7fd1636e6"},
+    {file = "cascadio-0.1.1-cp310-cp310-win_amd64.whl", hash = "sha256:4bf54cf0815b7dea798a6df8de5afc4e165437f6d89319737f37fc3b6717e044"},
+    {file = "cascadio-0.1.1-cp311-cp311-macosx_11_0_arm64.whl", hash = "sha256:d5f12fbf06ba37f20af6771d69afe48c06c9502d89cfb46c6c9c5a3f2c3cc0d8"},
+    {file = "cascadio-0.1.1-cp311-cp311-macosx_11_0_x86_64.whl", hash = "sha256:135c0197e2421901b57405d0fc386383c9a7953ba8a0cf3233cae47c63645b48"},
+    {file = "cascadio-0.1.1-cp311-cp311-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:e7c8a4a0447ece2be0db9f55154aa276d10973f47ac613772e3d5acbe8167b34"},
+    {file = "cascadio-0.1.1-cp311-cp311-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:ac5be9ad00124b35b4f702ff4152124baec7f3b1cf254bb2b341191ea1a2ed2c"},
+    {file = "cascadio-0.1.1-cp311-cp311-win_amd64.whl", hash = "sha256:d1a04bfc5dba8dc085982079aa76b7b72ace2b51a0c4ed1364b2153ba81020c7"},
+    {file = "cascadio-0.1.1-cp312-abi3-macosx_11_0_arm64.whl", hash = "sha256:32b6f4f2a749e99c54609a1afcf03b8e522344d84c42b69d221eaff783946f30"},
+    {file = "cascadio-0.1.1-cp312-abi3-macosx_11_0_x86_64.whl", hash = "sha256:18303485bd19dc156dce54340a5327a3971a751490833e0c4db89eae120b4a7d"},
+    {file = "cascadio-0.1.1-cp312-abi3-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:88c0cc218f29942a98c806c4377b93c1ef57154221813cf95a1e0f352e95b96f"},
+    {file = "cascadio-0.1.1-cp312-abi3-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:9f17efee8ac97483984eedee315d3637f5f28375af524005bd62035d8d2546c6"},
+    {file = "cascadio-0.1.1-cp312-abi3-win_amd64.whl", hash = "sha256:b89abd140fb84e27914535d116ffac2bd98bbf14f59436f2cbca0fdda6bf8b86"},
+    {file = "cascadio-0.1.1-cp314-cp314t-macosx_11_0_arm64.whl", hash = "sha256:88c0e48944874691ff0706ce87f597202b4f740e693831f11d538e0b3345caca"},
+    {file = "cascadio-0.1.1-cp314-cp314t-macosx_11_0_x86_64.whl", hash = "sha256:638c3bdb28bd7b422fe5d7b36e48673108fb079efa241b8e15563275eed38a7a"},
+    {file = "cascadio-0.1.1-cp314-cp314t-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:123d48b21dea0a593f8d14f607f2bfc5fe33e3041faba6f8810fae332d82bfb9"},
+    {file = "cascadio-0.1.1-cp314-cp314t-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:a6d255983ae2d9c03a6cd97c2379b1e844e9c291a3e541b7cfbe7798d86be498"},
+    {file = "cascadio-0.1.1-cp314-cp314t-win_amd64.whl", hash = "sha256:8d4bbaed4381fa4e38ba873dc68342a30bdf905eb3c94dc026bca60516d84c11"},
+    {file = "cascadio-0.1.1-cp39-cp39-macosx_11_0_arm64.whl", hash = "sha256:46d4adfb5e0f74eb8955616fad61fd931e7b6bf4dae2d832d4f1bc7a18774b87"},
+    {file = "cascadio-0.1.1-cp39-cp39-macosx_11_0_x86_64.whl", hash = "sha256:c1d8a187fc8cd93a1d069aebb296b0ea4e41d88d0116f3b22c4d181158bed015"},
+    {file = "cascadio-0.1.1-cp39-cp39-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:52165126a3e1f98fa877a9f6516842f0385bc93ff45780aa194ab1a4e35b0f33"},
+    {file = "cascadio-0.1.1-cp39-cp39-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:2ee6a79ddd16445ffcd08c8b7d05d4a518621a4dd515630cdfedd72bca4c69d4"},
+    {file = "cascadio-0.1.1-cp39-cp39-win_amd64.whl", hash = "sha256:03f8472cd0653d85fa0268a6b0fd688ae464fe7a9ed9833046925691679bb28a"},
 ]
 
 [package.extras]
-tests = ["chardet", "pytest", "trimesh"]
+tests = ["chardet", "jsonschema", "pytest", "trimesh"]
 
 [[package]]
 name = "certifi"
