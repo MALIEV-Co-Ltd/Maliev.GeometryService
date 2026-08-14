@@ -1,4 +1,4 @@
-aio-pika==9.5.8 ; python_version >= "3.10" and python_version < "4.0"
+aio-pika==9.6.2 ; python_version >= "3.10" and python_version < "4.0"
 aiofiles==25.1.0 ; python_version >= "3.10" and python_version < "4.0"
 aiormq==6.9.2 ; python_version >= "3.10" and python_version < "4.0"
 annotated-types==0.8.0 ; python_version >= "3.10" and python_version < "4.0"
